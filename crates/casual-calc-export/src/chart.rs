@@ -196,7 +196,7 @@ pub fn build(
         let Some(bytes) = retained_bytes(workbook, path) else {
             continue;
         };
-        let tuned = retune_series(&bytes, chart);
+        let tuned = retune_grouping(&retune_series(&bytes, chart), chart);
         if tuned != bytes {
             chart_parts.push((path.to_owned(), tuned));
         }
@@ -386,6 +386,64 @@ fn anchor_rel_ids(block: &str) -> Vec<String> {
 /// The nth `<c:ser>` is the nth modelled series, which is how the importer read
 /// them. A part with more series than the model leaves the extras untouched
 /// rather than guessing.
+/// Rewrite a retained chart part's `<c:grouping val="…"/>` in place.
+///
+/// `CHT-16`. `CHT-05` fixed what detaching *loses* — the model carries grouping
+/// now, so rebuilding no longer discards it. It did not stop the detach, and a
+/// rebuilt part still drops every formatting element the model has no field
+/// for, which in a real chart is most of them. Editing the value where it sits
+/// is the stronger form, and the one `docs/84` §7 D asks for.
+///
+/// **Only the attribute's own characters change.** The element is found, its
+/// `val="…"` span located, and the new token written between the quotes; every
+/// other byte — the gradient fills, the data-point overrides, the manual
+/// layout — survives untouched, which is the entire reason this exists rather
+/// than a rebuild.
+///
+/// The value is passed through [`ChartGrouping::from_val`] against the group
+/// element that actually holds it, so a `clustered` arriving for a `lineChart`
+/// leaves the file alone instead of writing a token the schema forbids — the
+/// same rule [`group_head`] applies when generating.
+fn retune_grouping(existing: &str, chart: &ChartView) -> String {
+    let Some(wanted) = chart.grouping else {
+        return existing.to_owned();
+    };
+    let mut out = existing.to_owned();
+    let mut cursor = 0;
+    // Every group element in the part, because a combo chart has more than one
+    // and each states its own grouping.
+    while let Some((open, body, _, _)) = element_span(&out, "grouping", cursor) {
+        // Which group is this inside? The nearest enclosing `*Chart` element
+        // decides which tokens the schema permits here.
+        let element = out[..open]
+            .rfind("Chart")
+            .and_then(|end| {
+                let start = out[..end].rfind('<')?;
+                let name = &out[start + 1..end + "Chart".len()];
+                name.rsplit(':').next().map(str::to_owned)
+            })
+            .unwrap_or_default();
+        let Some(token) = ChartGrouping::from_val(&element, wanted.as_str()) else {
+            cursor = body;
+            continue;
+        };
+        let head = &out[open..body];
+        let Some(v) = head.find("val=\"") else {
+            cursor = body;
+            continue;
+        };
+        let value_start = open + v + 5;
+        let Some(close) = out[value_start..body].find('"') else {
+            cursor = body;
+            continue;
+        };
+        let value_end = value_start + close;
+        out.replace_range(value_start..value_end, token.as_str());
+        cursor = value_start + token.as_str().len();
+    }
+    out
+}
+
 fn retune_series(existing: &str, chart: &ChartView) -> String {
     let mut out = String::with_capacity(existing.len());
     let mut cursor = 0;

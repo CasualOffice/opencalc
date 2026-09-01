@@ -573,6 +573,36 @@ pub fn session_create_chart(
     Ok(index)
 }
 
+/// Can this edit be written into the chart's retained part, or must it detach?
+///
+/// `CHT-16`. Split out from [`session_set_chart`] so it can be tested at all:
+/// the caller is a `wasm_bindgen` entry point that needs a live session, and
+/// this decision is the whole of the behaviour worth checking.
+///
+/// **Retunable**, and therefore not a reason to detach: the series references
+/// (`retune_series`), the frame (`retune_anchors`, which lives in the drawing
+/// rather than the chart part), and the grouping (`retune_grouping`).
+///
+/// **Everything else detaches.** Keeping a part that says one thing while the
+/// model says another is the file disagreeing with itself, which is what the
+/// unconditional detach was protecting against and remains right. The kind is
+/// the clearest case: a column chart becoming a pie shares almost no structure
+/// with the part that described it.
+fn retunable_in_place(
+    chart: &casual_calc_model::ChartView,
+    kind: casual_calc_model::ChartKind,
+    title: &str,
+    legend: Option<&str>,
+    x_title: &str,
+    y_title: &str,
+) -> bool {
+    chart.kind == kind
+        && chart.title == title
+        && chart.legend.as_deref() == legend
+        && chart.x_title == x_title
+        && chart.y_title == y_title
+}
+
 /// Replace a chart's definition.
 ///
 /// This is what detaches an imported chart: the retained part described the
@@ -594,7 +624,33 @@ pub fn session_set_chart(sheet: usize, index: usize, json: &str) -> Result<Strin
         let Some(chart) = data.charts.get_mut(index) else {
             return;
         };
-        chart.kind = chart_kind_from(&wire.kind);
+        // **What can be written into the retained part, and what cannot**
+        // (`CHT-16`). Detaching unconditionally meant a drag, a resize or a
+        // grouping change threw away the hundreds of formatting elements the
+        // model has no field for — a chart came back from Excel plainer than it
+        // went, for an edit that had nothing to do with its appearance.
+        //
+        // Three things are retunable in place: the series references
+        // (`retune_series`), the frame (`retune_anchors`, in the drawing), and
+        // now the grouping (`retune_grouping`). Everything else still detaches,
+        // because keeping a part that says one thing while the model says
+        // another is the file disagreeing with itself — which is what the
+        // unconditional detach was protecting against and remains right.
+        //
+        // Compared *before* the fields are overwritten, or there is nothing
+        // left to compare against.
+        let kind_now = chart_kind_from(&wire.kind);
+        let legend_now = wire.legend.clone().filter(|p| !p.is_empty());
+        let retunable_only = retunable_in_place(
+            chart,
+            kind_now,
+            &wire.title,
+            legend_now.as_deref(),
+            &wire.x_title,
+            &wire.y_title,
+        );
+
+        chart.kind = kind_now;
         chart.title = wire.title;
         chart.anchor = CellRange::new(
             CellRef::new(wire.anchor[0], wire.anchor[1]),
@@ -610,7 +666,7 @@ pub fn session_set_chart(sheet: usize, index: usize, json: &str) -> Result<Strin
         // chart on every drag.
         let previous = std::mem::take(&mut chart.series);
         chart.series = merged_series(wire.series, &previous);
-        chart.legend = wire.legend.filter(|p| !p.is_empty());
+        chart.legend = legend_now;
         chart.from_offset = casual_calc_model::Emu {
             x: wire.from_offset[0],
             y: wire.from_offset[1],
@@ -621,7 +677,9 @@ pub fn session_set_chart(sheet: usize, index: usize, json: &str) -> Result<Strin
         };
         chart.x_title = wire.x_title;
         chart.y_title = wire.y_title;
-        dropped = chart.detach().unwrap_or_default();
+        if !retunable_only {
+            dropped = chart.detach().unwrap_or_default();
+        }
     })?;
     Ok(dropped)
 }
@@ -2215,5 +2273,96 @@ mod chart_wire_tests {
     #[test]
     fn an_unknown_grouping_token_is_not_a_clearing() {
         assert_eq!(super::chart_grouping_from("diagonal"), None);
+    }
+}
+
+#[cfg(test)]
+mod retunable_tests {
+    use super::retunable_in_place;
+    use casual_calc_model::{CellRange, CellRef, ChartKind, ChartView};
+
+    fn chart() -> ChartView {
+        let mut c = ChartView::new(
+            CellRange::new(CellRef::new(0, 0), CellRef::new(9, 5)),
+            ChartKind::Column,
+        );
+        c.title = "Revenue".to_owned();
+        c.legend = Some("r".to_owned());
+        c.x_title = "Month".to_owned();
+        c.y_title = "GBP".to_owned();
+        c
+    }
+
+    /// The case this row exists for: only the grouping moved, so the retained
+    /// part can be edited and its formatting kept.
+    #[test]
+    fn a_grouping_change_alone_does_not_detach() {
+        let c = chart();
+        assert!(retunable_in_place(
+            &c,
+            ChartKind::Column,
+            "Revenue",
+            Some("r"),
+            "Month",
+            "GBP"
+        ));
+    }
+
+    /// And the guard on the other side. Each of these changes something the
+    /// part states and `retune_*` cannot rewrite, so keeping it would leave the
+    /// file disagreeing with the model — the thing the unconditional detach was
+    /// right about.
+    #[test]
+    fn anything_the_part_states_and_we_cannot_rewrite_still_detaches() {
+        let c = chart();
+        for (what, kind, title, legend, x, y) in [
+            ("kind", ChartKind::Pie, "Revenue", Some("r"), "Month", "GBP"),
+            (
+                "title",
+                ChartKind::Column,
+                "Costs",
+                Some("r"),
+                "Month",
+                "GBP",
+            ),
+            (
+                "legend",
+                ChartKind::Column,
+                "Revenue",
+                Some("b"),
+                "Month",
+                "GBP",
+            ),
+            (
+                "legend removed",
+                ChartKind::Column,
+                "Revenue",
+                None,
+                "Month",
+                "GBP",
+            ),
+            (
+                "x title",
+                ChartKind::Column,
+                "Revenue",
+                Some("r"),
+                "Quarter",
+                "GBP",
+            ),
+            (
+                "y title",
+                ChartKind::Column,
+                "Revenue",
+                Some("r"),
+                "Month",
+                "USD",
+            ),
+        ] {
+            assert!(
+                !retunable_in_place(&c, kind, title, legend, x, y),
+                "a changed {what} must still detach: the retained part states it \
+                 and nothing here can rewrite it"
+            );
+        }
     }
 }

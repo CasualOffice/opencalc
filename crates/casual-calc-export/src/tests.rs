@@ -4989,6 +4989,59 @@ xmlns:a=\"http://schemas.openxmlformats.org/drawingml/2006/main\">\
         ])
     }
 
+    /// **A stacked-to-clustered edit keeps the formatting the model cannot
+    /// describe** (`CHT-16`).
+    ///
+    /// `CHT-05` fixed what detaching *loses*: the model carries grouping now, so
+    /// a rebuild no longer converts a stacked chart to a clustered one. It did
+    /// not stop the detach, and a rebuilt part still drops every element the
+    /// model has no field for — which in a chart anybody has formatted is most
+    /// of the file.
+    ///
+    /// The marker here is a gradient fill on the plot area. Nothing in
+    /// `ChartView` can hold it, so it survives only if the retained part is
+    /// edited rather than replaced. Asserting on the grouping alone would pass
+    /// against a rebuild, which is exactly what this row is about.
+    #[test]
+    fn changing_the_grouping_keeps_formatting_the_model_cannot_hold() {
+        const MARKER: &str = "<a:gradFill><a:gsLst><a:gs pos=\"0\"><a:srgbClr val=\"FF0000\"/></a:gs></a:gsLst></a:gradFill>";
+        let plot = format!(
+            "<c:barChart><c:barDir val=\"col\"/><c:grouping val=\"stacked\"/>\
+<c:spPr>{MARKER}</c:spPr>{}{}</c:barChart>{}",
+            ser(0, "Rev", "B", ""),
+            ser(1, "Cost", "C", ""),
+            axes(1, 2),
+        );
+        let mut wb = import_package(package(&chart_part(&plot)))
+            .unwrap()
+            .workbook;
+        assert!(
+            wb.sheets[0].charts[0].part.is_some(),
+            "the chart came from a file"
+        );
+
+        // What `session_set_chart` now does for a grouping change: rewrite the
+        // model and **keep** the part, because this is expressible in place.
+        wb.sheets[0].charts[0].grouping = Some(ChartGrouping::Clustered);
+
+        let written = write_workbook(&wb).unwrap();
+        let part = xml_of(&written, "xl/charts/chart1.xml");
+
+        assert!(
+            part.contains("<c:grouping val=\"clustered\"/>"),
+            "the grouping was not rewritten in the retained part:\n{part}"
+        );
+        assert!(
+            !part.contains("val=\"stacked\""),
+            "the old grouping is still in the file:\n{part}"
+        );
+        assert!(
+            part.contains("gradFill"),
+            "the gradient the model cannot describe was dropped, which is the \
+             detach this row is about:\n{part}"
+        );
+    }
+
     /// Open the package, drag the chart two columns to the left, save. The drag
     /// is deliberately something that has **nothing to do with what the chart
     /// is** — it changes only the anchor.
