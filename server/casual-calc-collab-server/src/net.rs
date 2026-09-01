@@ -204,7 +204,14 @@ impl Default for Limits {
             }),
             // Comfortably above a large submission and far below a memory
             // problem. A client with more to say than this is misbehaving.
-            max_message_bytes: 4 * 1024 * 1024,
+            //
+            // **Taken from the client's own constant, not repeated** (`COL-63`).
+            // A frame over this is not refused, it closes the connection, so
+            // the two sides disagreeing is not a warning — it is a dropped
+            // session with nothing said. `ClientSession::flush` fills a chunk
+            // to a budget under this number; if this one moved and that one
+            // did not, every large paste would take the socket down again.
+            max_message_bytes: casual_calc_transaction::session::MAX_FRAME_BYTES,
             idle_eviction_ms: 30_000,
             tick_ms: 1_000,
             presence_ttl_ms: crate::presence::DEFAULT_TTL_MS,

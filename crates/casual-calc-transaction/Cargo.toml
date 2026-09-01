@@ -11,10 +11,14 @@ publish = false
 casual-calc-model = { path = "../casual-calc-model" }
 casual-calc-formula = { path = "../casual-calc-formula" }
 serde = { version = "1", features = ["derive"] }
+# Promoted from dev-dependencies for `COL-63`: a chunk has to be measured in the
+# bytes it will actually occupy on the wire, and that is JSON. Not a new
+# third-party dependency — `casual-calc-model` already carries it, so it was
+# always in this crate's tree; only the direct edge is new.
+serde_json = { version = "1", features = ["float_roundtrip"] }  # see casual-calc-model
 
 [dev-dependencies]
 casual-calc-eval = { path = "../casual-calc-eval" }
-serde_json = { version = "1", features = ["float_roundtrip"] }  # see casual-calc-model
 
 [lints]
 workspace = true

@@ -349,6 +349,7 @@ dependencies = [
  "casual-calc-formula",
  "casual-calc-model",
  "serde",
+ "serde_json",
 ]
 
 [[package]]
