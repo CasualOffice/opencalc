@@ -6112,11 +6112,70 @@ export let editSurface = null;
 /// A no-op in a browser, where `window.__opencalcNative` is absent and the key
 /// already arrives here — which is the behaviour being restored.
 let lastEditingReported = null;
-function reportEditing(editing) {
+function pushEditing(editing) {
   if (editing === lastEditingReported) return;
   lastEditingReported = editing;
   const native = window.__opencalcNative;
   if (native && native.setEditing) native.setEditing(editing).catch(() => {});
+}
+
+// **A cell is not the only place a person types** (`TAURI-018`).
+//
+// The shell releases the colliding accelerators while "an edit is open", and
+// for `TAURI-016` that meant a cell editor, because a cell editor was the case
+// in front of us. Every other text field in this application — Find, Replace,
+// the name box, rename, a note, the command palette, every dialog input — left
+// the shell believing nothing was being typed, so `Cmd/Ctrl+C` and `V` were
+// eaten by the native menu and ran the *document* command instead. Copy in a
+// note copied the selected cells; paste pasted them over the grid. In a
+// browser all of it worked, which is why it was reported from the desktop
+// build alone.
+//
+// So the question the shell is really asking is "is the user typing into a
+// text field", and `state.editing` answers a narrower one. Both are ORed here.
+let cellEditOpen = false;
+let textFieldFocused = false;
+
+/// Does this element take typed text?
+///
+/// Deliberately not "is an `<input>`": `find-case`, `find-whole` and
+/// `find-wildcards` are checkboxes and `zoom-slider` is a range, and releasing
+/// the clipboard chords while one of those has focus would put the bug back
+/// the other way round — `Cmd+C` over a focused checkbox would copy nothing.
+/// An `<input>` with no `type` defaults to text, so the empty string counts.
+function takesTypedText(el) {
+  if (!el) return false;
+  if (el.isContentEditable) return true;
+  const tag = (el.tagName || "").toLowerCase();
+  if (tag === "textarea") return true;
+  if (tag !== "input") return false;
+  return ["text", "search", "url", "tel", "email", "password", "number", ""]
+    .includes((el.getAttribute("type") || "").toLowerCase());
+}
+
+function reportEditing(editing) {
+  cellEditOpen = editing;
+  pushEditing(cellEditOpen || textFieldFocused);
+}
+
+/// Recomputed from `document.activeElement` rather than from the event target,
+/// because `focusout` fires *before* the next `focusin` and its target is the
+/// element being left. Reading the event would report "no text field" for the
+/// instant between two text fields and rebuild the menu twice for a move that
+/// changed nothing.
+function syncFocusedField() {
+  const next = takesTypedText(document.activeElement);
+  if (next === textFieldFocused) return;
+  textFieldFocused = next;
+  pushEditing(cellEditOpen || textFieldFocused);
+}
+
+if (typeof document !== "undefined") {
+  document.addEventListener("focusin", syncFocusedField);
+  // Deferred: at `focusout` time `document.activeElement` is still the element
+  // being left, or `body`. A timeout lets focus settle so a blur that lands on
+  // another text field never reports its way through `false`.
+  document.addEventListener("focusout", () => setTimeout(syncFocusedField, 0));
 }
 // The cell's text when the edit began, for Escape to restore.
 export let editOriginal = "";
