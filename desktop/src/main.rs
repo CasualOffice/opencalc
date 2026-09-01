@@ -245,7 +245,11 @@ fn self_check_report(app: tauri::AppHandle, failures: Vec<String>) {
 }
 
 #[tauri::command]
-fn clipboard_write(app: tauri::AppHandle, text: String, html: Option<String>) -> Result<(), String> {
+fn clipboard_write(
+    app: tauri::AppHandle,
+    text: String,
+    html: Option<String>,
+) -> Result<(), String> {
     use tauri_plugin_clipboard_manager::ClipboardExt;
     match html {
         Some(html) if !html.is_empty() => app
