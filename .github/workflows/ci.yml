@@ -1073,6 +1073,35 @@ jobs:
           fi
           du -sh "$dir"/* || true
           echo "bundled ${{ matrix.bundles }} for ${{ matrix.os }}"
+      # `TAURI-017`: a desktop entry that declares `MimeType=` and whose `Exec=`
+      # takes no field code cannot be handed a file. The freedesktop
+      # specification says so, and file managers filter such an entry out of
+      # "Open With" entirely — so the associations are declared, installed, and
+      # unusable. tauri-bundler writes `Exec={{exec}}` unconditionally, right
+      # above the `MimeType` line it just wrote, so this is the bundler's
+      # default rather than a mistake in our configuration; the fix is a
+      # template and this is what holds it in place.
+      #
+      # macOS cannot catch it: `Info.plist` needs no field code, so the same
+      # `fileAssociations` block works there and silently does nothing here.
+      - name: The Linux desktop entry can actually be handed a file
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          set -euo pipefail
+          deb="$(find desktop/${{ matrix.artifact }} -name '*.deb' -print -quit)"
+          [ -n "$deb" ] || { echo "::error::no .deb to inspect"; exit 1; }
+          work="$(mktemp -d)"
+          ( cd "$work" && ar x "$OLDPWD/$deb" && tar xf data.tar.* )
+          entry="$(find "$work/usr/share/applications" -name '*.desktop' -print -quit)"
+          [ -n "$entry" ] || { echo "::error::the .deb ships no desktop entry"; exit 1; }
+          echo "--- $(basename "$entry") ---"; cat "$entry"
+          mime="$(grep -c '^MimeType=' "$entry" || true)"
+          exec_line="$(grep '^Exec=' "$entry" || true)"
+          if [ "$mime" -gt 0 ] && ! printf '%s' "$exec_line" | grep -qE '%[fFuU]( |$)'; then
+            echo "::error::$exec_line declares MimeType but takes no file argument, so no file manager will offer this application"
+            exit 1
+          fi
+          echo "ok: $exec_line"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: desktop-${{ matrix.os }}
