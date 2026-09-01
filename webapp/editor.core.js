@@ -5903,6 +5903,23 @@ export async function clipToOS(s, cut) {
   // Write a formatted HTML table alongside the plain-text TSV so external apps
   // (Excel, Sheets, mail, docs) receive styling; fall back to text-only when
   // ClipboardItem isn't available or is blocked.
+  // **The desktop shell writes through the platform** (`TAURI-019`).
+  //
+  // `navigator.clipboard` answers `NotAllowedError` in that webview in both
+  // directions, with user activation present — probed in the running shell, so
+  // this is not the missing-gesture case the same error usually means. Every
+  // copy out of the desktop build therefore reached no other application at
+  // all. Checked before the browser path rather than after it, because the
+  // browser path does not *throw* there in a way worth falling back from: it
+  // rejects, and by then the branch that could have worked has been skipped.
+  const nativeClip = window.__opencalcNative;
+  if (nativeClip && nativeClip.clipboardWrite) {
+    try {
+      const html = wasm.session_copy_html(state.sheet, s.r0, s.c0, s.r1, s.c1);
+      await nativeClip.clipboardWrite(tsv, html);
+      return true;
+    } catch { return false; }
+  }
   try {
     const html = wasm.session_copy_html(state.sheet, s.r0, s.c0, s.r1, s.c1);
     if (navigator.clipboard.write && typeof ClipboardItem !== "undefined") {

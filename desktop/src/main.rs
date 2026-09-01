@@ -194,6 +194,52 @@ fn append_nodes(
 }
 
 /// Ask the editor for its menu, once it has one.
+/// Write the system clipboard through the platform, not through the webview.
+///
+/// `TAURI-019`. `navigator.clipboard` is refused outright in this webview.
+/// Probed in the running shell, both directions:
+///
+///     activation=true
+///     write=FAILED NotAllowedError: The request is not allowed by the user agent
+///     read=FAILED  NotAllowedError: The request is not allowed by the user agent
+///
+/// `activation=true` is the part worth keeping. This is **not** the missing
+/// user-gesture that the same error usually means in a browser: WKWebView and
+/// WebKitGTK decline the async clipboard API to embedded content whatever the
+/// activation state, so no arrangement of the call site would have fixed it.
+/// The clipboard has to be reached from the host process instead.
+///
+/// HTML is written alongside the text when there is any, because that is the
+/// flavour a paste into Excel or a browser picks up; without it every copy out
+/// of this application would be plain text.
+#[tauri::command]
+fn clipboard_write(app: tauri::AppHandle, text: String, html: Option<String>) -> Result<(), String> {
+    use tauri_plugin_clipboard_manager::ClipboardExt;
+    match html {
+        Some(html) if !html.is_empty() => app
+            .clipboard()
+            .write_html(html, Some(text))
+            .map_err(|e| e.to_string()),
+        _ => app.clipboard().write_text(text).map_err(|e| e.to_string()),
+    }
+}
+
+/// Read the system clipboard's text through the platform (`TAURI-019`).
+///
+/// **Text only, and that is a real limit rather than an oversight.** The plugin
+/// can write HTML but cannot read it, so a paste *from* another application
+/// arrives without its formatting where a browser tab would have kept it.
+/// `IO-13` carries that, named rather than left to be discovered.
+///
+/// An empty clipboard is `""` rather than an error: the plugin reports "nothing
+/// there" as a failure, and the caller's question is what the text is, not
+/// whether the platform enjoyed being asked.
+#[tauri::command]
+fn clipboard_read(app: tauri::AppHandle) -> String {
+    use tauri_plugin_clipboard_manager::ClipboardExt;
+    app.clipboard().read_text().unwrap_or_default()
+}
+
 #[tauri::command]
 fn publish_menu(window: WebviewWindow, model: String) -> Result<(), String> {
     let parsed = menu::parse(&model).map_err(|why| format!("unreadable menu model: {why}"))?;
@@ -703,6 +749,18 @@ const BOOTSTRAP: &str = r#"(function () {
       await invoke("stage_save_bytes", new Uint8Array(bytes));
       return await invoke("native_save_target", { force: !!force });
     },
+    // The system clipboard, reached through the platform (`TAURI-019`).
+    //
+    // `navigator.clipboard` answers NotAllowedError in this webview in both
+    // directions with user activation present, so the editor cannot use the
+    // API a browser gives it. The presence of these two on this object is what
+    // the editor tests for: absent in a tab, where the browser's own works.
+    async clipboardWrite(text, html) {
+      await invoke("clipboard_write", { text: String(text ?? ""), html: html || null });
+    },
+    async clipboardRead() {
+      return await invoke("clipboard_read");
+    },
     // This window is showing a different document now. `File ▸ New`: without
     // it the next Ctrl+S writes a blank workbook over the file that was open.
     async clearSaveTarget() {
@@ -843,9 +901,12 @@ fn agree_to_close(
 
 fn main() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_dialog::init())
         .manage(Shell::default())
         .invoke_handler(tauri::generate_handler![
+            clipboard_write,
+            clipboard_read,
             publish_menu,
             set_editing,
             set_capabilities,

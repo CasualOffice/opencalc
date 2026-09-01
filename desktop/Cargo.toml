@@ -39,6 +39,7 @@ tauri = { version = "2" }
 # raised on the main thread, and this is the piece that already knows how to get
 # there from a command. It is used from **Rust only** — no JavaScript calls
 # `plugin:dialog|*`, so none of its ACL permissions are granted.
+tauri-plugin-clipboard-manager = { version = "2" }
 tauri-plugin-dialog = { version = "2" }
 
 [build-dependencies]
