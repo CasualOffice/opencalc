@@ -123,6 +123,17 @@ export async function clipboardHtml(event) {
 export async function doPaste(event) {
   try {
     let osText = event?.clipboardData?.getData("text/plain") ?? "";
+    // The desktop shell reads through the platform (`TAURI-019`), because
+    // `navigator.clipboard.readText()` is refused in that webview. Without it
+    // `osText` stayed `""`, which this function reads as "the OS clipboard is
+    // unreadable, use our own snapshot" — so a paste from Excel silently
+    // pasted whatever OpenCalc had copied last, which is worse than failing.
+    if (!osText) {
+      const native = window.__opencalcNative;
+      if (native && native.clipboardRead) {
+        try { osText = (await native.clipboardRead()) || ""; } catch {}
+      }
+    }
     if (!osText) { try { osText = await navigator.clipboard.readText(); } catch {} }
     // Internal rich paste when the OS clipboard is unchanged from our copy (or
     // unreadable but we hold a snapshot); else paste the external text.
