@@ -2642,8 +2642,34 @@ async fn metrics_count_a_save_that_really_happened() {
     }
     assert!(!seen.0.lock().unwrap().is_empty(), "the document was saved");
 
-    let body = scrape(addr).await;
-    let after = counter(&body, "opencalc_saves_accepted_total");
+    // **Wait for the counter, not for the sink** (`CI-028`).
+    //
+    // The delivery above and the counter below are two different signals, and
+    // they are not simultaneous: `Deliver::put` fills the sink from *inside*
+    // the save callback, and `service_lifecycle` increments
+    // `saves_accepted` after that callback returns. So the loop above can
+    // break, and this scrape can run, in the window between them — which is
+    // the intermittent failure this test was reported for.
+    //
+    // Proved rather than argued: an awaited 300ms sleep placed between the
+    // callback and the `fetch_add` turns the flake into `the save moved the
+    // counter (0 -> 0)` every run. (A `std::thread::sleep` there proves
+    // nothing, because it blocks the current-thread runtime and stops this
+    // test from reaching the scrape at all.)
+    //
+    // Waiting on the assertion's own subject removes the ordering dependence
+    // entirely, and a counter that never moves still fails — the loop is
+    // bounded and the assertion is unchanged.
+    let mut body = scrape(addr).await;
+    let mut after = counter(&body, "opencalc_saves_accepted_total");
+    for _ in 0..80 {
+        if after > before {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        body = scrape(addr).await;
+        after = counter(&body, "opencalc_saves_accepted_total");
+    }
     assert!(
         after > before,
         "the save moved the counter ({before} -> {after}): {body}"
