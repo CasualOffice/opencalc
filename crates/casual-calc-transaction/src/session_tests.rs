@@ -8,6 +8,7 @@
 
 use casual_calc_model::{Cell, CellRef, CellValue, Id, Sheet, SheetId, Workbook};
 
+use crate::session::MAX_FRAME_BYTES;
 use crate::{
     Operation,
     session::{Base, ClientId, ClientSession, Commit, ServerSession, Submission},
@@ -1665,5 +1666,65 @@ fn a_refused_arrival_stops_the_client_rather_than_letting_it_drift() {
     assert!(
         client.is_desynced(),
         "resuming a desynced session must not clear it"
+    );
+}
+
+/// A paste too large for one frame is split, not sent as one that closes it.
+///
+/// `COL-63`. `flush` took every pending operation into a single chunk with no
+/// byte bound. The transport's frame cap is 4 MiB and a frame over it is not
+/// refused — the connection *closes*. At the 84 B per changed cell `SAVE-08`
+/// measured, a restore or a paste of more than roughly 50,000 changed cells
+/// reached it, and the work was then neither delivered nor kept: the user saw
+/// collaboration drop and nothing said why.
+///
+/// The assertion is about the bytes on the wire, so it measures them. A count
+/// of operations would be a restatement of the constant rather than a check of
+/// it, and would keep passing if the wire form grew.
+#[test]
+fn a_submission_never_exceeds_the_frame_the_transport_will_carry() {
+    let mut wb = seed();
+    let mut client = ClientSession::new(ClientId(1), 0);
+
+    // Comfortably past the cap: at ~84 B a cell this is several times 4 MiB,
+    // so a single unbounded chunk could not have fitted under any plausible
+    // envelope allowance.
+    for i in 0..200_000u32 {
+        client
+            .edit(&mut wb, write(i % 60_000, i % 40, f64::from(i)))
+            .expect("a local edit always applies");
+    }
+
+    let mut frames = 0;
+    let mut ops_delivered = 0;
+    // Acknowledged as they go, because `MAX_OUTSTANDING` would otherwise stop
+    // the flush long before the pending edits ran out — this test is about the
+    // size bound, and the in-flight bound is a different one.
+    while let Some(submission) = client.flush(&wb) {
+        let bytes = serde_json::to_vec(&submission).expect("a submission serialises");
+        assert!(
+            bytes.len() <= MAX_FRAME_BYTES,
+            "frame {frames} is {} bytes, over the {MAX_FRAME_BYTES}-byte cap the \
+             transport closes the connection for",
+            bytes.len(),
+        );
+        frames += 1;
+        ops_delivered += submission.ops.len();
+        let seq = submission.seq;
+        client.acknowledge(seq, seq);
+        assert!(
+            frames < 1_000,
+            "not converging: {frames} frames and still going"
+        );
+    }
+
+    assert!(
+        frames > 1,
+        "the premise is gone: {ops_delivered} operations fitted in one frame, so this \
+         test is no longer exercising the split"
+    );
+    assert_eq!(
+        ops_delivered, 200_000,
+        "every edit is delivered across the frames, not dropped at the boundary"
     );
 }

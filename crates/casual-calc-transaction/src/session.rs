@@ -250,6 +250,26 @@ struct Outstanding {
 /// to degrade to, being what this replaced.
 const MAX_OUTSTANDING: usize = 32;
 
+/// The largest frame the transport will carry, in bytes (`COL-63`).
+///
+/// **Stated once, here, because both sides have to agree and only one of them
+/// can be wrong quietly.** The collaboration server sets this as its WebSocket
+/// `max_message_size`; a frame over it is not refused but *closes the
+/// connection*, which is the failure this constant exists to prevent. The
+/// server reads it from this crate rather than repeating the number, so the
+/// two cannot drift.
+pub const MAX_FRAME_BYTES: usize = 4 * 1024 * 1024;
+
+/// What a chunk is allowed to reach before it is split.
+///
+/// Under the frame cap, not equal to it: the measurement below is of the
+/// operations, and the envelope around them — client id, sequence, base, and
+/// JSON's own punctuation — is not free. The margin is generous because the
+/// cost of being wrong is asymmetric: a chunk slightly smaller than it could
+/// have been costs one extra round trip, and a chunk slightly larger than the
+/// cap costs the connection.
+const CHUNK_BUDGET_BYTES: usize = MAX_FRAME_BYTES - (256 * 1024);
+
 /// The name and id of every sheet, by index — what an operation's sheet number
 /// means, which the transform needs and cannot look up itself (`FID-28`).
 fn sheet_names(workbook: &Workbook) -> Vec<(String, casual_calc_model::SheetId)> {
@@ -408,10 +428,25 @@ impl ClientSession {
         } else {
             Base::Chained
         };
+        // **Bounded by bytes, not only by count** (`COL-63`).
+        //
+        // This took every pending operation into one chunk with no size limit.
+        // At the 84 B per changed cell `SAVE-08` measured, a restore or a paste
+        // of more than ~50,000 changed cells exceeds the transport's frame cap
+        // — and a frame over that cap does not come back refused, it *closes
+        // the connection*. The work is then neither sent nor kept, and the user
+        // is told only that collaboration dropped.
+        //
+        // So the chunk is filled to a budget and the rest stays pending. That
+        // is not a new concept here: chunking, sequencing and `MAX_OUTSTANDING`
+        // already exist, and the next flush carries the remainder with the same
+        // machinery. A large paste becomes several round trips instead of one
+        // closed socket.
+        let taken = self.take_within_budget(workbook);
         self.chunks += 1;
         let chunk = Outstanding {
             seq: self.chunks,
-            ops: core::mem::take(&mut self.pending),
+            ops: taken,
         };
         let submission = self.package(&chunk, base, workbook);
         self.sent.push(chunk);
@@ -462,6 +497,38 @@ impl ClientSession {
     /// The workbook is required because an operation's handles mean nothing
     /// apart from the tables they index, and this is the last point at which
     /// those are to hand.
+    /// As many pending operations as fit in one frame, oldest first.
+    ///
+    /// Each operation is measured once, on its wire form, and the budget is
+    /// spent in order. Measuring the *whole* chunk and halving would package
+    /// the same operations several times; measuring each once is linear and
+    /// gives the same answer, because a JSON array's size is its elements plus
+    /// its separators.
+    ///
+    /// **At least one operation is always taken**, even when that one operation
+    /// is over the budget by itself. Returning an empty chunk would leave
+    /// `flush` looping on a submission it can never make, and a single
+    /// operation that large is a different problem (`COL-64`) — it cannot be
+    /// split by chunking, because chunking splits *between* operations. It goes
+    /// out, and the transport reports what the server says about it, which is
+    /// at least an answer.
+    fn take_within_budget(&mut self, workbook: &Workbook) -> Vec<Operation> {
+        let mut spent = 0usize;
+        let mut take = 0usize;
+        for op in &self.pending {
+            let wire = WireOperation::of(op.clone(), workbook);
+            let size = serde_json::to_vec(&wire).map(|v| v.len()).unwrap_or(0);
+            // `+ 1` for the comma this element needs in the array.
+            if take > 0 && spent + size + 1 > CHUNK_BUDGET_BYTES {
+                break;
+            }
+            spent += size + 1;
+            take += 1;
+        }
+        let rest = self.pending.split_off(take);
+        core::mem::replace(&mut self.pending, rest)
+    }
+
     fn package(&self, chunk: &Outstanding, base: Base, workbook: &Workbook) -> Submission {
         Submission {
             client: self.client,
