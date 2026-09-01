@@ -50,7 +50,7 @@
     <section id="downloads" class="section">
       <div class="wrap">
         <h2>Downloads</h2>
-        <p class="sub">Version 0.0.1. Checksums for every file are in <a href="https://github.com/CasualOffice/opencalc/releases/download/desktop-v0.0.1/SHA256SUMS.txt">SHA256SUMS.txt</a>.</p>
+        <p class="sub">Version 0.0.1. Checksums for every file are in <a href="https://github.com/CasualOffice/opencalc/releases/download/desktop-v0.0.2/SHA256SUMS.txt">SHA256SUMS.txt</a>.</p>
         <!-- **The visitor's own platform, resolved before they read anything**
              (`REL-06`). Three cards is the right *reference*, and it is the
              wrong first thing to meet: somebody who came to download does not
@@ -73,20 +73,20 @@
           <div class="dl-card">
             <h3>macOS</h3>
             <p class="dl-meta">Apple Silicon (M1 and later) · 9.9 MB</p>
-            <a class="btn btn-ink btn-lg" href="https://github.com/CasualOffice/opencalc/releases/download/desktop-v0.0.1/OpenCalc_0.0.1_aarch64.dmg">Download .dmg</a>
+            <a class="btn btn-ink btn-lg" href="https://github.com/CasualOffice/opencalc/releases/download/desktop-v0.0.2/OpenCalc_0.0.2_aarch64.dmg">Download .dmg</a>
             <p class="dl-warn">Intel Macs are not covered by this build. See <a href="#mac">the macOS note</a>.</p>
           </div>
           <div class="dl-card">
             <h3>Windows</h3>
             <p class="dl-meta">64-bit installer · 8.8 MB</p>
-            <a class="btn btn-ink btn-lg" href="https://github.com/CasualOffice/opencalc/releases/download/desktop-v0.0.1/OpenCalc_0.0.1_x64-setup.exe">Download installer</a>
+            <a class="btn btn-ink btn-lg" href="https://github.com/CasualOffice/opencalc/releases/download/desktop-v0.0.2/OpenCalc_0.0.2_x64-setup.exe">Download installer</a>
             <p class="dl-warn">SmartScreen will interrupt once. <a href="#windows">What to click.</a></p>
           </div>
           <div class="dl-card">
             <h3>Linux</h3>
             <p class="dl-meta">Portable AppImage · 84.6 MB · works on 22.04 and later</p>
-            <a class="btn btn-ink btn-lg" href="https://github.com/CasualOffice/opencalc/releases/download/desktop-v0.0.1/OpenCalc_0.0.1_amd64.AppImage">Download AppImage</a>
-            <p class="dl-meta">Or the <a href="https://github.com/CasualOffice/opencalc/releases/download/desktop-v0.0.1/OpenCalc_0.0.1_amd64.deb">.deb</a> (10.1 MB) — <strong>Ubuntu 23.04 or later only</strong>. <a href="#linux">Why.</a></p>
+            <a class="btn btn-ink btn-lg" href="https://github.com/CasualOffice/opencalc/releases/download/desktop-v0.0.2/OpenCalc_0.0.2_amd64.AppImage">Download AppImage</a>
+            <p class="dl-meta">Or the <a href="https://github.com/CasualOffice/opencalc/releases/download/desktop-v0.0.2/OpenCalc_0.0.2_amd64.deb">.deb</a> (10.1 MB) — <strong>Ubuntu 23.04 or later only</strong>. <a href="#linux">Why.</a></p>
           </div>
         </div>
       </div>
@@ -162,8 +162,8 @@
           without it does nothing at all, with no message — which is the most
           common reason this appears not to have downloaded properly.
         </p>
-        <pre class="code"><code>chmod +x OpenCalc_0.0.1_amd64.AppImage
-./OpenCalc_0.0.1_amd64.AppImage</code></pre>
+        <pre class="code"><code>chmod +x OpenCalc_0.0.2_amd64.AppImage
+./OpenCalc_0.0.2_amd64.AppImage</code></pre>
         <p>
           <strong>If it still does nothing</strong>, you are missing FUSE 2.
           AppImages mount themselves with it, Ubuntu 24.04 ships only FUSE 3,
@@ -173,7 +173,7 @@
         <pre class="code"><code>sudo apt install libfuse2t64      # Ubuntu 24.04
 sudo apt install libfuse2         # Ubuntu 22.04
 
-./OpenCalc_0.0.1_amd64.AppImage --appimage-extract-and-run   # or no install at all</code></pre>
+./OpenCalc_0.0.2_amd64.AppImage --appimage-extract-and-run   # or no install at all</code></pre>
 
         <h3 id="deb">The <code>.deb</code> needs Ubuntu 23.04 or later</h3>
         <p>
@@ -186,14 +186,14 @@ sudo apt install libfuse2         # Ubuntu 22.04
           Use the AppImage there. It carries its own copy of webkit2gtk and GTK
           — that is what the 84 MB is — so it does not use the system's at all.
         </p>
-        <pre class="code"><code>sudo dpkg -i OpenCalc_0.0.1_amd64.deb    # Ubuntu 23.04+
+        <pre class="code"><code>sudo dpkg -i OpenCalc_0.0.2_amd64.deb    # Ubuntu 23.04+
 sudo apt -f install                      # if it reports missing dependencies</code></pre>
 
         <h3 id="verify">Checking what you downloaded</h3>
         <p>
           Nothing here is signed, so a checksum is the only thing you can
           actually verify. Download
-          <a href="https://github.com/CasualOffice/opencalc/releases/download/desktop-v0.0.1/SHA256SUMS.txt">SHA256SUMS.txt</a>
+          <a href="https://github.com/CasualOffice/opencalc/releases/download/desktop-v0.0.2/SHA256SUMS.txt">SHA256SUMS.txt</a>
           into the same folder and run:
         </p>
         <pre class="code"><code>shasum -a 256 -c SHA256SUMS.txt --ignore-missing</code></pre>
@@ -232,20 +232,20 @@ sudo apt -f install                      # if it reports missing dependencies</c
       // browser, so the macOS note says what the build is rather than pretending
       // to know what the machine is.
       (function () {
-        var BASE = "https://github.com/CasualOffice/opencalc/releases/download/desktop-v0.0.1/";
+        var BASE = "https://github.com/CasualOffice/opencalc/releases/download/desktop-v0.0.2/";
         var ua = navigator.userAgent || "";
         var plat = (navigator.userAgentData && navigator.userAgentData.platform) || navigator.platform || "";
         var hay = (plat + " " + ua).toLowerCase();
         var pick = null;
         if (hay.indexOf("mac") >= 0) {
-          pick = { os: "macOS", file: "OpenCalc_0.0.1_aarch64.dmg", label: "Download the .dmg",
+          pick = { os: "macOS", file: "OpenCalc_0.0.2_aarch64.dmg", label: "Download the .dmg",
                    note: "Apple Silicon. On an Intel Mac, use the web editor \u2014 it is the same engine.",
                    bypass: "#mac" };
         } else if (hay.indexOf("win") >= 0) {
-          pick = { os: "Windows", file: "OpenCalc_0.0.1_x64-setup.exe", label: "Download the installer",
+          pick = { os: "Windows", file: "OpenCalc_0.0.2_x64-setup.exe", label: "Download the installer",
                    note: "64-bit. SmartScreen will interrupt once.", bypass: "#windows" };
         } else if (hay.indexOf("linux") >= 0 || hay.indexOf("x11") >= 0) {
-          pick = { os: "Linux", file: "OpenCalc_0.0.1_amd64.AppImage", label: "Download the AppImage",
+          pick = { os: "Linux", file: "OpenCalc_0.0.2_amd64.AppImage", label: "Download the AppImage",
                    note: "Works on 22.04 and later. The .deb needs Ubuntu 23.04 or newer.",
                    bypass: "#linux" };
         }
