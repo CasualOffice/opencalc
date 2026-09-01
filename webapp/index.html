@@ -19,6 +19,7 @@
         <nav class="nav-links">
           <a href="#product">Product</a>
           <a href="#today">What works</a>
+          <a href="#choose">Which one</a>
           <a href="#engine">Engine</a>
           <a href="#embed">Embed</a>
           <a href="#roadmap">Roadmap</a>
@@ -176,6 +177,84 @@
           </div>
         </div>
         <p class="io-note">Reads and writes <b>.xlsx</b> · imports and exports <b>CSV, TSV, PSV</b> · formatting, tables, charts, validation, protection, print setup and defined names survive the round-trip — and anything not yet modelled is carried through byte for byte rather than dropped.</p>
+      </div>
+    </section>
+
+    <!-- Which of the three -->
+    <section id="choose" class="section">
+      <div class="wrap">
+        <div class="today-head">
+          <div>
+            <p class="eyebrow">Three products, one engine</p>
+            <h2>Which one do you want?</h2>
+          </div>
+          <p class="today-sub">The engine above is the same in all three — the same import, the same 347 functions, the same writer. What differs is where it runs and what it is allowed to reach.</p>
+        </div>
+
+        <div class="matrix-scroll">
+          <table class="matrix">
+            <thead>
+              <tr>
+                <th scope="col"><span class="matrix-rowhead">&nbsp;</span></th>
+                <th scope="col">SDK<br /><span class="matrix-sub">@opencalc/sheet · 0.0.1</span></th>
+                <th scope="col">Desktop app<br /><span class="matrix-sub">0.0.3</span></th>
+                <th scope="col">Self&#8209;hosted<br /><span class="matrix-sub">three images · 0.0.1</span></th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <th scope="row">Where it runs</th>
+                <td>Your web page, as WebAssembly</td>
+                <td>macOS (Apple&nbsp;Silicon), Windows&nbsp;x64, Linux&nbsp;x64 — the engine as native Rust</td>
+                <td>Your servers — amd64 and arm64</td>
+              </tr>
+              <tr>
+                <th scope="row">How you get it</th>
+                <td><code>npm i @opencalc/sheet</code></td>
+                <td><code>.dmg</code> · <code>.exe</code> · <code>.deb</code> · <code>.AppImage</code></td>
+                <td><code>docker run casualoffice/calc</code></td>
+              </tr>
+              <tr>
+                <th scope="row">The whole engine — .xlsx, formulas, charts, pivots</th>
+                <td class="yes">Yes</td>
+                <td class="yes">Yes</td>
+                <td class="yes">Yes</td>
+              </tr>
+              <tr>
+                <th scope="row">Opening a file from the operating system</th>
+                <td>Through your own code — you hand it the bytes</td>
+                <td class="yes">Native dialogs, and double&#8209;click on <code>.xlsx .xlsm .ods .csv .tsv</code></td>
+                <td>Through the document host, or your own storage</td>
+              </tr>
+              <tr>
+                <th scope="row">Several people in one sheet at once</th>
+                <td class="no">No — a single&#8209;user editing surface</td>
+                <td class="yes">Yes, as a participant</td>
+                <td class="yes">Yes — this <em>is</em> the server that orders and relays</td>
+              </tr>
+              <tr>
+                <th scope="row">Fits into</th>
+                <td>A web component, or the React wrapper</td>
+                <td>The file types above</td>
+                <td>Nextcloud, ownCloud, SharePoint, Moodle, Alfresco — one discovery URL</td>
+              </tr>
+              <tr>
+                <th scope="row">Signed by the operating system</th>
+                <td class="na">Not applicable</td>
+                <td class="no">Not yet — <a href="download.html#mac">the bypass is two clicks</a>, and the download page walks through it</td>
+                <td class="na">Not applicable</td>
+              </tr>
+              <tr>
+                <th scope="row">Worth knowing</th>
+                <td>Each element carries its own engine, so page a long list in and out rather than mounting fifty. A pivot built here exports as its cells, not as a live Excel pivot.</td>
+                <td>Pasting <em>from</em> another application arrives as values without formatting. The <code>.deb</code> needs Ubuntu&nbsp;23.04 or newer; the AppImage runs on 22.04.</td>
+                <td>No Helm chart yet, and Redis is a single node. Prometheus metrics are on <code>/metrics</code>.</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <p class="io-note"><b>Not yet, in any of the three.</b> PDF export is written and tested in the engine but is not reachable from a published product — it ships when the Rust SDK does. <b>.xls</b> (the pre&#8209;2007 binary format) is refused rather than half&#8209;read; <b>.xlsm</b> opens, and its macros survive a round&#8209;trip byte for byte, but nothing here executes them. Custom worksheet functions written in JavaScript are deliberately absent — they would make a recalculation unrepeatable. Menus and toolbar tooltips are localized; panels and dialogs are still English.</p>
       </div>
     </section>
 
