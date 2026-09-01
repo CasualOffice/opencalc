@@ -10544,6 +10544,21 @@ export async function collaborate({ url, token, document: documentKey, onStatus,
   // §Share in `editor.presence.js`.
   setShareDefaults({ url, document: documentKey });
   const { collaborate: connect } = await import(`./collab.js?b=${BUILD}`);
+  // The one place this sentence is written (`COL-58`). Two files writing one
+  // status line is how a status line decays, so the wording lives here and
+  // both call sites below go through it.
+  //
+  //   * `desynced`   — same server; this client threw away its own state.
+  //   * `unresumed`  — a different server, which had never heard of it.
+  //   * `null`       — the cause has not arrived yet; say only the half that
+  //                    is true of both, rather than guessing one.
+  const lostNotice = (why) => {
+    const gone = "edits you made while disconnected were not saved";
+    if (why === "desynced") return `lost the shared history — ${gone}`;
+    if (why === "unresumed") return `reconnected to a different server — ${gone}`;
+    return gone;
+  };
+
   collabSession = connect({
     url,
     token,
@@ -10564,8 +10579,27 @@ export async function collaborate({ url, token, document: documentKey, onStatus,
       // is the point at which they have demonstrably read the grid.
       if (event.state === "lost") {
         collabLostUnsent = true;
-        status.textContent =
-          "reconnected to a different server — edits you made while disconnected were not saved";
+        // **The cause is not in this event, and this line used to claim one.**
+        //
+        // `COL-58`: it read "reconnected to a *different server*", which is
+        // false for a desync — there the client reconnected to the same server
+        // and abandoned its own state. The transport is deliberate about this
+        // split (`collab.js`): the status detail answers *what* went, which is
+        // the same either way, and the cause rides on the document event. So
+        // what is written here is the half that is true in both cases, and
+        // `onDocument` below replaces it with the specific sentence in the same
+        // tick. Written rather than skipped so a `lost` that somehow arrives
+        // without its document event still says something.
+        status.textContent = lostNotice(null);
+      } else if (event.state === "desynced") {
+        // `COL-57`: there was no branch here at all, so between the desync and
+        // the welcome — a few hundred milliseconds — the bar went on reading
+        // "reconnecting…", which is not what is happening. `COL-56` makes the
+        // *delivered* behaviour correct because `rejoin()` routes through the
+        // sticky `lost` path afterwards, but that is the state after the window
+        // rather than during it, and a host reading the transport's status got
+        // nothing for it.
+        status.textContent = "recovering the shared history…";
       } else if (event.state === "live") {
         collabLostUnsent = false;
         status.textContent = "collaborating";
@@ -10601,6 +10635,12 @@ export async function collaborate({ url, token, document: documentKey, onStatus,
       onStatus?.(event);
     },
     onDocument: (event) => {
+      // The cause arrives here, not on the status event (`COL-58`). It lands in
+      // the same tick as the `lost` status above, so the neutral sentence
+      // written there is replaced before a frame is painted — nobody sees two.
+      if (event.reason === "lost" && collabLostUnsent) {
+        status.textContent = lostNotice(event.why ?? null);
+      }
       adoptCollabDocument(event);
       onDocument?.(event);
     },
