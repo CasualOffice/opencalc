@@ -723,11 +723,47 @@ export async function start() {
     capText.textContent = cap;
     btn.appendChild(capText);
     btn.title = cap;
+
+    // **The popup is `position: fixed` and placed by script.**
+    //
+    // It was `position: absolute; top: 100%`, which put it just below a
+    // `.rb-panel` that is `overflow: hidden` — a rule added to stop the band
+    // growing a scrollbar. So the group opened and was clipped away entirely:
+    // the class toggled, `aria-expanded` went true, and nothing appeared. That
+    // is the worst shape of broken, because every check short of looking says
+    // it works.
+    //
+    // Fixed positioning takes it out of the clipping ancestor, which is exactly
+    // why `.popmenu` — the editor's own menus, which have always worked from
+    // inside the toolbar — is fixed too.
+    const place = () => {
+      const row = g.querySelector(".rb-row");
+      const r = btn.getBoundingClientRect();
+      row.style.left = "0px";
+      row.style.top = "0px";
+      const w = row.offsetWidth, h = row.offsetHeight;
+      let left = r.left;
+      if (left + w > window.innerWidth - 8) left = Math.max(8, window.innerWidth - 8 - w);
+      let top = r.bottom + 2;
+      if (top + h > window.innerHeight - 8) top = Math.max(8, r.top - 2 - h);
+      row.style.left = left + "px";
+      row.style.top = top + "px";
+    };
+
     btn.addEventListener("click", (e) => {
       e.stopPropagation();
+      // One open group at a time, like the editor's own menus.
+      for (const other of el.querySelectorAll(".rb-group.is-open")) {
+        if (other !== g) {
+          other.classList.remove("is-open");
+          other.querySelector(".rb-folded")?.setAttribute("aria-expanded", "false");
+        }
+      }
       const open = g.classList.toggle("is-open");
       btn.setAttribute("aria-expanded", open ? "true" : "false");
+      if (open) place();
     });
+
     g.classList.add("is-folded");
     g.insertBefore(btn, g.firstChild);
   }
@@ -826,6 +862,17 @@ export async function start() {
   select(ASSIGN[0].id);
   wireKeyTips(tablist, fileBtn);
 
+  // Close an open folded group when the click lands elsewhere. The button stops
+  // propagation for its own click, so this only ever sees outside ones.
+  const closeFolded = () => {
+    for (const g of el.querySelectorAll(".rb-group.is-open")) {
+      g.classList.remove("is-open");
+      g.querySelector(".rb-folded")?.setAttribute("aria-expanded", "false");
+    }
+  };
+  document.addEventListener("click", closeFolded);
+  el._closeFolded = closeFolded;
+
   // Proxy state follows the editor's own. `applyCommandRules()` and the
   // selection both change `disabled`/`aria-pressed` on the owning nodes;
   // watching the document is cheaper than guessing when that happens, and it
@@ -875,6 +922,7 @@ export function stop() {
   if (!el) return;
   el._obs?.disconnect();
   if (el._onResize) window.removeEventListener("resize", el._onResize);
+  if (el._closeFolded) document.removeEventListener("click", el._closeFolded);
   if (onKey) { document.removeEventListener("keydown", onKey); onKey = null; }
   // Reverse, so that the append fallback in `giveBack()` rebuilds the original
   // order rather than reversing it. And in a `try` apiece: one node that cannot

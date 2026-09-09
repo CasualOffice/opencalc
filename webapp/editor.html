@@ -9,7 +9,7 @@
     <!-- The ribbon chrome (`UX-RIB-04`, `docs/91`). Inert without the
          `.oc-chrome-ribbon` class, so loading it unconditionally costs the
          default chrome nothing and keeps the switch a one-class change. -->
-    <link rel="stylesheet" href="./ribbon.css?v=23" />
+    <link rel="stylesheet" href="./ribbon.css?v=24" />
     <link rel="stylesheet" href="./sheets.css?v=8" />
   </head>
   <body class="editor-body">
@@ -703,7 +703,7 @@
          would find half the editor and silently draw the half it found. -->
     <script type="module">
       import { ribbonRequested, start as startRibbon, stop as stopRibbon,
-               setChrome, chosenChrome } from "./ribbon.js?v=18";
+               setChrome, chosenChrome } from "./ribbon.js?v=19";
       import { start as startSheets, stop as stopSheets } from "./sheets.js?v=9";
       // The wait is for the *command layer*, not for `load`. Toolbar controls
       // are stamped with `data-oc-command` after boot and `buildMenuBar()`

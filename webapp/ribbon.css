@@ -651,12 +651,13 @@
 
 /* A folded group opens its own contents below itself — the same controls at the
  * same sizes, so nothing has to be learned twice. */
+/* `fixed`, not `absolute`: `.rb-panel` is `overflow: hidden` so an absolutely
+ * positioned popup below the band is clipped out of existence. Placed by
+ * `fold()`'s `place()`, the same way the editor anchors its own `.popmenu`. */
 .oc-chrome-ribbon .rb-group.is-folded.is-open > .rb-row {
   display: grid;
-  position: absolute;
-  z-index: 30;
-  top: 100%;
-  margin-top: 2px;
+  position: fixed;
+  z-index: 60;
   padding: 6px 8px;
   background: var(--oc-popover-background-color, var(--oc-background-color));
   border: 1px solid var(--oc-border-color);
