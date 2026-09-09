@@ -167,7 +167,19 @@
   color: var(--oc-text-color);
   font: inherit; font-size: 12px;
 }
-.oc-chrome-sheets .gs-bar .tb-combo-caret { width: 16px; min-width: 16px; border-radius: 8px; }
+/* The caret chevrons are `0 0 10 6` artwork, not the 24-unit icon set, so the
+ * blanket 18px/1.7 rule above would stretch them and render their stroke at
+ * 1.7 x (18/10) = 3px. Sized at their own scale here. */
+.oc-chrome-sheets .gs-bar .tb-combo-caret {
+  width: 16px; min-width: 16px; border-radius: 8px;
+  display: inline-flex; align-items: center; justify-content: center; padding: 0;
+}
+.oc-chrome-sheets .gs-bar .tb-combo-caret svg,
+.oc-chrome-sheets .gs-bar svg.tbc-caret {
+  width: 10px; height: 6px;
+  stroke-width: 1.6;
+  fill: none; stroke: currentColor;
+}
 
 /* ── Overflow ──────────────────────────────────────────────────────────────
  *

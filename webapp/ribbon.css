@@ -381,6 +381,18 @@
  * Without it the maths is honest: rendered weight = width x (16 / 24). 1.9 user
  * units gives 1.27px at 16, and 1.5 gives 1.25px at 20 — the same apparent
  * weight at both sizes, which is what makes a set read as one set. */
+/* **Only the 24-unit artwork.** The combo carets are drawn in a `0 0 10 6`
+ * viewBox, so forcing them to 16x16 stretched a 10-wide glyph to 16 and — much
+ * worse — rendered `stroke-width: 1.9` at 1.9 x (16/10) = 3px. That is why the
+ * font and size carets came out oversized and heavy beside everything else.
+ * Stroke width is in *user units*, so a rule that spans two viewBoxes cannot be
+ * right for both. */
+/* Note the shape of this selector. It was written with `:not(.tbc-caret)` to
+ * hold the carets out, and that made it *worse*: `:not()` contributes the
+ * specificity of its argument, so the exclusion scored 0,4,1 and beat the
+ * caret rule below at 0,3,1 — the thing meant to be exempted lost to the
+ * exemption. Plain selector here, and the caret rule wins on being more
+ * specific and later, which is how the cascade is supposed to settle it. */
 .oc-chrome-ribbon .rb-row svg,
 .oc-chrome-ribbon .rb-row .icon,
 .oc-chrome-ribbon .rb-btn svg {
@@ -416,8 +428,24 @@
 .oc-chrome-ribbon .rb-hosted.tb-combo,
 .oc-chrome-ribbon .rb-row > .menu-wrap { max-width: 150px; }
 .oc-chrome-ribbon .rb-row .tb-select { max-width: 110px; }
-.oc-chrome-ribbon .rb-row .tb-combo-caret,
-.oc-chrome-ribbon .rb-row .tbc-caret { width: 14px; height: 14px; flex: none; }
+/* The caret button, and the chevron inside it drawn at its own scale: a 10x6
+ * viewBox wants ~10x6 CSS px and a stroke of about 1.6 user units, which lands
+ * on roughly the same apparent weight as the 24-unit icons beside it. */
+.oc-chrome-ribbon .rb-row .tb-combo-caret {
+  width: 16px; min-width: 16px; height: 100%;
+  padding: 0; flex: none;
+  display: inline-flex; align-items: center; justify-content: center;
+}
+.oc-chrome-ribbon .rb-row .tb-combo-caret svg,
+.oc-chrome-ribbon .rb-row .menu-wrap .tb-combo-caret svg,
+.oc-chrome-ribbon .rb-row svg.tbc-caret,
+.oc-chrome-ribbon .rb-btn svg.tbc-caret {
+  width: 10px;
+  height: 6px;
+  stroke-width: 1.6;
+  fill: none;
+  stroke: currentColor;
+}
 .oc-chrome-ribbon .rb-row svg:not(.icon) { max-width: 18px; max-height: 18px; }
 
 @media (prefers-reduced-motion: reduce) {
