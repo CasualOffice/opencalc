@@ -538,3 +538,17 @@
   box-shadow: 0 6px 20px rgba(0,0,0,0.28);
 }
 .oc-chrome-ribbon .rb-group { position: relative; }
+
+/* The "All commands" pane: the long tail the tabs do not place. */
+.oc-chrome-ribbon .rb-pane-note { margin: -6px 0 18px; opacity: 0.75; font-size: 13px; }
+.oc-chrome-ribbon .rb-all-group { margin-bottom: 18px; width: 100%; }
+.oc-chrome-ribbon .rb-all-group h3 {
+  font-size: 12px; font-weight: 600; text-transform: uppercase;
+  letter-spacing: 0.04em; opacity: 0.6; margin: 0 0 6px;
+}
+.oc-chrome-ribbon .rb-all-items { display: flex; flex-wrap: wrap; gap: 4px; }
+.oc-chrome-ribbon .rb-all-items .rb-btn {
+  min-height: 28px; padding: 0 10px;
+  border: 1px solid var(--oc-border-color); border-radius: 4px;
+}
+.oc-chrome-ribbon .rb-all-items .rb-btn .rb-label { max-width: 200px; }

@@ -108,6 +108,20 @@ function giveBack(node) {
   h.parent.insertBefore(node, ref);
 }
 
+/// Region plumbing rather than commands.
+///
+/// The toolbar's own overflow machinery, the status line and the two hidden
+/// picker nodes. None is a verb a person would look for, so none counts as
+/// unreachable when the ribbon does not draw it. (This constant existed for the
+/// generated-tabs version, went with it, and was then referenced by
+/// `unplacedCommands()` — a `ReferenceError` that took the whole backstage down
+/// with it, silently, because `start()` is awaited and nothing was watching.)
+const SKIP = new Set([
+  "toolbar.more", "toolbar.more-flyout", "toolbar.status",
+  "toolbar.settings", "toolbar.open", "toolbar.delete-sheet",
+  "toolbar.font-caret", "toolbar.size-caret", "toolbar.numfmt-label",
+]);
+
 const byCommand = (id) => document.querySelector(`[data-oc-command="${CSS.escape(id)}"]`);
 
 /* ── Labels ───────────────────────────────────────────────────────────────── */
@@ -243,6 +257,35 @@ const RAIL = [
   { label: "Info", cmds: ["file.properties"] },
 ];
 
+/// Every command the ribbon did not place.
+///
+/// **The ribbon hides the menu bar, so a command it does not draw is a command
+/// nobody can click.** `docs/91` §3 assigns 147 controls and this build has 205
+/// commands, so without this the ribbon would quietly cost a user roughly
+/// eighty verbs the toolbar chrome gives them — the exact "nothing should be
+/// removed" failure, and one that would have been invisible until somebody went
+/// looking for a menu item that no longer existed.
+///
+/// They go in the backstage rather than into a tab, because they are the long
+/// tail by definition: if one turns out to be used daily it has earned a place
+/// in `docs/91` §3, and this list is the evidence for that argument.
+function unplacedCommands(root) {
+  const placed = new Set();
+  for (const n of root.querySelectorAll("[data-oc-command]")) placed.add(n.dataset.ocCommand);
+  for (const n of root.querySelectorAll("[data-oc-proxy]")) placed.add(n.dataset.ocProxy);
+  const out = [];
+  for (const n of document.querySelectorAll("[data-oc-command]")) {
+    const id = n.dataset.ocCommand;
+    if (placed.has(id) || SKIP.has(id)) continue;
+    // A bare family id (`data`, `view`) is the menu's own button, not a verb.
+    if (!id.includes(".")) continue;
+    if (n.closest(".oc-ribbon")) continue;
+    placed.add(id);
+    out.push([id, n]);
+  }
+  return out;
+}
+
 function buildBackstage() {
   const bs = document.createElement("div");
   bs.className = "rb-backstage";
@@ -286,6 +329,49 @@ function buildBackstage() {
       for (const [rr, pp] of panes) { pp.hidden = rr !== r; rr.classList.toggle("is-on", rr === r); }
     });
   }
+  // The long tail, grouped by the menu it came from so it stays findable.
+  const rest = unplacedCommands(el);
+  if (rest.length) {
+    const r = document.createElement("button");
+    r.type = "button";
+    r.className = "rb-rail-item";
+    r.textContent = "All commands";
+    const p = document.createElement("div");
+    p.className = "rb-pane-body rb-pane-all";
+    p.hidden = true;
+    const h = document.createElement("h2");
+    h.className = "rb-pane-title";
+    h.textContent = "All commands";
+    const note = document.createElement("p");
+    note.className = "rb-pane-note";
+    note.textContent = `${rest.length} commands that do not have a place on a tab. Everything the editor can do is here.`;
+    p.append(h, note);
+    const byFamily = new Map();
+    for (const [id, node] of rest) {
+      const fam = id.split(".")[0];
+      if (!byFamily.has(fam)) byFamily.set(fam, []);
+      byFamily.get(fam).push([id, node]);
+    }
+    for (const [fam, items] of byFamily) {
+      const sec = document.createElement("div");
+      sec.className = "rb-all-group";
+      const cap = document.createElement("h3");
+      cap.textContent = fam.replace(/^./, (c) => c.toUpperCase());
+      sec.appendChild(cap);
+      const wrap = document.createElement("div");
+      wrap.className = "rb-all-items";
+      for (const [id, node] of items) wrap.appendChild(proxy(node, id, "med"));
+      sec.appendChild(wrap);
+      p.appendChild(sec);
+    }
+    pane.appendChild(p);
+    rail.appendChild(r);
+    panes.push([r, p]);
+    r.addEventListener("click", () => {
+      for (const [rr, pp] of panes) { pp.hidden = rr !== r; rr.classList.toggle("is-on", rr === r); }
+    });
+  }
+
   if (panes.length) panes[0][0].click();
   return bs;
 }
@@ -483,6 +569,7 @@ export async function start() {
     btn.addEventListener("click", () => select(tab.id));
   }
 
+  // After the tabs, so `unplacedCommands()` can see what they placed.
   el.appendChild(buildBackstage());
 
   tablist.addEventListener("keydown", (e) => {

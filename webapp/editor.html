@@ -9,7 +9,7 @@
     <!-- The ribbon chrome (`UX-RIB-04`, `docs/91`). Inert without the
          `.oc-chrome-ribbon` class, so loading it unconditionally costs the
          default chrome nothing and keeps the switch a one-class change. -->
-    <link rel="stylesheet" href="./ribbon.css?v=10" />
+    <link rel="stylesheet" href="./ribbon.css?v=11" />
     <link rel="stylesheet" href="./sheets.css?v=2" />
   </head>
   <body class="editor-body">
@@ -168,9 +168,9 @@
       <div class="set-row">
         <span>Interface</span>
         <span class="chrome-choice" id="set-chrome" role="radiogroup" aria-label="Interface">
-          <button type="button" data-chrome="toolbar" role="radio" aria-checked="true">Toolbar</button>
-          <button type="button" data-chrome="ribbon" role="radio" aria-checked="false">Ribbon</button>
-          <button type="button" data-chrome="sheets" role="radio" aria-checked="false">Compact</button>
+          <button type="button" data-chrome="toolbar" role="radio" aria-checked="true" title="The single-row toolbar this editor shipped with">Classic</button>
+          <button type="button" data-chrome="ribbon" role="radio" aria-checked="false" title="Tabbed ribbon with a File backstage — the layout an Excel user expects">Ribbon</button>
+          <button type="button" data-chrome="sheets" role="radio" aria-checked="false" title="One compact row plus the full menu bar — the layout a Google Sheets user expects">Compact</button>
         </span>
       </div>
       <div class="set-row">
@@ -690,7 +690,7 @@
          would find half the editor and silently draw the half it found. -->
     <script type="module">
       import { ribbonRequested, start as startRibbon, stop as stopRibbon,
-               setChrome, chosenChrome } from "./ribbon.js?v=8";
+               setChrome, chosenChrome } from "./ribbon.js?v=10";
       import { start as startSheets, stop as stopSheets } from "./sheets.js?v=1";
       // The wait is for the *command layer*, not for `load`. Toolbar controls
       // are stamped with `data-oc-command` after boot and `buildMenuBar()`
@@ -707,11 +707,61 @@
       // **Tear the old one down before building the new one.** Both chromes
       // borrow the same live toolbar controls, so building first would hand the
       // second an already-emptied toolbar and it would draw a row of gaps.
+      // **One swap at a time.** A swap tears down a chrome that has borrowed
+      // two dozen live nodes and builds one that borrows them again; overlapping
+      // two of those interleaves the borrow and the give-back and the second
+      // build finds nodes the first is still moving. Clicking the three options
+      // quickly enough was sufficient to wedge the tab.
+      let swapping = null;
       async function apply(which) {
+        if (swapping) { await swapping; }
+        swapping = doApply(which);
+        try { await swapping; } finally { swapping = null; }
+      }
+
+      async function doApply(which) {
         stopRibbon();
         stopSheets();
         if (which === "ribbon") await startRibbon();
         else if (which === "sheets") await startSheets();
+        // The chrome changed height, so the grid's box did too — see
+        // `settleGrid()` for why this is three shots rather than one.
+        settleGrid();
+      }
+
+      /// **Keep the canvas the size of the box left for it.**
+      ///
+      /// The canvas is sized from `.grid-wrap` on `window.resize`, and a chrome
+      /// swap does not fire one — so switching to a shorter chrome left the
+      /// canvas at the previous chrome's height: measured 634px of canvas in a
+      /// 595px box, 39px of it hidden under the status bar.
+      ///
+      /// **Three fixed shots, deliberately, after trying cleverer things twice.**
+      /// A `ResizeObserver` fed itself and froze the renderer; a retry loop that
+      /// stopped when the two agreed did the same, because `resize()` writes to
+      /// the canvas and the canvas is inside the box being observed. What is
+      /// left is bounded and provably terminates: the box settles in stages
+      /// during a swap — the chrome lays out, then its own fit pass folds a
+      /// group and changes it again — so re-assert on the next frame, then at
+      /// 150ms, then at 500ms, and stop. Three redraws on a preference change
+      /// nobody makes twice a minute is a fair price for not hanging the tab.
+      ///
+      /// Each shot only fires when the canvas and its box actually disagree, so
+      /// the usual case costs one comparison and no redraw at all.
+      function syncGrid() {
+        const wrap = document.querySelector(".grid-wrap");
+        const canvas = wrap && wrap.querySelector("canvas");
+        if (!wrap || !canvas) return;
+        const box = Math.round(wrap.getBoundingClientRect().height);
+        const drawn = Math.round(canvas.getBoundingClientRect().height);
+        if (box === 0 || box === drawn) return;
+        window.dispatchEvent(new Event("resize"));
+      }
+
+      function settleGrid() {
+        requestAnimationFrame(syncGrid);
+        setTimeout(syncGrid, 150);
+        setTimeout(syncGrid, 500);
       }
 
       async function boot() {
