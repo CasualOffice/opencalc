@@ -30,6 +30,7 @@
 /// hide with CSS.
 
 import { ASSIGN, item } from "./ribbon.model.js?v=3";
+import { iconIds } from "./ribbon.icons.js?v=2";
 
 const PARAMS = new URL(location.href).searchParams;
 const STORE_KEY = "oc.chrome";
@@ -147,17 +148,50 @@ function labelFor(node, id) {
 /// the editor's own rather than a second set that drifts. It carries
 /// `data-oc-proxy` and never `data-oc-command`, and it forwards rather than acts.
 function proxy(node, id, size) {
+  const large = size === "large";
   const b = document.createElement("button");
   b.type = "button";
   b.className = `rb-btn rb-${size}`;
   b.dataset.ocProxy = id;
-  const svg = node.querySelector("svg");
-  if (svg) b.appendChild(svg.cloneNode(true));
-  const span = document.createElement("span");
-  span.className = "rb-label";
-  span.textContent = labelFor(node, id);
-  b.appendChild(span);
-  b.title = node.getAttribute("title") || span.textContent;
+
+  // **The icon comes from the sprite, not from the source node.**
+  //
+  // The first version cloned the source's `<svg>`, which is right for a toolbar
+  // control and useless for a menu item: this editor's menus carry no icons at
+  // all, so 99 of 99 proxies found nothing and rendered as text. That is the
+  // difference between the ribbon reading as Excel and reading as a list of
+  // words, and it was the whole of it.
+  const sym = iconIds(id, large).find((c) => document.getElementById(c));
+  if (sym) {
+    const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    svg.setAttribute("viewBox", "0 0 24 24");
+    svg.setAttribute("aria-hidden", "true");
+    const use = document.createElementNS("http://www.w3.org/2000/svg", "use");
+    use.setAttribute("href", `#${sym}`);
+    svg.appendChild(use);
+    b.appendChild(svg);
+  } else {
+    // No icon rather than a wrong one: a glyph that means something else
+    // teaches the wrong thing, and the label still says what this does.
+    b.classList.add("rb-noicon");
+  }
+
+  const text = labelFor(node, id);
+  // **Excel labels the large controls and lets the small ones be icons.** A
+  // group of ten labelled buttons is a menu drawn sideways; the label lives in
+  // the tooltip, where it is one hover away and costs no width. Small controls
+  // that have no icon keep their text, because an unlabelled blank is worse
+  // than a wide one.
+  if (large || !sym) {
+    const span = document.createElement("span");
+    span.className = "rb-label";
+    span.textContent = text;
+    b.appendChild(span);
+  }
+  b.setAttribute("aria-label", text);
+  const tip = node.getAttribute("title");
+  b.title = tip && tip.length > text.length ? tip : text;
+
   b.addEventListener("click", (e) => {
     e.preventDefault();
     // Click the real thing. Menu items sit inside a closed dropdown so they are
@@ -333,12 +367,47 @@ function wireKeyTips(strip, fileBtn) {
   document.addEventListener("keyup", (e) => { if (e.key === "Alt") { /* keep shown */ } });
 }
 
+/// The icon sprite, fetched once and parked in the document.
+///
+/// A `<use href="#id">` resolves against the *current document*, so the symbols
+/// have to be in it — a stylesheet cannot carry them and an `<img>` cannot be
+/// referenced this way. Fetched rather than inlined into `editor.html` because
+/// it is 99KB that the default chrome has no use for.
+let spritePromise = null;
+function ensureSprite() {
+  if (spritePromise || document.getElementById("oc-ribbon-icons")) return spritePromise;
+  spritePromise = fetch(new URL("./ribbon.icons.svg", import.meta.url))
+    .then((r) => (r.ok ? r.text() : Promise.reject(new Error(`sprite ${r.status}`))))
+    .then((svg) => {
+      if (document.getElementById("oc-ribbon-icons")) return;
+      const host = document.createElement("div");
+      host.style.display = "none";
+      host.innerHTML = svg;
+      document.body.insertBefore(host.firstElementChild, document.body.firstChild);
+    })
+    .catch((e) => {
+      // Every control still has its label and its tooltip, so this degrades to
+      // the text form rather than to blank buttons. Say so once.
+      console.warn("[ribbon] icon sprite failed to load; drawing labels only", e);
+    });
+  return spritePromise;
+}
+
 export function ribbonRequested() { return chosenChrome() === "ribbon"; }
 
-export function start() {
+export async function start() {
   if (el) return el;
+  // **Await the sprite before building anything.** `proxy()` picks its icon by
+  // asking whether the symbol exists, and the sprite arrives over `fetch` — so
+  // building first meant every lookup missed and all 99 proxies fell back to
+  // text. The symptom was identical to having no icon map at all, which is why
+  // it is worth naming: an async dependency consumed synchronously fails
+  // *silently and completely*.
+  await ensureSprite();
   const anchor = document.querySelector(".formula-bar");
   if (!anchor) return null;
+
+  ensureSprite();
 
   el = document.createElement("div");
   el.className = "oc-ribbon";
@@ -423,6 +492,48 @@ export function start() {
     next.click();
   });
 
+  /// **Collapse in the authored order until the panel fits** (`docs/91` §5).
+  ///
+  /// Home needs 1744px and a 1563px window has 1563 of them, so without this the
+  /// last two groups simply run off the right-hand edge — which is the defect
+  /// `docs/88` §1 measured on the old toolbar, reappearing in a wider bar.
+  /// Groups fold lowest `ord` first, each becoming a button that drops its own
+  /// contents; the order is authored per tab and never computed, because a
+  /// computed order changes under the user as content changes.
+  function fitPanel(panel) {
+    for (const g of panel.querySelectorAll(".rb-group.is-folded")) unfold(g);
+    const groups = [...panel.querySelectorAll(".rb-group")]
+      .sort((a, b) => Number(a.dataset.ord) - Number(b.dataset.ord));
+    for (const g of groups) {
+      if (panel.scrollWidth <= panel.clientWidth) break;
+      fold(g);
+    }
+  }
+
+  function fold(g) {
+    if (g.classList.contains("is-folded")) return;
+    const cap = g.querySelector(".rb-cap")?.textContent || "";
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "rb-folded";
+    btn.setAttribute("aria-haspopup", "true");
+    btn.setAttribute("aria-expanded", "false");
+    btn.innerHTML = `<span>${cap}</span>`;
+    btn.title = cap;
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      const open = g.classList.toggle("is-open");
+      btn.setAttribute("aria-expanded", open ? "true" : "false");
+    });
+    g.classList.add("is-folded");
+    g.insertBefore(btn, g.firstChild);
+  }
+
+  function unfold(g) {
+    g.classList.remove("is-folded", "is-open");
+    g.querySelector(".rb-folded")?.remove();
+  }
+
   function select(id) {
     for (const [k, p] of panels) p.hidden = k !== id;
     for (const b of tablist.querySelectorAll(".rb-tab")) {
@@ -432,6 +543,8 @@ export function start() {
       b.tabIndex = on ? 0 : -1;
     }
     syncProxies(el);
+    const live = panels.get(id);
+    if (live) fitPanel(live);
   }
 
   function applyLayout(v) {
@@ -442,12 +555,32 @@ export function start() {
   }
   layoutBtn.addEventListener("click", () => {
     applyLayout(el.classList.contains("rb-simplified") ? "classic" : "simplified");
+    const open = [...panels.values()].find((p) => !p.hidden);
+    if (open) fitPanel(open);
   });
 
+  // One reflow per frame on resize — the same coalescing the proxy sync uses,
+  // and for the same reason: a drag-resize fires this continuously.
+  let fitQueued = false;
+  const onResize = () => {
+    if (fitQueued) return;
+    fitQueued = true;
+    requestAnimationFrame(() => {
+      fitQueued = false;
+      const open = [...panels.values()].find((p) => !p.hidden);
+      if (open) fitPanel(open);
+    });
+  };
+  window.addEventListener("resize", onResize);
+  el._onResize = onResize;
+
   borrowed = [...el.querySelectorAll(".rb-hosted")];
-  select(ASSIGN[0].id);
-  applyLayout(storedLayout());
+  // The class first: every metric in `ribbon.css` is scoped to it, so a panel
+  // measured before it is applied has no constrained width and `fitPanel()`
+  // concludes that everything fits. It folded nothing, at 2562px into 1563.
   document.documentElement.classList.add("oc-chrome-ribbon");
+  applyLayout(storedLayout());
+  select(ASSIGN[0].id);
   wireKeyTips(tablist, fileBtn);
 
   // Proxy state follows the editor's own. `applyCommandRules()` and the
@@ -488,6 +621,7 @@ export function start() {
 export function stop() {
   if (!el) return;
   el._obs?.disconnect();
+  if (el._onResize) window.removeEventListener("resize", el._onResize);
   if (onKey) { document.removeEventListener("keydown", onKey); onKey = null; }
   // Reverse, so that the append fallback in `giveBack()` rebuilds the original
   // order rather than reversing it. And in a `try` apiece: one node that cannot

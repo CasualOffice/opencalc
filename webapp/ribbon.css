@@ -245,7 +245,21 @@
 }
 .oc-chrome-ribbon .rb-btn:disabled { opacity: 0.4; cursor: default; }
 
-.oc-chrome-ribbon .rb-btn svg { width: 16px; height: 16px; flex: none; }
+.oc-chrome-ribbon .rb-btn svg {
+  width: 16px; height: 16px; flex: none;
+  fill: none; stroke: currentColor; stroke-width: 1.6;
+  stroke-linecap: round; stroke-linejoin: round;
+}
+
+/* An icon-only control is square and centred; only the ones that kept a label
+ * get side padding. This is what makes a group read as Excel's grid of glyphs
+ * rather than as a stack of words. */
+.oc-chrome-ribbon .rb-btn:not(.rb-large):not(.rb-noicon) {
+  padding: 0;
+  width: 26px;
+  justify-content: center;
+}
+.oc-chrome-ribbon .rb-btn.rb-noicon { font-size: 11px; }
 
 /* The large form: icon over label, which is how Excel draws the first control
  * of a group and the only size distinction that reads at a glance. */
@@ -257,7 +271,7 @@
   padding: 4px 8px;
   justify-content: center;
 }
-.oc-chrome-ribbon .rb-btn.rb-large svg { width: 20px; height: 20px; }
+.oc-chrome-ribbon .rb-btn.rb-large svg { width: 20px; height: 20px; stroke-width: 1.5; }
 .oc-chrome-ribbon .rb-btn.rb-large .rb-label {
   font-size: 11px;
   line-height: 13px;
@@ -415,3 +429,48 @@
 .chrome-choice button:hover { background: var(--oc-bg-color); }
 .chrome-choice button.is-on { background: var(--oc-bg-color); font-weight: 600; }
 .chrome-choice button:focus-visible { outline: 2px solid var(--oc-accent-color); outline-offset: -2px; }
+
+/* ── The collapse contract (`docs/91` §5) ─────────────────────────────────── */
+
+.oc-chrome-ribbon .rb-group.is-folded > .rb-row,
+.oc-chrome-ribbon .rb-group.is-folded > .rb-cap { display: none; }
+
+.oc-chrome-ribbon .rb-group.is-folded {
+  justify-content: center;
+  padding: 0 4px;
+}
+
+.oc-chrome-ribbon .rb-folded {
+  appearance: none; cursor: pointer;
+  border: 1px solid transparent; border-radius: 3px;
+  background: transparent; color: var(--oc-text-color);
+  font: inherit; font-size: 12px;
+  min-height: 56px; min-width: 44px;
+  padding: 4px 8px;
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 3px;
+}
+.oc-chrome-ribbon .rb-folded::after {
+  content: ""; width: 0; height: 0;
+  border-left: 3.5px solid transparent; border-right: 3.5px solid transparent;
+  border-top: 4px solid currentColor;
+}
+.oc-chrome-ribbon .rb-folded span { max-width: 72px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.oc-chrome-ribbon .rb-folded:hover { background: var(--oc-surface-color); }
+.oc-chrome-ribbon .rb-folded:focus-visible { outline: 2px solid var(--oc-accent-color); outline-offset: 1px; }
+
+/* A folded group opens its own contents below itself, which is what Excel's
+ * collapsed group does — the popup carries the same controls, at the same
+ * sizes, so nothing has to be learned twice. */
+.oc-chrome-ribbon .rb-group.is-folded.is-open > .rb-row {
+  display: grid;
+  position: absolute;
+  z-index: 30;
+  top: 100%;
+  margin-top: 2px;
+  padding: 6px 8px;
+  background: var(--oc-bg-color);
+  border: 1px solid var(--oc-border-color);
+  border-radius: 4px;
+  box-shadow: 0 6px 20px rgba(0,0,0,0.28);
+}
+.oc-chrome-ribbon .rb-group { position: relative; }
