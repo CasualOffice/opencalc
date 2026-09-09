@@ -149,7 +149,10 @@ const EXCEL_WORDS = {
 
 function labelFor(node, id) {
   if (EXCEL_WORDS[id]) return EXCEL_WORDS[id];
-  const raw = (node.dataset.ocLabel || node.getAttribute("title")
+  // `.mi-label` first: a menu item wraps its text in one, beside a `.mi-check`
+  // spacer, so `textContent` picks up the checkmark slot as well.
+  const raw = (node.querySelector(".mi-label")?.textContent
+    || node.dataset.ocLabel || node.getAttribute("title")
     || node.getAttribute("aria-label") || node.textContent || "").trim();
   // A tooltip is a sentence — "Bold (Ctrl+B)", "Format painter — click to…".
   // The ribbon wants the verb, so take the text before the first bracket or
@@ -172,6 +175,7 @@ function proxy(node, id, size) {
   b.type = "button";
   b.className = `rb-btn rb-${size}`;
   b.dataset.ocProxy = id;
+  b._src = node;   // the owning node, kept so `syncProxies` need not re-query
 
   // **The icon comes from the sprite, not from the source node.**
   //
@@ -201,7 +205,11 @@ function proxy(node, id, size) {
   // the tooltip, where it is one hover away and costs no width. Small controls
   // that have no icon keep their text, because an unlabelled blank is worse
   // than a wide one.
-  if (large || !sym) {
+  // **A list always shows its words.** In a ribbon group an icon alone is
+  // right — Excel does it, and the tooltip carries the name. In a *pane* it is
+  // not: a column of forty unlabelled glyphs is unreadable, and that is exactly
+  // what "All commands" rendered the first time. So `list` forces the label.
+  if (large || size === "list" || !sym) {
     const span = document.createElement("span");
     span.className = "rb-label";
     span.textContent = text;
@@ -229,7 +237,7 @@ function proxy(node, id, size) {
 /// user may not run, so it mirrors — from the source, never re-deriving the rule.
 function syncProxies(root) {
   for (const b of root.querySelectorAll("[data-oc-proxy]")) {
-    const src = byCommand(b.dataset.ocProxy);
+    const src = b._src || byCommand(b.dataset.ocProxy);
     if (!src) { b.disabled = true; continue; }
     b.disabled = !!src.disabled || src.classList.contains("oc-cmd-hidden");
     const pressed = src.getAttribute("aria-pressed");
@@ -240,6 +248,7 @@ function syncProxies(root) {
 /* ── Build ────────────────────────────────────────────────────────────────── */
 
 let el = null;
+let backstage = null;
 let borrowed = [];
 let onKey = null;
 
@@ -308,7 +317,21 @@ function buildBackstage() {
 
   const panes = [];
   for (const entry of RAIL) {
-    const live = entry.cmds.map((c) => [c, byCommand(c)]).filter(([, n]) => n);
+    // Each listed id **and everything beneath it**. `file.download` is a
+    // submenu whose children are generated from the formats the engine can
+    // write, so naming the parent alone gave a "Save" pane with one button in
+    // it and no way to reach any format.
+    const seen = new Set();
+    const live = [];
+    for (const c of entry.cmds) {
+      for (const n of document.querySelectorAll("[data-oc-command]")) {
+        const id = n.dataset.ocCommand;
+        if (id !== c && !id.startsWith(c + ".")) continue;
+        if (seen.has(id) || SKIP.has(id)) continue;
+        seen.add(id);
+        live.push([id, n]);
+      }
+    }
     if (!live.length) continue;
     const r = document.createElement("button");
     r.type = "button";
@@ -321,7 +344,7 @@ function buildBackstage() {
     h.className = "rb-pane-title";
     h.textContent = entry.label;
     p.appendChild(h);
-    for (const [id, node] of live) p.appendChild(proxy(node, id, "large"));
+    for (const [id, node] of live) p.appendChild(proxy(node, id, "list"));
     pane.appendChild(p);
     rail.appendChild(r);
     panes.push([r, p]);
@@ -360,7 +383,7 @@ function buildBackstage() {
       sec.appendChild(cap);
       const wrap = document.createElement("div");
       wrap.className = "rb-all-items";
-      for (const [id, node] of items) wrap.appendChild(proxy(node, id, "med"));
+      for (const [id, node] of items) wrap.appendChild(proxy(node, id, "list"));
       sec.appendChild(wrap);
       p.appendChild(sec);
     }
@@ -377,14 +400,14 @@ function buildBackstage() {
 }
 
 function openBackstage() {
-  const bs = el?.querySelector(".rb-backstage");
+  const bs = backstage;
   if (!bs) return;
   bs.hidden = false;
   document.documentElement.classList.add("oc-backstage-open");
   bs.querySelector(".rb-rail-item")?.focus();
 }
 function closeBackstage() {
-  const bs = el?.querySelector(".rb-backstage");
+  const bs = backstage;
   if (!bs) return;
   bs.hidden = true;
   document.documentElement.classList.remove("oc-backstage-open");
@@ -569,8 +592,18 @@ export async function start() {
     btn.addEventListener("click", () => select(tab.id));
   }
 
+  // **On `document.body`, not inside the ribbon.**
+  //
+  // It was a child of `.oc-ribbon`, and a `position: fixed` element with
+  // `z-index: 40` only outranks what shares its stacking context — so the grid
+  // and the ribbon itself painted straight over it and the backstage rendered
+  // see-through, with cell borders and tab labels showing through the pane. It
+  // covers the window, so it belongs at the top level where nothing can be
+  // above it. `stop()` removes it.
+  //
   // After the tabs, so `unplacedCommands()` can see what they placed.
-  el.appendChild(buildBackstage());
+  backstage = buildBackstage();
+  document.body.appendChild(backstage);
 
   tablist.addEventListener("keydown", (e) => {
     const tabs = [...tablist.querySelectorAll(".rb-tab")];
@@ -688,17 +721,27 @@ export async function start() {
   // returning. Mutations originating inside the ribbon are therefore ignored,
   // and the pass is coalesced to one per frame so a burst of edits costs one
   // sync rather than hundreds.
+  // **Watch the owning nodes, not the document.**
+  //
+  // The first version observed `document.body` with `subtree: true` and then
+  // re-queried every proxy's source by id on each pass — 99 `querySelector`
+  // calls answering every attribute change anywhere in the editor, including
+  // the ones `syncProxies` itself had just made. It coalesced per frame and was
+  // still enough to wedge the tab on a chrome switch.
+  //
+  // There are only ever ~100 nodes whose state a proxy mirrors, and they are
+  // known at build time, so each is observed directly: no subtree, no
+  // re-querying, and self-inflicted mutations are structurally impossible
+  // because nothing here writes to a source node.
   let queued = false;
-  const obs = new MutationObserver((records) => {
+  const obs = new MutationObserver(() => {
     if (queued) return;
-    if (!records.some((r) => r.target instanceof Element && !el.contains(r.target))) return;
     queued = true;
     requestAnimationFrame(() => { queued = false; syncProxies(el); });
   });
-  obs.observe(document.body, {
-    subtree: true, attributes: true,
-    attributeFilter: ["disabled", "aria-pressed", "class"],
-  });
+  for (const b of el.querySelectorAll("[data-oc-proxy]")) {
+    if (b._src) obs.observe(b._src, { attributes: true, attributeFilter: ["disabled", "aria-pressed", "class"] });
+  }
   el._obs = obs;
 
   if (missing.length) {
@@ -724,6 +767,8 @@ export function stop() {
     try { giveBack(node); } catch (e) { console.warn("[ribbon] could not restore", node.id, e); }
   }
   borrowed = [];
+  backstage?.remove();
+  backstage = null;
   el.remove();
   el = null;
   document.documentElement.classList.remove("oc-chrome-ribbon", "oc-backstage-open");

@@ -13,7 +13,7 @@
 
 .oc-chrome-sheets .oc-sheets {
   display: block;
-  background: var(--oc-bg-color);
+  background: var(--oc-background-color);
   padding: 4px 8px 6px;
 }
 
@@ -82,14 +82,14 @@
 .oc-chrome-sheets .gs-btn.gs-text { width: auto; padding: 0 10px; border-radius: 14px; }
 
 .oc-chrome-sheets .gs-btn:hover:not(:disabled),
-.oc-chrome-sheets .gs-more:hover { background: var(--oc-bg-color); }
+.oc-chrome-sheets .gs-more:hover { background: var(--oc-background-color); }
 .oc-chrome-sheets .gs-btn:active:not(:disabled) { background: var(--oc-border-color); }
 .oc-chrome-sheets .gs-btn:focus-visible,
 .oc-chrome-sheets .gs-more:focus-visible {
   outline: 2px solid var(--oc-accent-color);
   outline-offset: 1px;
 }
-.oc-chrome-sheets .gs-btn[aria-pressed="true"] { background: var(--oc-bg-color); }
+.oc-chrome-sheets .gs-btn[aria-pressed="true"] { background: var(--oc-background-color); }
 .oc-chrome-sheets .gs-btn:disabled { opacity: 0.38; cursor: default; }
 
 .oc-chrome-sheets .gs-btn svg {
@@ -123,8 +123,8 @@
   cursor: pointer;
 }
 .oc-chrome-sheets .gs-bar .tb-btn:hover:not(:disabled),
-.oc-chrome-sheets .gs-bar .tb-icon:hover:not(:disabled) { background: var(--oc-bg-color); }
-.oc-chrome-sheets .gs-bar .tb-btn[aria-pressed="true"] { background: var(--oc-bg-color); }
+.oc-chrome-sheets .gs-bar .tb-icon:hover:not(:disabled) { background: var(--oc-background-color); }
+.oc-chrome-sheets .gs-bar .tb-btn[aria-pressed="true"] { background: var(--oc-background-color); }
 .oc-chrome-sheets .gs-bar .tb-btn:focus-visible,
 .oc-chrome-sheets .gs-bar .tb-icon:focus-visible,
 .oc-chrome-sheets .gs-bar input:focus-visible {
@@ -147,7 +147,7 @@
   padding: 0 8px;
   border: 1px solid var(--oc-border-color);
   border-radius: 13px;
-  background: var(--oc-bg-color);
+  background: var(--oc-background-color);
   color: var(--oc-text-color);
   font: inherit; font-size: 12px;
 }
@@ -171,10 +171,10 @@
   width: max-content;
   max-width: 320px;
   padding: 6px;
-  background: var(--oc-bg-color);
+  background: var(--oc-background-color);
   border: 1px solid var(--oc-border-color);
   border-radius: 8px;
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.3);
+  box-shadow: var(--oc-popover-shadow, 0 8px 24px rgba(0, 0, 0, 0.3));
 }
 .oc-chrome-sheets .gs-overflow[hidden] { display: none; }
 

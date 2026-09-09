@@ -13,7 +13,7 @@
 
 .oc-chrome-ribbon .oc-ribbon {
   display: block;
-  background: var(--oc-bg-color);
+  background: var(--oc-background-color);
   border-bottom: 1px solid var(--oc-border-color);
   user-select: none;
 }
@@ -71,7 +71,7 @@
 
 .oc-chrome-ribbon .rb-layout {
   appearance: none; border: 0; background: transparent; cursor: pointer;
-  color: var(--oc-muted-color, var(--oc-text-color));
+  color: var(--oc-muted-text-color, var(--oc-text-color));
   font: inherit; min-width: 26px; min-height: 26px; margin: 3px 0;
   border-radius: 4px; flex: none;
 }
@@ -82,7 +82,7 @@
   appearance: none;
   border: 0;
   background: transparent;
-  color: var(--oc-muted-color, var(--oc-text-color));
+  color: var(--oc-muted-text-color, var(--oc-text-color));
   font: inherit;
   font-size: 13px;
   padding: 0 12px;
@@ -197,7 +197,7 @@
   font-size: 11px;
   line-height: 14px;
   padding-top: 2px;
-  color: var(--oc-muted-color, var(--oc-text-color));
+  color: var(--oc-muted-text-color, var(--oc-text-color));
   opacity: 0.8;
 }
 
@@ -254,7 +254,10 @@
 /* An icon-only control is square and centred; only the ones that kept a label
  * get side padding. This is what makes a group read as Excel's grid of glyphs
  * rather than as a stack of words. */
-.oc-chrome-ribbon .rb-btn:not(.rb-large):not(.rb-noicon) {
+/* Icon-only, and therefore square — but **not** the list form, which carries its
+ * label by definition. Without the `:not(.rb-list)` this squeezed every pane
+ * button to 26px and clipped the words it had just been told to draw. */
+.oc-chrome-ribbon .rb-btn:not(.rb-large):not(.rb-noicon):not(.rb-list) {
   padding: 0;
   width: 26px;
   justify-content: center;
@@ -353,7 +356,7 @@
   padding: 0 6px;
   border: 1px solid var(--oc-border-color);
   border-radius: 3px;
-  background: var(--oc-bg-color);
+  background: var(--oc-background-color);
   color: var(--oc-text-color);
   font: inherit;
   font-size: 12px;
@@ -416,7 +419,7 @@
   padding: 1px 4px;
   border-radius: 2px;
   background: var(--oc-text-color);
-  color: var(--oc-bg-color);
+  color: var(--oc-background-color);
   pointer-events: none;
   z-index: 5;
 }
@@ -427,11 +430,15 @@
 .oc-chrome-ribbon .rb-backstage {
   position: fixed;
   inset: 0;
-  z-index: 40;
+  /* Above the grid, the formula bar and the app header. It covers the window by
+   * design — Excel's does — so anything showing through is a bug, and one did:
+   * at `z-index: 40` inside `.oc-ribbon` the grid painted over it. */
+  z-index: 2147483000;
   display: grid;
   grid-template-columns: 200px 1fr;
   grid-template-rows: 48px 1fr;
-  background: var(--oc-bg-color);
+  background: var(--oc-background-color);
+  color: var(--oc-text-color);
   animation: rb-slide 180ms cubic-bezier(0, 0, 0.4, 1);
 }
 .oc-chrome-ribbon .rb-backstage[hidden] { display: none; }
@@ -465,11 +472,16 @@
   font: inherit; font-size: 14px;
   padding: 0 12px; min-height: 34px; border-radius: 4px;
 }
-.oc-chrome-ribbon .rb-rail-item:hover { background: var(--oc-bg-color); }
-.oc-chrome-ribbon .rb-rail-item.is-on { background: var(--oc-bg-color); font-weight: 600; }
+.oc-chrome-ribbon .rb-rail-item:hover { background: var(--oc-background-color); }
+.oc-chrome-ribbon .rb-rail-item.is-on { background: var(--oc-background-color); font-weight: 600; }
 .oc-chrome-ribbon .rb-rail-item:focus-visible { outline: 2px solid var(--oc-accent-color); outline-offset: -2px; }
 
-.oc-chrome-ribbon .rb-pane { grid-column: 2; grid-row: 1 / span 2; padding: 24px 32px; overflow-y: auto; }
+.oc-chrome-ribbon .rb-pane {
+  grid-column: 2; grid-row: 1 / span 2;
+  padding: 24px 32px;
+  overflow-y: auto;
+  background: var(--oc-background-color);
+}
 .oc-chrome-ribbon .rb-pane-body[hidden] { display: none; }
 .oc-chrome-ribbon .rb-pane-body { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; }
 .oc-chrome-ribbon .rb-pane-title { font-size: 24px; font-weight: 600; margin: 0 0 12px; color: var(--oc-text-color); }
@@ -490,8 +502,8 @@
   padding: 0 12px; min-height: 26px; border-radius: 4px;
   background: transparent; color: var(--oc-text-color);
 }
-.chrome-choice button:hover { background: var(--oc-bg-color); }
-.chrome-choice button.is-on { background: var(--oc-bg-color); font-weight: 600; }
+.chrome-choice button:hover { background: var(--oc-background-color); }
+.chrome-choice button.is-on { background: var(--oc-background-color); font-weight: 600; }
 .chrome-choice button:focus-visible { outline: 2px solid var(--oc-accent-color); outline-offset: -2px; }
 
 /* ── The collapse contract (`docs/91` §5) ─────────────────────────────────── */
@@ -532,10 +544,10 @@
   top: 100%;
   margin-top: 2px;
   padding: 6px 8px;
-  background: var(--oc-bg-color);
+  background: var(--oc-background-color);
   border: 1px solid var(--oc-border-color);
   border-radius: 4px;
-  box-shadow: 0 6px 20px rgba(0,0,0,0.28);
+  box-shadow: var(--oc-popover-shadow, 0 6px 20px rgba(0, 0, 0, 0.28));
 }
 .oc-chrome-ribbon .rb-group { position: relative; }
 
@@ -552,3 +564,18 @@
   border: 1px solid var(--oc-border-color); border-radius: 4px;
 }
 .oc-chrome-ribbon .rb-all-items .rb-btn .rb-label { max-width: 200px; }
+
+/* The list form: icon, then words, left aligned, one per line. Used in the
+ * backstage panes and in "All commands", where a column of bare glyphs is
+ * unreadable however good the glyphs are. */
+.oc-chrome-ribbon .rb-btn.rb-list {
+  justify-content: flex-start;
+  gap: 10px;
+  min-height: 32px;
+  padding: 0 12px;
+  width: 100%;
+  max-width: 380px;
+  text-align: left;
+}
+.oc-chrome-ribbon .rb-btn.rb-list .rb-label { max-width: none; }
+.oc-chrome-ribbon .rb-all-items .rb-btn.rb-list { width: auto; min-width: 190px; max-width: 260px; }

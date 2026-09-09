@@ -78,6 +78,7 @@ function proxy(node, id) {
   b.type = "button";
   b.className = "gs-btn";
   b.dataset.ocProxy = id;
+  b._src = node;   // the owning node, kept so `syncProxies` need not re-query
   const sym = iconIds(id, false).find((c) => document.getElementById(c));
   if (sym) {
     const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
@@ -102,7 +103,7 @@ function proxy(node, id) {
 
 function syncProxies(root) {
   for (const b of root.querySelectorAll("[data-oc-proxy]")) {
-    const src = byCommand(b.dataset.ocProxy);
+    const src = b._src || byCommand(b.dataset.ocProxy);
     if (!src) { b.disabled = true; continue; }
     b.disabled = !!src.disabled || src.classList.contains("oc-cmd-hidden");
     const pressed = src.getAttribute("aria-pressed");
@@ -219,17 +220,27 @@ export async function start() {
   fit();
   syncProxies(el);
 
+  // **Watch the owning nodes, not the document.**
+  //
+  // The first version observed `document.body` with `subtree: true` and then
+  // re-queried every proxy's source by id on each pass — 99 `querySelector`
+  // calls answering every attribute change anywhere in the editor, including
+  // the ones `syncProxies` itself had just made. It coalesced per frame and was
+  // still enough to wedge the tab on a chrome switch.
+  //
+  // There are only ever ~100 nodes whose state a proxy mirrors, and they are
+  // known at build time, so each is observed directly: no subtree, no
+  // re-querying, and self-inflicted mutations are structurally impossible
+  // because nothing here writes to a source node.
   let syncQueued = false;
-  const obs = new MutationObserver((records) => {
+  const obs = new MutationObserver(() => {
     if (syncQueued) return;
-    // Ignore our own writes, or `syncProxies` retriggers this forever — the
-    // loop that froze the renderer while `ribbon.js` was being built.
-    if (!records.some((r) => r.target instanceof Element && !el.contains(r.target))) return;
     syncQueued = true;
     requestAnimationFrame(() => { syncQueued = false; syncProxies(el); });
   });
-  obs.observe(document.body, { subtree: true, attributes: true,
-    attributeFilter: ["disabled", "aria-pressed", "class"] });
+  for (const b of el.querySelectorAll("[data-oc-proxy]")) {
+    if (b._src) obs.observe(b._src, { attributes: true, attributeFilter: ["disabled", "aria-pressed", "class"] });
+  }
   el._obs = obs;
 
   if (missing.length) console.warn(`[sheets] ${missing.length} command(s) absent from this build:`, missing);
