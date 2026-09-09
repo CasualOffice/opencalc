@@ -51,6 +51,33 @@
   border-bottom: 1px solid var(--oc-border-color);
 }
 
+.oc-chrome-ribbon .rb-tablist { display: flex; align-items: stretch; gap: 2px; flex: 1; min-width: 0; overflow-x: auto; scrollbar-width: none; }
+.oc-chrome-ribbon .rb-tablist::-webkit-scrollbar { display: none; }
+
+/* File is the accent-filled button Excel gives it — but filled with
+ * `--oc-accent-color`, the one host-swappable token, rather than Excel's green.
+ * `docs/91` §8 refuses the brand colour explicitly: an integrator's build
+ * should get their accent here, not Microsoft's. */
+.oc-chrome-ribbon .rb-file {
+  appearance: none; border: 0; cursor: pointer;
+  font: inherit; font-size: 13px; font-weight: 600;
+  padding: 0 14px; min-height: 26px; margin: 3px 6px 3px 0;
+  border-radius: 4px;
+  background: var(--oc-accent-color);
+  color: #fff;
+}
+.oc-chrome-ribbon .rb-file:hover { filter: brightness(1.08); }
+.oc-chrome-ribbon .rb-file:focus-visible { outline: 2px solid var(--oc-text-color); outline-offset: 2px; }
+
+.oc-chrome-ribbon .rb-layout {
+  appearance: none; border: 0; background: transparent; cursor: pointer;
+  color: var(--oc-muted-color, var(--oc-text-color));
+  font: inherit; min-width: 26px; min-height: 26px; margin: 3px 0;
+  border-radius: 4px; flex: none;
+}
+.oc-chrome-ribbon .rb-layout:hover { background: var(--oc-surface-color); }
+.oc-chrome-ribbon .rb-layout:focus-visible { outline: 2px solid var(--oc-accent-color); outline-offset: -2px; }
+
 .oc-chrome-ribbon .rb-tab {
   appearance: none;
   border: 0;
@@ -128,25 +155,42 @@
  * Measured before this existed: Home drew 78px, Insert 104px and Data 216px, so
  * the grid jumped every time a tab was clicked. A ribbon that changes height as
  * you move along it reads as a web page reflowing rather than as an
- * application, and it is the single most conspicuous tell there is.
+ * application, and it is the most conspicuous tell there is.
  *
- * The fix is the one Excel uses, and it is a packing rule rather than a clamp:
- * small controls flow **down and then across**, so a group with ten of them
- * becomes five columns of two rather than two rows of five stacked into a
- * taller band. Height is fixed; width is what grows. A panel that outgrows the
- * window scrolls sideways — which is honest — instead of pushing the grid down. */
+ * The packing is Excel's: small controls flow **down and then across**, so a
+ * group with ten of them becomes five columns of two rather than two rows of
+ * five stacked into a taller band. Height is fixed; width is what grows, and a
+ * panel that outgrows the window scrolls sideways instead of pushing the grid.
+ *
+ * **Grid rather than `flex-flow: column wrap`, and that was a defect, not a
+ * preference.** The flex form does not grow its container's width to fit the
+ * columns it creates, so the columns drew on top of one another — "Conditional
+ * formatting" overlapping "Unhide all rows and columns", legibly broken. Grid
+ * sizes the track set properly, which is the whole reason to reach for it. */
 .oc-chrome-ribbon .rb-row {
-  display: flex;
-  flex-flow: column wrap;
-  align-content: flex-start;
+  display: grid;
+  grid-auto-flow: column;
+  grid-template-rows: repeat(2, 26px);
+  grid-auto-columns: max-content;
   align-items: center;
-  gap: 2px;
+  gap: 2px 3px;
   height: 58px;
 }
 
-/* A large control is the full height of the band by definition, so it must not
- * be swept into a column with the small ones. */
-.oc-chrome-ribbon .rb-row > .rb-large { height: 58px; }
+/* A large control is the full height of the band by definition, so it spans
+ * both rows rather than being swept into a column with the small ones. */
+.oc-chrome-ribbon .rb-row > .rb-large { grid-row: span 2; height: 56px; }
+
+/* A label has to be allowed to end. Several of ours are whole sentences —
+ * "Unhide rows/columns in selection" — and an uncapped one sets the width of
+ * the column it lives in, which is how one verbose command pushes six others
+ * off the screen. */
+.oc-chrome-ribbon .rb-btn .rb-label {
+  max-width: 132px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 
 .oc-chrome-ribbon .rb-cap {
   text-align: center;
@@ -228,6 +272,15 @@
  * toolbar's own metrics predate the 24px rule. */
 .oc-chrome-ribbon .rb-hosted { min-height: 26px; min-width: 26px; }
 
+/* **The floor has to reach the button, not just the wrapper.** Several toolbar
+ * controls are a `.menu-wrap` around a real button, so `.rb-hosted` landed on
+ * the wrapper and the thing a person actually clicks stayed 22px — measured on
+ * `toolbar.currency`, and it is the pointer target that WCAG 2.5.8 is about,
+ * not its container. */
+.oc-chrome-ribbon .rb-row button,
+.oc-chrome-ribbon .rb-row input { min-height: 26px; }
+.oc-chrome-ribbon .rb-row button:not(.tb-combo-caret) { min-width: 26px; }
+
 /* Two hosted controls carry their own width from a toolbar that laid them out
  * in one long row, and both look wrong in a group: the number-format combo
  * stretches and its caret is drawn at the combo's full height. Constrain the
@@ -242,3 +295,123 @@
 @media (prefers-reduced-motion: reduce) {
   .oc-chrome-ribbon .rb-tab::after { transition: none; }
 }
+
+
+/* ── Simplified layout (`docs/91` §4) ──────────────────────────────────────
+ *
+ * One row rather than a band: the group caption goes, controls sit on a single
+ * line, and what does not fit scrolls. This is the layout the product owner
+ * asked for by name ("flatten ribbon"), and it is the cheaper one — `docs/91`
+ * measures it at 144px of chrome against Classic's 196 and today's 162, which
+ * makes it an 18px *gain* over the toolbar it replaces. */
+.oc-chrome-ribbon .oc-ribbon.rb-simplified .rb-panel {
+  height: 38px;
+  padding: 4px 8px;
+  align-items: center;
+}
+.oc-chrome-ribbon .oc-ribbon.rb-simplified .rb-cap { display: none; }
+.oc-chrome-ribbon .oc-ribbon.rb-simplified .rb-row {
+  flex-flow: row nowrap;
+  height: 30px;
+}
+.oc-chrome-ribbon .oc-ribbon.rb-simplified .rb-btn.rb-large {
+  flex-direction: row;
+  min-width: 26px;
+  height: 26px;
+  min-height: 26px;
+}
+.oc-chrome-ribbon .oc-ribbon.rb-simplified .rb-btn.rb-large svg { width: 16px; height: 16px; }
+.oc-chrome-ribbon .oc-ribbon.rb-simplified .rb-btn.rb-large .rb-label {
+  max-width: none; white-space: nowrap; font-size: 12px; line-height: 16px;
+}
+.oc-chrome-ribbon .oc-ribbon.rb-simplified .rb-group { padding: 0 6px; }
+
+/* ── KeyTips (`docs/91` §7) ───────────────────────────────────────────────── */
+
+.oc-chrome-ribbon .rb-tip {
+  position: absolute;
+  top: 100%;
+  left: 50%;
+  transform: translate(-50%, -2px);
+  font-size: 10px;
+  line-height: 12px;
+  padding: 1px 4px;
+  border-radius: 2px;
+  background: var(--oc-text-color);
+  color: var(--oc-bg-color);
+  pointer-events: none;
+  z-index: 5;
+}
+.oc-chrome-ribbon .rb-file, .oc-chrome-ribbon .rb-tab { position: relative; }
+
+/* ── Backstage (`docs/91` §6) ─────────────────────────────────────────────── */
+
+.oc-chrome-ribbon .rb-backstage {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  display: grid;
+  grid-template-columns: 200px 1fr;
+  grid-template-rows: 48px 1fr;
+  background: var(--oc-bg-color);
+  animation: rb-slide 180ms cubic-bezier(0, 0, 0.4, 1);
+}
+.oc-chrome-ribbon .rb-backstage[hidden] { display: none; }
+
+@keyframes rb-slide { from { transform: translateX(-24px); opacity: 0; } to { transform: none; opacity: 1; } }
+@media (prefers-reduced-motion: reduce) {
+  .oc-chrome-ribbon .rb-backstage { animation: none; }
+}
+
+.oc-chrome-ribbon .rb-back {
+  grid-column: 1; grid-row: 1;
+  appearance: none; border: 0; cursor: pointer;
+  background: transparent; color: var(--oc-text-color);
+  font: inherit; font-size: 18px;
+  min-width: 40px; min-height: 40px;
+  margin: 4px 0 0 8px; border-radius: 4px;
+  justify-self: start;
+}
+.oc-chrome-ribbon .rb-back:hover { background: var(--oc-surface-color); }
+.oc-chrome-ribbon .rb-back:focus-visible { outline: 2px solid var(--oc-accent-color); outline-offset: -2px; }
+
+.oc-chrome-ribbon .rb-rail {
+  grid-column: 1; grid-row: 2;
+  display: flex; flex-direction: column; gap: 2px;
+  padding: 8px; overflow-y: auto;
+  background: var(--oc-surface-color);
+}
+.oc-chrome-ribbon .rb-rail-item {
+  appearance: none; border: 0; cursor: pointer; text-align: left;
+  background: transparent; color: var(--oc-text-color);
+  font: inherit; font-size: 14px;
+  padding: 0 12px; min-height: 34px; border-radius: 4px;
+}
+.oc-chrome-ribbon .rb-rail-item:hover { background: var(--oc-bg-color); }
+.oc-chrome-ribbon .rb-rail-item.is-on { background: var(--oc-bg-color); font-weight: 600; }
+.oc-chrome-ribbon .rb-rail-item:focus-visible { outline: 2px solid var(--oc-accent-color); outline-offset: -2px; }
+
+.oc-chrome-ribbon .rb-pane { grid-column: 2; grid-row: 1 / span 2; padding: 24px 32px; overflow-y: auto; }
+.oc-chrome-ribbon .rb-pane-body[hidden] { display: none; }
+.oc-chrome-ribbon .rb-pane-body { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; }
+.oc-chrome-ribbon .rb-pane-title { font-size: 24px; font-weight: 600; margin: 0 0 12px; color: var(--oc-text-color); }
+.oc-chrome-ribbon .rb-pane-body .rb-btn.rb-large {
+  flex-direction: row; min-width: 0; min-height: 34px; height: auto;
+  padding: 4px 10px; justify-content: flex-start; gap: 10px;
+}
+.oc-chrome-ribbon .rb-pane-body .rb-btn.rb-large .rb-label {
+  max-width: none; white-space: nowrap; font-size: 14px; text-align: left;
+}
+
+/* The chooser in Settings. Two buttons behaving as a radio group, styled as a
+ * segmented control — which is the one place that idiom is right, because this
+ * *is* a choice between two exclusive states rather than a toolbar group. */
+.chrome-choice { display: inline-flex; gap: 2px; padding: 2px; border-radius: 6px; background: var(--oc-surface-color); }
+.chrome-choice button {
+  appearance: none; border: 0; cursor: pointer; font: inherit; font-size: 12px;
+  padding: 0 12px; min-height: 26px; border-radius: 4px;
+  background: transparent; color: var(--oc-text-color);
+}
+.chrome-choice button:hover { background: var(--oc-bg-color); }
+.chrome-choice button.is-on { background: var(--oc-bg-color); font-weight: 600; }
+.chrome-choice button:focus-visible { outline: 2px solid var(--oc-accent-color); outline-offset: -2px; }

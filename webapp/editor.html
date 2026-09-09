@@ -9,7 +9,7 @@
     <!-- The ribbon chrome (`UX-RIB-04`, `docs/91`). Inert without the
          `.oc-chrome-ribbon` class, so loading it unconditionally costs the
          default chrome nothing and keeps the switch a one-class change. -->
-    <link rel="stylesheet" href="./ribbon.css?v=4" />
+    <link rel="stylesheet" href="./ribbon.css?v=7" />
   </head>
   <body class="editor-body">
     <!-- **This strip names the document, not the product** (`UX-CHR-03`,
@@ -153,6 +153,24 @@
           <span class="range-val" id="set-scroll-val">0.80</span>
         </span>
       </label>
+      <!-- **The chrome chooser** (`UX-RIB-04`, `docs/91` §12).
+           Here rather than in the View menu because it is a preference that
+           persists across documents, which is what this panel is for, and
+           because Excel (File ▸ Options), LibreOffice (Tools ▸ Options…) and
+           OnlyOffice (Advanced Settings) all put the interface variant in
+           settings rather than in a view menu.
+
+           The labels are not "Excel" and "Google Sheets": those are other
+           people's trademarks, and naming a competitor in our own settings
+           panel is a claim about compatibility we would then have to keep. They
+           describe the shape instead, which is also what a user is choosing. -->
+      <div class="set-row">
+        <span>Interface</span>
+        <span class="chrome-choice" id="set-chrome" role="radiogroup" aria-label="Interface">
+          <button type="button" data-chrome="toolbar" role="radio" aria-checked="true">Toolbar</button>
+          <button type="button" data-chrome="ribbon" role="radio" aria-checked="false">Ribbon</button>
+        </span>
+      </div>
       <div class="set-row">
         <span>Accent</span>
         <span class="swatches" id="set-accent">
@@ -669,15 +687,41 @@
          inserts its buttons later still, so a ribbon built on `DOMContentLoaded`
          would find half the editor and silently draw the half it found. -->
     <script type="module">
-      import { ribbonRequested, start } from "./ribbon.js?v=1";
-      if (ribbonRequested()) {
-        const ready = () => document.querySelector('[data-oc-command="toolbar.bold"]');
-        let tries = 0;
-        (function wait() {
-          if (ready()) { start(); return; }
-          if (++tries > 200) { console.warn("[ribbon] command layer never appeared"); return; }
-          setTimeout(wait, 25);
-        })();
+      import { ribbonRequested, start, setChrome, chosenChrome } from "./ribbon.js?v=4";
+      // The wait is for the *command layer*, not for `load`. Toolbar controls
+      // are stamped with `data-oc-command` after boot and `buildMenuBar()`
+      // inserts its buttons later still, so a ribbon built on `DOMContentLoaded`
+      // would find half the editor and silently draw the half it found.
+      const ready = () => document.querySelector('[data-oc-command="toolbar.bold"]');
+      let tries = 0;
+      (function wait() {
+        if (ready()) { boot(); return; }
+        if (++tries > 200) { console.warn("[ribbon] command layer never appeared"); return; }
+        setTimeout(wait, 25);
+      })();
+      function boot() {
+        if (ribbonRequested()) start();
+        const box = document.getElementById("set-chrome");
+        if (!box) return;
+        const paint = () => {
+          const cur = chosenChrome();
+          for (const b of box.querySelectorAll("[data-chrome]")) {
+            const on = b.dataset.chrome === cur;
+            b.setAttribute("aria-checked", on ? "true" : "false");
+            b.classList.toggle("is-on", on);
+          }
+        };
+        box.addEventListener("click", (e) => {
+          const b = e.target.closest("[data-chrome]");
+          if (!b) return;
+          // `setChrome` stores the preference and switches in place. It does not
+          // reload: the ribbon borrows live controls and gives them back, so the
+          // document, the selection and the undo history all survive the switch
+          // — which is the difference between a setting and a restart.
+          setChrome(b.dataset.chrome);
+          paint();
+        });
+        paint();
       }
     </script>
   </body>
