@@ -253,6 +253,12 @@ export function stop() {
   if (el._onResize) window.removeEventListener("resize", el._onResize);
   for (const node of [...borrowed].reverse()) {
     node.classList.remove("gs-hosted");
+    // Put the toolbar's roving model back exactly as it was.
+    if (node.dataset.rbTabindex !== undefined) {
+      if (node.dataset.rbTabindex === "") node.removeAttribute("tabindex");
+      else node.setAttribute("tabindex", node.dataset.rbTabindex);
+      delete node.dataset.rbTabindex;
+    }
     try { giveBack(node); } catch (e) { console.warn("[sheets] could not restore", node.id, e); }
   }
   borrowed = [];

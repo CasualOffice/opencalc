@@ -41,7 +41,7 @@
   position: relative;
   display: flex;
   align-items: center;
-  gap: 1px;
+  gap: 2px;
   height: 40px;
   padding: 0 8px;
   border-radius: 20px;
@@ -134,11 +134,17 @@
 .oc-chrome-sheets .gs-bar .tb-btn:disabled { opacity: 0.38; cursor: default; }
 
 /* One icon size, one stroke weight, across borrowed and proxied alike. */
+/* Same correction as the ribbon: `vector-effect: non-scaling-stroke` pinned the
+ * stroke to device pixels and made every glyph read ~40% heavy at this size.
+ * 24-unit artwork at 18px wants about 1.7 user units for a 1.27px stroke. */
 .oc-chrome-sheets .gs-bar svg,
 .oc-chrome-sheets .gs-bar .icon {
   width: 18px; height: 18px;
   stroke-width: 1.7;
-  vector-effect: non-scaling-stroke;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
 }
 
 .oc-chrome-sheets .gs-bar input.tb-select {

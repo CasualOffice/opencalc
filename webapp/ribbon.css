@@ -63,8 +63,19 @@
   font: inherit; font-size: 13px; font-weight: 600;
   padding: 0 14px; min-height: 26px; margin: 3px 6px 3px 0;
   border-radius: 4px;
-  background: var(--oc-accent-color);
+  /* **Darkened, because white on the raw accent is 3.3:1.**
+   * Measured: `#16a34a` against `#fff` gives 3.30, and WCAG 1.4.3 wants 4.5 for
+   * text this size (13px/600 is not "large"). A quarter-black mix takes it to
+   * about 5.4 while still reading as the same accent — and it stays derived from
+   * the token, so an integrator who swaps the accent gets a legible File button
+   * rather than one that happens to work for green. */
+  background: color-mix(in srgb, var(--oc-accent-color), #000 25%);
   color: #fff;
+}
+/* Browsers without `color-mix` keep the accent; the declaration above simply
+   does not apply, so this is a floor rather than a fallback. */
+@supports not (background: color-mix(in srgb, red, blue)) {
+  .oc-chrome-ribbon .rb-file { background: var(--oc-accent-color); }
 }
 .oc-chrome-ribbon .rb-file:hover { filter: brightness(1.08); }
 .oc-chrome-ribbon .rb-file:focus-visible { outline: 2px solid var(--oc-text-color); outline-offset: 2px; }
@@ -149,7 +160,7 @@
   display: flex;
   flex-direction: column;
   justify-content: space-between;
-  padding: 0 8px;
+  padding: 0 10px;
   border-right: 1px solid var(--oc-border-color);
 }
 .oc-chrome-ribbon .rb-group:last-child { border-right: 0; }
@@ -177,7 +188,9 @@
   grid-template-rows: repeat(2, 26px);
   grid-auto-columns: max-content;
   align-items: center;
-  gap: 2px 3px;
+  /* Icons need air or they read as one texture. 2px between neighbours was
+     enough when half the controls were words and is not now. */
+  gap: 3px 6px;
   height: 58px;
 }
 
@@ -343,14 +356,30 @@
  * before this: 18px, 16px and 14px glyphs side by side at 2.4px, 2px, 1.6px and
  * 1.5px stroke. Nothing reads as one set of icons when the weights disagree —
  * it is the difference a person sees before they can say what is wrong. */
+/* **Stroke weight is in user units, and the icons are drawn in a 24 viewBox.**
+ *
+ * `vector-effect: non-scaling-stroke` was here and was the bug: it pins the
+ * stroke to N *device* pixels whatever the scale, so a 24-unit glyph drawn at
+ * 16px rendered its 1.7 as a full 1.7px instead of the 1.13px the geometry
+ * implies — about 50% heavy. At 16px that closes the counters and the glyphs
+ * merge into blobs.
+ *
+ * Without it the maths is honest: rendered weight = width x (16 / 24). 1.9 user
+ * units gives 1.27px at 16, and 1.5 gives 1.25px at 20 — the same apparent
+ * weight at both sizes, which is what makes a set read as one set. */
 .oc-chrome-ribbon .rb-row svg,
-.oc-chrome-ribbon .rb-row .icon {
+.oc-chrome-ribbon .rb-row .icon,
+.oc-chrome-ribbon .rb-btn svg {
   width: 16px;
   height: 16px;
-  stroke-width: 1.7;
-  vector-effect: non-scaling-stroke;
+  stroke-width: 1.9;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  overflow: visible;
 }
-.oc-chrome-ribbon .rb-btn.rb-large svg { width: 20px; height: 20px; stroke-width: 1.6; }
+.oc-chrome-ribbon .rb-btn.rb-large svg { width: 20px; height: 20px; stroke-width: 1.5; }
 
 /* The text inputs in the Font and Number groups — a raw `<input>` outside
  * `.toolbar` is a bevelled 2px box too. */

@@ -29,7 +29,7 @@
 /// SDK's published surface each time the user clicked a tab. Inactive panels
 /// hide with CSS.
 
-import { ASSIGN, item } from "./ribbon.model.js?v=3";
+import { ASSIGN, item } from "./ribbon.model.js?v=4";
 import { iconIds } from "./ribbon.icons.js?v=2";
 
 const PARAMS = new URL(location.href).searchParams;
@@ -428,6 +428,16 @@ function buildGroup(spec, panel, missing) {
     if (!node) { missing.push(cmd); continue; }
     if (node.closest(".toolbar")) {
       node.classList.add("rb-hosted");
+      // **Make it reachable.** The toolbar uses a roving `tabindex`, so every
+      // control but one carries `-1` — correct there, because the toolbar
+      // handles arrow keys, and a hard WCAG 2.1.1 failure here, because nothing
+      // in this chrome does. Measured: 23 of the visible band's controls could
+      // not be reached by keyboard at all. The original is remembered and put
+      // back by `stop()`, so the toolbar keeps its own model.
+      if (node.dataset.rbTabindex === undefined) {
+        node.dataset.rbTabindex = node.hasAttribute("tabindex") ? node.getAttribute("tabindex") : "";
+      }
+      node.tabIndex = 0;
       borrow(node, row);
     } else {
       row.appendChild(proxy(node, cmd, size));
@@ -561,6 +571,20 @@ export async function start() {
 
   const missing = [];
   const panels = new Map();
+  const tabPanels = [];
+
+  // Which id families each tab owns, for the overflow pass below. Ordered:
+  // the first tab that claims a family gets it.
+  const FAMILIES = {
+    home: ["format.", "edit.", "toolbar."],
+    insert: ["insert.", "table."],
+    pagelayout: ["file.page", "view.gridlines", "view.cell-markings", "view.zoom"],
+    formulas: ["formulas.", "tools.calculation", "format.trace"],
+    data: ["data.", "pivot."],
+    review: ["format.protection", "insert.note", "tools."],
+    view: ["view."],
+    help: ["help."],
+  };
 
   for (const tab of ASSIGN) {
     const btn = document.createElement("button");
@@ -579,6 +603,19 @@ export async function start() {
     body.appendChild(panel);
     panels.set(tab.id, panel);
 
+    // Everything §3 did not place, routed to the tab it belongs on.
+    //
+    // §3 assigns 147 controls and 35 of them do not exist under those ids in
+    // this build, which left Help with one control, Page Layout with four and
+    // Review with four — tabs that read as broken rather than as sparse, while
+    // 82 real commands sat in a single catch-all list. A command's id already
+    // says where it belongs (`data.*` is the Data tab's, `view.*` the View
+    // tab's), so it is placed there under a "More" caption rather than exiled.
+    // "All commands" then holds a genuine remainder instead of most of the
+    // editor.
+    //
+    // Authored placement always wins: this only ever sees what §3 left over.
+
     // **Draw order is the model's order. `ord` is the *collapse* order.**
     //
     // These are two different things and sorting by `ord` conflated them: §3.0
@@ -589,7 +626,27 @@ export async function start() {
     // so the model carries it and this must not re-sort. `ord` is read by the
     // collapse pass, which is where "lowest collapses first" belongs.
     for (const spec of tab.groups) buildGroup(spec, panel, missing);
+    tabPanels.push([tab, panel]);
     btn.addEventListener("click", () => select(tab.id));
+  }
+
+  // Place the leftovers before the backstage is built, so "All commands" sees
+  // what is genuinely still unplaced rather than everything.
+  {
+    const claimed = new Set();
+    for (const [tab, panel] of tabPanels) {
+      const prefixes = FAMILIES[tab.id] || [];
+      if (!prefixes.length) continue;
+      const items = [];
+      for (const [id, node] of unplacedCommands(el)) {
+        if (claimed.has(id)) continue;
+        if (!prefixes.some((f) => id.startsWith(f))) continue;
+        claimed.add(id);
+        items.push(id);
+      }
+      if (!items.length) continue;
+      buildGroup({ label: "More", ord: 0, items }, panel, missing);
+    }
   }
 
   // **On `document.body`, not inside the ribbon.**
@@ -764,6 +821,12 @@ export function stop() {
   // the failure this whole comment is about.
   for (const node of [...borrowed].reverse()) {
     node.classList.remove("rb-hosted");
+    // Put the toolbar's roving model back exactly as it was.
+    if (node.dataset.rbTabindex !== undefined) {
+      if (node.dataset.rbTabindex === "") node.removeAttribute("tabindex");
+      else node.setAttribute("tabindex", node.dataset.rbTabindex);
+      delete node.dataset.rbTabindex;
+    }
     try { giveBack(node); } catch (e) { console.warn("[ribbon] could not restore", node.id, e); }
   }
   borrowed = [];
