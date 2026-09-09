@@ -280,20 +280,84 @@
   text-align: center;
 }
 
-/* A control on loan from the toolbar keeps its own styling — it is the same
- * node, and restyling it here would mean the ribbon and the toolbar disagreed
- * about what Bold looks like. Only the sizing floor is asserted, because the
- * toolbar's own metrics predate the 24px rule. */
-.oc-chrome-ribbon .rb-hosted { min-height: 26px; min-width: 26px; }
+/* **A borrowed control does not keep its styling — it loses it.**
+ *
+ * This comment used to claim the opposite, and the measurement says otherwise.
+ * `editor.css` scopes its rules as `.toolbar .tb-btn`, so the instant a node is
+ * moved out of `.toolbar` every one of them stops matching and the browser's
+ * own button styling takes over. Measured on `toolbar.bold` inside the ribbon:
+ * `border: 2px outset rgb(0,0,0)`, `background: rgb(239,239,239)` — a light
+ * grey bevelled box, in a dark theme — `border-radius: 0`, and a 2.4px icon
+ * stroke beside the proxies' 1.6. Half the ribbon was raw `<button>`s.
+ *
+ * So the borrowed controls are restyled here to match the proxies exactly.
+ * Appearance only: no rule below touches behaviour, and the node is still the
+ * same node with the same listeners, which is the entire point of borrowing it. */
+.oc-chrome-ribbon .rb-row .rb-hosted,
+.oc-chrome-ribbon .rb-row .tb-btn,
+.oc-chrome-ribbon .rb-row .tb-icon {
+  appearance: none;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 3px;
+  box-shadow: none;
+  color: var(--oc-text-color);
+  font: inherit;
+  font-size: 12px;
+  min-height: 26px;
+  min-width: 26px;
+  padding: 0 4px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+}
 
-/* **The floor has to reach the button, not just the wrapper.** Several toolbar
- * controls are a `.menu-wrap` around a real button, so `.rb-hosted` landed on
- * the wrapper and the thing a person actually clicks stayed 22px — measured on
- * `toolbar.currency`, and it is the pointer target that WCAG 2.5.8 is about,
- * not its container. */
-.oc-chrome-ribbon .rb-row button,
-.oc-chrome-ribbon .rb-row input { min-height: 26px; }
-.oc-chrome-ribbon .rb-row button:not(.tb-combo-caret) { min-width: 26px; }
+.oc-chrome-ribbon .rb-row .tb-btn:hover:not(:disabled),
+.oc-chrome-ribbon .rb-row .tb-icon:hover:not(:disabled) { background: var(--oc-surface-color); }
+.oc-chrome-ribbon .rb-row .tb-btn:active:not(:disabled) {
+  background: var(--oc-surface-color);
+  border-color: var(--oc-border-color);
+}
+.oc-chrome-ribbon .rb-row .tb-btn:focus-visible,
+.oc-chrome-ribbon .rb-row .tb-icon:focus-visible,
+.oc-chrome-ribbon .rb-row input:focus-visible {
+  outline: 2px solid var(--oc-accent-color);
+  outline-offset: 1px;
+}
+.oc-chrome-ribbon .rb-row .tb-btn[aria-pressed="true"],
+.oc-chrome-ribbon .rb-row .tb-toggle.is-on {
+  background: var(--oc-surface-color);
+  border-color: var(--oc-border-color);
+}
+.oc-chrome-ribbon .rb-row .tb-btn:disabled { opacity: 0.4; cursor: default; }
+
+/* **One icon size and one stroke weight across the whole band.** Measured
+ * before this: 18px, 16px and 14px glyphs side by side at 2.4px, 2px, 1.6px and
+ * 1.5px stroke. Nothing reads as one set of icons when the weights disagree —
+ * it is the difference a person sees before they can say what is wrong. */
+.oc-chrome-ribbon .rb-row svg,
+.oc-chrome-ribbon .rb-row .icon {
+  width: 16px;
+  height: 16px;
+  stroke-width: 1.7;
+  vector-effect: non-scaling-stroke;
+}
+.oc-chrome-ribbon .rb-btn.rb-large svg { width: 20px; height: 20px; stroke-width: 1.6; }
+
+/* The text inputs in the Font and Number groups — a raw `<input>` outside
+ * `.toolbar` is a bevelled 2px box too. */
+.oc-chrome-ribbon .rb-row input.tb-select {
+  appearance: none;
+  height: 24px;
+  padding: 0 6px;
+  border: 1px solid var(--oc-border-color);
+  border-radius: 3px;
+  background: var(--oc-bg-color);
+  color: var(--oc-text-color);
+  font: inherit;
+  font-size: 12px;
+}
 
 /* Two hosted controls carry their own width from a toolbar that laid them out
  * in one long row, and both look wrong in a group: the number-format combo

@@ -98,16 +98,60 @@
   stroke-linecap: round; stroke-linejoin: round;
 }
 
-/* A borrowed control keeps its own look — it is the same node, and restyling it
- * would mean the two chromes disagreed about what Bold is. Only the target-size
- * floor and the round shape are asserted, and the floor reaches the button
- * inside a `.menu-wrap` rather than stopping at the wrapper. */
-.oc-chrome-sheets .gs-hosted { min-height: 28px; border-radius: 14px; }
-.oc-chrome-sheets .gs-bar button { min-height: 28px; }
-.oc-chrome-sheets .gs-bar button:not(.tb-combo-caret) { min-width: 28px; }
-.oc-chrome-sheets .gs-bar .tb-select { max-width: 104px; height: 28px; }
-.oc-chrome-sheets .gs-bar .tb-combo-caret { width: 16px; min-width: 16px; }
-.oc-chrome-sheets .gs-bar svg:not(.icon) { max-width: 18px; max-height: 18px; }
+/* **A borrowed control loses its styling, it does not keep it.** `editor.css`
+ * scopes its rules as `.toolbar .tb-btn`, so a node moved out of `.toolbar`
+ * falls back to a raw bevelled `<button>` — measured at `2px outset` on a light
+ * grey ground, in a dark theme. Restyled here to match the proxies. Appearance
+ * only; the node and its listeners are untouched. */
+.oc-chrome-sheets .gs-bar .tb-btn,
+.oc-chrome-sheets .gs-bar .tb-icon,
+.oc-chrome-sheets .gs-bar .gs-hosted {
+  appearance: none;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 14px;
+  box-shadow: none;
+  color: var(--oc-text-color);
+  font: inherit;
+  font-size: 12px;
+  min-height: 28px;
+  min-width: 28px;
+  padding: 0 5px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+}
+.oc-chrome-sheets .gs-bar .tb-btn:hover:not(:disabled),
+.oc-chrome-sheets .gs-bar .tb-icon:hover:not(:disabled) { background: var(--oc-bg-color); }
+.oc-chrome-sheets .gs-bar .tb-btn[aria-pressed="true"] { background: var(--oc-bg-color); }
+.oc-chrome-sheets .gs-bar .tb-btn:focus-visible,
+.oc-chrome-sheets .gs-bar .tb-icon:focus-visible,
+.oc-chrome-sheets .gs-bar input:focus-visible {
+  outline: 2px solid var(--oc-accent-color);
+  outline-offset: 1px;
+}
+.oc-chrome-sheets .gs-bar .tb-btn:disabled { opacity: 0.38; cursor: default; }
+
+/* One icon size, one stroke weight, across borrowed and proxied alike. */
+.oc-chrome-sheets .gs-bar svg,
+.oc-chrome-sheets .gs-bar .icon {
+  width: 18px; height: 18px;
+  stroke-width: 1.7;
+  vector-effect: non-scaling-stroke;
+}
+
+.oc-chrome-sheets .gs-bar input.tb-select {
+  appearance: none;
+  height: 26px;
+  padding: 0 8px;
+  border: 1px solid var(--oc-border-color);
+  border-radius: 13px;
+  background: var(--oc-bg-color);
+  color: var(--oc-text-color);
+  font: inherit; font-size: 12px;
+}
+.oc-chrome-sheets .gs-bar .tb-combo-caret { width: 16px; min-width: 16px; border-radius: 8px; }
 
 /* ── Overflow ──────────────────────────────────────────────────────────────
  *
