@@ -737,6 +737,45 @@ export async function start() {
     g.querySelector(".rb-folded")?.remove();
   }
 
+  /// **The band is one tab stop, and arrows move inside it.**
+  ///
+  /// Making the borrowed controls tabbable fixed a hard failure — 23 of them
+  /// could not be reached by keyboard at all — but it left 104 tab stops
+  /// between the chrome and the grid, which is its own defect: nobody tabs a
+  /// hundred and four times to reach their spreadsheet. Excel's answer, and the
+  /// ARIA toolbar pattern's, is a roving `tabindex`: exactly one control in the
+  /// band is in the tab order, and Left/Right/Home/End move among the rest.
+  ///
+  /// Applied per panel and re-applied on every tab switch, because the set of
+  /// controls changes with the tab. Everything stays reachable; what changes is
+  /// that reaching it costs one Tab and some arrows instead of a hundred Tabs.
+  function rove(panel) {
+    const stops = () => [...panel.querySelectorAll("button, input")]
+      .filter((e) => !e.disabled && e.offsetParent !== null);
+    const list = stops();
+    if (!list.length) return;
+    for (const e of list) e.tabIndex = -1;
+    list[0].tabIndex = 0;
+
+    if (panel.dataset.roving === "1") return;
+    panel.dataset.roving = "1";
+    panel.addEventListener("keydown", (e) => {
+      const dir = e.key === "ArrowRight" ? 1 : e.key === "ArrowLeft" ? -1
+        : e.key === "Home" ? "first" : e.key === "End" ? "last" : 0;
+      if (!dir) return;
+      const list2 = stops();
+      const i = list2.indexOf(document.activeElement);
+      if (i < 0) return;
+      e.preventDefault();
+      const next = dir === "first" ? list2[0]
+        : dir === "last" ? list2[list2.length - 1]
+        : list2[(i + dir + list2.length) % list2.length];
+      for (const el2 of list2) el2.tabIndex = -1;
+      next.tabIndex = 0;
+      next.focus();
+    });
+  }
+
   function select(id) {
     for (const [k, p] of panels) p.hidden = k !== id;
     for (const b of tablist.querySelectorAll(".rb-tab")) {
@@ -747,7 +786,7 @@ export async function start() {
     }
     syncProxies(el);
     const live = panels.get(id);
-    if (live) fitPanel(live);
+    if (live) { fitPanel(live); rove(live); }
   }
 
   function applyLayout(v) {

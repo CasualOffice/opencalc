@@ -275,6 +275,31 @@ export async function start() {
   window.addEventListener("resize", onResize);
   el._onResize = onResize;
 
+  // One tab stop for the row, arrows within it — the ARIA toolbar pattern, and
+  // the same reason the ribbon does it: reachable must not mean thirty-odd Tab
+  // presses between the chrome and the grid.
+  {
+    const stops = () => [...bar.querySelectorAll("button, input")]
+      .filter((e) => !e.disabled && e.offsetParent !== null);
+    const list = stops();
+    for (const e of list) e.tabIndex = -1;
+    if (list[0]) list[0].tabIndex = 0;
+    bar.addEventListener("keydown", (e) => {
+      const dir = e.key === "ArrowRight" ? 1 : e.key === "ArrowLeft" ? -1
+        : e.key === "Home" ? "first" : e.key === "End" ? "last" : 0;
+      if (!dir) return;
+      const l = stops();
+      const i = l.indexOf(document.activeElement);
+      if (i < 0) return;
+      e.preventDefault();
+      const next = dir === "first" ? l[0] : dir === "last" ? l[l.length - 1]
+        : l[(i + dir + l.length) % l.length];
+      for (const el2 of l) el2.tabIndex = -1;
+      next.tabIndex = 0;
+      next.focus();
+    });
+  }
+
   borrowed = [...el.querySelectorAll(".gs-hosted")].map(movableFor);
   fit();
   syncProxies(el);
