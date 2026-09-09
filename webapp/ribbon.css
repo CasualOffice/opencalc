@@ -130,9 +130,13 @@
   padding: 4px 8px 2px;
   height: 78px;          /* 58 row + 14 caption + 6 padding: one band, always */
   box-sizing: border-box;
-  overflow-x: auto;
-  overflow-y: hidden;
-  scrollbar-width: thin;
+  /* **No scrollbar, ever.** This was `overflow-x: auto`, which put a scroll
+   * track across the bottom of the ribbon — a spreadsheet's chrome does not
+   * scroll, and none of Excel, Sheets or OnlyOffice has one there. Fitting the
+   * band is the collapse contract's job: groups fold in the authored `ord`
+   * order until the row fits, so overflow is a state that should not survive a
+   * layout pass rather than something to hand the user a bar for. */
+  overflow: hidden;
 }
 
 /* A group is a 1px rule and nothing else — no capsule.
@@ -493,50 +497,89 @@
   max-width: none; white-space: nowrap; font-size: 14px; text-align: left;
 }
 
-/* The chooser in Settings. Two buttons behaving as a radio group, styled as a
- * segmented control — which is the one place that idiom is right, because this
- * *is* a choice between two exclusive states rather than a toolbar group. */
-.chrome-choice { display: inline-flex; gap: 2px; padding: 2px; border-radius: 6px; background: var(--oc-surface-color); }
+/* The chooser in Settings.
+ *
+ * **It stacks under its label rather than sitting beside it**, and that is a
+ * fix rather than a preference. The settings popover is 230px wide — 202px of
+ * content — and three labelled options need 213px, so the row overflowed and
+ * the panel scrolled sideways. Every other row here is a label and one small
+ * control; this one is a label and three, so it gets its own line and divides
+ * the full width evenly. That holds at the popover's 202px and at the dialog's
+ * 272px without either being a special case. */
+.set-row:has(> .chrome-choice) {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 6px;
+}
+
+.chrome-choice {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 2px;
+  padding: 2px;
+  border-radius: 8px;
+  background: var(--oc-surface-color);
+  width: 100%;
+  box-sizing: border-box;
+}
 .chrome-choice button {
   appearance: none; border: 0; cursor: pointer; font: inherit; font-size: 12px;
-  padding: 0 12px; min-height: 26px; border-radius: 4px;
-  background: transparent; color: var(--oc-text-color);
+  padding: 0 6px; min-height: 26px; border-radius: 6px;
+  background: transparent; color: var(--oc-muted-text-color, var(--oc-text-color));
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
-.chrome-choice button:hover { background: var(--oc-background-color); }
-.chrome-choice button.is-on { background: var(--oc-background-color); font-weight: 600; }
+.chrome-choice button:hover { background: var(--oc-background-color); color: var(--oc-text-color); }
+.chrome-choice button.is-on {
+  background: var(--oc-background-color);
+  color: var(--oc-text-color);
+  font-weight: 600;
+  box-shadow: var(--oc-control-shadow, none);
+}
 .chrome-choice button:focus-visible { outline: 2px solid var(--oc-accent-color); outline-offset: -2px; }
 
 /* ── The collapse contract (`docs/91` §5) ─────────────────────────────────── */
 
+.oc-chrome-ribbon .rb-group { position: relative; }
 .oc-chrome-ribbon .rb-group.is-folded > .rb-row,
 .oc-chrome-ribbon .rb-group.is-folded > .rb-cap { display: none; }
+.oc-chrome-ribbon .rb-group.is-folded { justify-content: center; padding: 0 4px; }
 
-.oc-chrome-ribbon .rb-group.is-folded {
-  justify-content: center;
-  padding: 0 4px;
-}
-
+/* `appearance: none` and an explicit background are not optional on a `<button>`.
+ * Without them this drew at `rgb(239, 239, 239)` — the user agent's own grey —
+ * on a dark ground, which is precisely the "light things in dark mode" defect.
+ * Every button in this file states its own background for that reason. */
 .oc-chrome-ribbon .rb-folded {
-  appearance: none; cursor: pointer;
-  border: 1px solid transparent; border-radius: 3px;
-  background: transparent; color: var(--oc-text-color);
-  font: inherit; font-size: 12px;
-  min-height: 56px; min-width: 44px;
+  appearance: none;
+  cursor: pointer;
+  border: 1px solid transparent;
+  border-radius: 3px;
+  background: transparent;
+  color: var(--oc-text-color);
+  font: inherit;
+  font-size: 11px;
+  min-height: 56px;
+  min-width: 44px;
   padding: 4px 8px;
-  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 3px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
 }
 .oc-chrome-ribbon .rb-folded::after {
-  content: ""; width: 0; height: 0;
-  border-left: 3.5px solid transparent; border-right: 3.5px solid transparent;
+  content: "";
+  width: 0; height: 0;
+  border-left: 3.5px solid transparent;
+  border-right: 3.5px solid transparent;
   border-top: 4px solid currentColor;
 }
 .oc-chrome-ribbon .rb-folded span { max-width: 72px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .oc-chrome-ribbon .rb-folded:hover { background: var(--oc-surface-color); }
 .oc-chrome-ribbon .rb-folded:focus-visible { outline: 2px solid var(--oc-accent-color); outline-offset: 1px; }
 
-/* A folded group opens its own contents below itself, which is what Excel's
- * collapsed group does — the popup carries the same controls, at the same
- * sizes, so nothing has to be learned twice. */
+/* A folded group opens its own contents below itself — the same controls at the
+ * same sizes, so nothing has to be learned twice. */
 .oc-chrome-ribbon .rb-group.is-folded.is-open > .rb-row {
   display: grid;
   position: absolute;
@@ -544,14 +587,14 @@
   top: 100%;
   margin-top: 2px;
   padding: 6px 8px;
-  background: var(--oc-background-color);
+  background: var(--oc-popover-background-color, var(--oc-background-color));
   border: 1px solid var(--oc-border-color);
   border-radius: 4px;
   box-shadow: var(--oc-popover-shadow, 0 6px 20px rgba(0, 0, 0, 0.28));
 }
-.oc-chrome-ribbon .rb-group { position: relative; }
 
-/* The "All commands" pane: the long tail the tabs do not place. */
+/* ── "All commands", the long tail the tabs do not place ──────────────────── */
+
 .oc-chrome-ribbon .rb-pane-note { margin: -6px 0 18px; opacity: 0.75; font-size: 13px; }
 .oc-chrome-ribbon .rb-all-group { margin-bottom: 18px; width: 100%; }
 .oc-chrome-ribbon .rb-all-group h3 {
@@ -563,11 +606,9 @@
   min-height: 28px; padding: 0 10px;
   border: 1px solid var(--oc-border-color); border-radius: 4px;
 }
-.oc-chrome-ribbon .rb-all-items .rb-btn .rb-label { max-width: 200px; }
 
-/* The list form: icon, then words, left aligned, one per line. Used in the
- * backstage panes and in "All commands", where a column of bare glyphs is
- * unreadable however good the glyphs are. */
+/* ── The list form: icon, then words, one per line ────────────────────────── */
+
 .oc-chrome-ribbon .rb-btn.rb-list {
   justify-content: flex-start;
   gap: 10px;

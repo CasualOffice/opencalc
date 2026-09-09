@@ -9,7 +9,7 @@
     <!-- The ribbon chrome (`UX-RIB-04`, `docs/91`). Inert without the
          `.oc-chrome-ribbon` class, so loading it unconditionally costs the
          default chrome nothing and keeps the switch a one-class change. -->
-    <link rel="stylesheet" href="./ribbon.css?v=15" />
+    <link rel="stylesheet" href="./ribbon.css?v=18" />
     <link rel="stylesheet" href="./sheets.css?v=4" />
   </head>
   <body class="editor-body">
@@ -165,6 +165,19 @@
            people's trademarks, and naming a competitor in our own settings
            panel is a claim about compatibility we would then have to keep. They
            describe the shape instead, which is also what a user is choosing. -->
+      <!-- **Theme, where a person looks for it** (`UX-RIB-04`).
+           It lives in `View ▸ Theme` (`UX-CHR-01` put it there, and that stands
+           for the toolbar and Compact chromes, which both draw a menu bar). The
+           ribbon *hides* the menu bar, so under the ribbon there was no pointer
+           route to the theme at all — the one setting a person changes on their
+           first day. This row is a proxy for the same menu items, so there is
+           still exactly one definition of the current theme and no second
+           control to drift out of step with it. Built by the bootstrap below,
+           from whatever `view.theme.*` the build actually has. -->
+      <div class="set-row">
+        <span>Theme</span>
+        <span class="chrome-choice" id="set-theme" role="radiogroup" aria-label="Theme"></span>
+      </div>
       <div class="set-row">
         <span>Interface</span>
         <span class="chrome-choice" id="set-chrome" role="radiogroup" aria-label="Interface">
@@ -764,8 +777,54 @@
         setTimeout(syncGrid, 500);
       }
 
+      /// Mirror `View ▸ Theme` into Settings.
+      ///
+      /// Built from the live menu rather than from a list here: the options are
+      /// whatever that submenu has, and hard-coding them would be a second
+      /// definition to keep in step. Each button clicks the real menu item, so
+      /// the theme still has exactly one owner.
+      function buildThemeRow() {
+        const host = document.getElementById("set-theme");
+        if (!host) return;
+        const items = [...document.querySelectorAll("[data-oc-command]")]
+          .filter((n) => n.dataset.ocCommand.startsWith("view.theme."));
+        if (!items.length) { host.closest(".set-row")?.remove(); return; }
+        host.textContent = "";
+        for (const node of items) {
+          const b = document.createElement("button");
+          b.type = "button";
+          b.setAttribute("role", "radio");
+          b.textContent = (node.querySelector(".mi-label")?.textContent || node.textContent || "").trim();
+          b.addEventListener("click", () => {
+            node.click();
+            // The menu owns the state; read it back rather than assuming the
+            // click took, so a refused change does not leave a lit button.
+            requestAnimationFrame(paintTheme);
+          });
+          host.appendChild(b);
+        }
+        paintTheme();
+      }
+
+      /// Which theme is current, taken from the menu's own tick.
+      function paintTheme() {
+        const host = document.getElementById("set-theme");
+        if (!host) return;
+        const items = [...document.querySelectorAll("[data-oc-command]")]
+          .filter((n) => n.dataset.ocCommand.startsWith("view.theme."));
+        [...host.children].forEach((b, i) => {
+          const node = items[i];
+          const on = !!node && (node.getAttribute("aria-checked") === "true"
+            || !!node.querySelector(".mi-check")?.textContent.trim());
+          b.setAttribute("aria-checked", on ? "true" : "false");
+          b.classList.toggle("is-on", on);
+        });
+      }
+
       async function boot() {
         await apply(chosenChrome());
+        buildThemeRow();
+
         const box = document.getElementById("set-chrome");
         if (!box) return;
         const paint = () => {
