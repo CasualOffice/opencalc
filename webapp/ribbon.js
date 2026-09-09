@@ -124,6 +124,18 @@ const SKIP = new Set([
 
 const byCommand = (id) => document.querySelector(`[data-oc-command="${CSS.escape(id)}"]`);
 
+/// What actually has to move when a control is borrowed.
+///
+/// **The command node is often only part of an assembly.** `#tb-font` is an
+/// `<input>` inside a `.menu-wrap` that also holds `#tb-font-caret` and the
+/// `#font-menu` popup; the same shape carries the size box and every colour and
+/// border picker. Borrowing the input alone moved the box and left its caret and
+/// its dropdown behind in a `.toolbar` that this chrome sets to `display: none`
+/// — so the font list opened inside a hidden ancestor and nothing appeared.
+/// Take the wrapper when there is one, so the assembly stays intact and its
+/// popup positions against the control the user just clicked.
+const movableFor = (node) => node.closest(".menu-wrap") || node;
+
 /* ── Labels ───────────────────────────────────────────────────────────────── */
 
 /// Excel's word, then ours, then the id.
@@ -438,7 +450,7 @@ function buildGroup(spec, panel, missing) {
         node.dataset.rbTabindex = node.hasAttribute("tabindex") ? node.getAttribute("tabindex") : "";
       }
       node.tabIndex = 0;
-      borrow(node, row);
+      borrow(movableFor(node), row);
     } else {
       row.appendChild(proxy(node, cmd, size));
     }
@@ -506,6 +518,13 @@ function ensureSprite() {
       if (document.getElementById("oc-ribbon-icons")) return;
       const host = document.createElement("div");
       host.style.display = "none";
+      // The icon sprite, fetched from this origin from a file that ships in the
+      // tree beside this module. `<symbol>` definitions and nothing else — no
+      // script, no event attributes, and nothing interpolated that a user or a
+      // document can influence. Markup rather than `textContent` because
+      // `<use href="#id">` resolves against parsed symbols and there is no
+      // other route to that.
+      // oc-safe-html: static local sprite, no interpolation.
       host.innerHTML = svg;
       document.body.insertBefore(host.firstElementChild, document.body.firstChild);
     })
@@ -700,7 +719,9 @@ export async function start() {
     btn.className = "rb-folded";
     btn.setAttribute("aria-haspopup", "true");
     btn.setAttribute("aria-expanded", "false");
-    btn.innerHTML = `<span>${cap}</span>`;
+    const capText = document.createElement("span");
+    capText.textContent = cap;
+    btn.appendChild(capText);
     btn.title = cap;
     btn.addEventListener("click", (e) => {
       e.stopPropagation();
@@ -756,7 +777,8 @@ export async function start() {
   window.addEventListener("resize", onResize);
   el._onResize = onResize;
 
-  borrowed = [...el.querySelectorAll(".rb-hosted")];
+  // Record what was actually moved — the wrapper where there is one.
+  borrowed = [...el.querySelectorAll(".rb-hosted")].map(movableFor);
   // The class first: every metric in `ribbon.css` is scoped to it, so a panel
   // measured before it is applied has no constrained width and `fitPanel()`
   // concludes that everything fits. It folded nothing, at 2562px into 1563.

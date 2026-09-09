@@ -54,6 +54,18 @@ const PARAMS = new URL(location.href).searchParams;
 const home = new WeakMap();
 const byCommand = (id) => document.querySelector(`[data-oc-command="${CSS.escape(id)}"]`);
 
+/// What actually has to move when a control is borrowed.
+///
+/// **The command node is often only part of an assembly.** `#tb-font` is an
+/// `<input>` inside a `.menu-wrap` that also holds `#tb-font-caret` and the
+/// `#font-menu` popup; the same shape carries the size box and every colour and
+/// border picker. Borrowing the input alone moved the box and left its caret and
+/// its dropdown behind in a `.toolbar` that this chrome sets to `display: none`
+/// — so the font list opened inside a hidden ancestor and nothing appeared.
+/// Take the wrapper when there is one, so the assembly stays intact and its
+/// popup positions against the control the user just clicked.
+const movableFor = (node) => node.closest(".menu-wrap") || node;
+
 function borrow(node, into) {
   if (!home.has(node)) home.set(node, { parent: node.parentElement, next: node.nextElementSibling });
   into.appendChild(node);
@@ -123,6 +135,10 @@ function ensureSprite() {
       if (document.getElementById("oc-ribbon-icons")) return;
       const host = document.createElement("div");
       host.style.display = "none";
+      // The same sprite `ribbon.js` loads, from the same file in this tree:
+      // `<symbol>` definitions only, nothing interpolated. Markup because
+      // `<use href="#id">` needs parsed symbols.
+      // oc-safe-html: static local sprite, no interpolation.
       host.innerHTML = svg;
       document.body.insertBefore(host.firstElementChild, document.body.firstChild);
     })
@@ -158,7 +174,7 @@ export async function start() {
     }
     const node = byCommand(id);
     if (!node) { missing.push(id); continue; }
-    if (node.closest(".toolbar")) { node.classList.add("gs-hosted"); borrow(node, bar); }
+    if (node.closest(".toolbar")) { node.classList.add("gs-hosted"); borrow(movableFor(node), bar); }
     else bar.appendChild(proxy(node, id));
   }
 
@@ -184,25 +200,68 @@ export async function start() {
   document.addEventListener("click", () => {
     if (!overflow.hidden) { overflow.hidden = true; more.setAttribute("aria-expanded", "false"); }
   });
-  bar.append(more, overflow);
+  // **The overflow popup hangs off `el`, not off the bar.**
+  //
+  // It was `bar.append(more, overflow)`, which put it *inside* the element being
+  // measured — so moving a control into it never reduced `bar.scrollWidth`, the
+  // fit loop never satisfied its exit condition, and it ran its full 200
+  // iterations forcing a layout on each one. Every resize scheduled another
+  // pass, and the renderer stopped responding: a chrome switch took longer than
+  // a 45-second debugger timeout. Guarding the loop had hidden the real fault,
+  // which is that the measurement could never converge.
+  bar.appendChild(more);
+  el.appendChild(overflow);
 
   el.appendChild(bar);
   anchor.parentElement.insertBefore(el, anchor);
   document.documentElement.classList.add("oc-chrome-sheets");
 
-  /// Move what does not fit into the overflow, and bring it back when it does.
+  /// Move what does not fit into the overflow.
   ///
-  /// Right to left, because the rightmost slots are the least-used by
-  /// construction — the selection rule above puts the daily verbs at the left.
+  /// **Arithmetic, not a measure-and-retry loop**, and that is the whole point.
+  /// Two earlier versions looped `while (bar.scrollWidth > bar.clientWidth)`,
+  /// moving one control per pass. Both hung the renderer: the first because the
+  /// popup lived *inside* the element being measured, so the condition could
+  /// never become false; the second because `overflow: visible` makes
+  /// `scrollWidth` an unreliable answer to "does this fit". A loop whose exit
+  /// depends on a measurement it cannot trust is a loop that does not exit, and
+  /// a guard only converts a hang into a hundred needless reflows.
+  ///
+  /// So: measure every child once, add the widths up, and cut the list where
+  /// the budget runs out. One layout pass, O(n), no condition to converge on.
+  ///
+  /// Right to left, because the selection rule puts the daily verbs at the left,
+  /// which makes the rightmost slot the most expendable by construction.
   function fit() {
     for (const n of [...overflow.children]) bar.insertBefore(n, more);
-    const movable = () => [...bar.children].filter((n) =>
-      n !== more && n !== overflow && !n.classList.contains("gs-sep"));
-    let guard = 0;
-    while (bar.scrollWidth > bar.clientWidth && guard++ < 200) {
-      const list = movable();
-      if (list.length <= 6) break; // never strip it to nothing
-      overflow.insertBefore(list[list.length - 1], overflow.firstChild);
+
+    const style = getComputedStyle(bar);
+    const pad = parseFloat(style.paddingLeft) + parseFloat(style.paddingRight);
+    const gap = parseFloat(style.gap) || 0;
+    const budget = bar.clientWidth - pad - more.offsetWidth - gap;
+    if (budget <= 0) { more.hidden = true; return; }
+
+    const kids = [...bar.children].filter((n) => n !== more);
+    const widths = kids.map((n) => n.offsetWidth + gap);
+
+    let used = widths.reduce((a, b) => a + b, 0);
+    let cut = kids.length;
+    // Never strip it to nothing: six controls is the floor, below which the row
+    // stops being a toolbar and becomes a button that opens a menu.
+    while (used > budget && cut > 6) {
+      cut -= 1;
+      used -= widths[cut];
+    }
+
+    for (let i = kids.length - 1; i >= cut; i -= 1) {
+      overflow.insertBefore(kids[i], overflow.firstChild);
+    }
+    // A separator stranded at either end of the row is a rule against nothing.
+    for (const sep of [...bar.children]) {
+      if (!sep.classList.contains("gs-sep")) continue;
+      const prev = sep.previousElementSibling;
+      const next = sep.nextElementSibling;
+      sep.hidden = !prev || !next || next === more;
     }
     more.hidden = overflow.children.length === 0;
   }
@@ -216,7 +275,7 @@ export async function start() {
   window.addEventListener("resize", onResize);
   el._onResize = onResize;
 
-  borrowed = [...el.querySelectorAll(".gs-hosted")];
+  borrowed = [...el.querySelectorAll(".gs-hosted")].map(movableFor);
   fit();
   syncProxies(el);
 

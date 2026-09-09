@@ -35,10 +35,24 @@
   overflow: hidden;
 }
 
-/* The toolbar has no such consumer — nothing polls it — so it may simply not
- * be drawn. Its controls are not in it anyway while the ribbon is up: they
- * have been moved into the ribbon's groups and will be moved back. */
-.oc-chrome-ribbon .toolbar { display: none; }
+/* **Off-screen, not `display: none`** — and this one was expensive to learn.
+ *
+ * The editor re-runs `reflowToolbar()` on every `window.resize`, and that walks
+ * `while (!fits())` moving controls into an overflow flyout. `fits()` measures
+ * the bar, a `display: none` bar measures zero, and zero never fits — so every
+ * resize spent its guard budget on sixty forced layouts, and anything that
+ * resized repeatedly (a chrome swap, a theme change, the grid settling) locked
+ * the renderer. Off-screen with a real width keeps the measurement honest and
+ * the reflow a no-op, and the nodes stay queryable for `listCommands()`. */
+.oc-chrome-ribbon .toolbar {
+  position: absolute;
+  left: -99999px;
+  top: 0;
+  width: 1400px;
+  height: 1px;
+  overflow: hidden;
+  pointer-events: none;
+}
 
 /* ── Tab strip ─────────────────────────────────────────────────────────── */
 

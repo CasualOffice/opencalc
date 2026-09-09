@@ -13,6 +13,7 @@
 
 .oc-chrome-sheets .oc-sheets {
   display: block;
+  position: relative;
   background: var(--oc-background-color);
   padding: 4px 8px 6px;
 }
@@ -27,9 +28,18 @@
   min-height: 30px;
 }
 
-/* The editor's own toolbar is not drawn — its controls have been borrowed into
- * the row below and will be given back. */
-.oc-chrome-sheets .toolbar { display: none; }
+/* Off-screen rather than `display: none`, for the reason `ribbon.css` gives at
+ * length: a zero-width toolbar makes the editor's own `reflowToolbar()` spin
+ * its guard on every resize, which is what locked the renderer. */
+.oc-chrome-sheets .toolbar {
+  position: absolute;
+  left: -99999px;
+  top: 0;
+  width: 1400px;
+  height: 1px;
+  overflow: hidden;
+  pointer-events: none;
+}
 
 /* ── The one row ───────────────────────────────────────────────────────────
  *
@@ -167,9 +177,11 @@
 .oc-chrome-sheets .gs-more { margin-left: auto; font-size: 16px; }
 
 .oc-chrome-sheets .gs-overflow {
+  /* Positioned against `.oc-sheets`, which is now its parent — see the note in
+     `sheets.js` about why it must not live inside the element being measured. */
   position: absolute;
-  right: 4px;
-  top: 100%;
+  right: 12px;
+  top: calc(100% - 6px);
   z-index: 30;
   display: flex;
   flex-wrap: wrap;

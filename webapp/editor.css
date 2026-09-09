@@ -73,7 +73,11 @@
   --oc-text-color: #0b0d12;
   --oc-icon-color: #454b57;        /* default toolbar icon */
   --oc-muted-text-color: #7b8391;       /* secondary text */
-  --oc-faint-text-color: #9aa1ad;       /* tertiary / shortcuts */
+  /* Tertiary text: shortcut hints, the save state, the status line.
+     Was #9aa1ad, which is 2.63:1 on white — WCAG 1.4.3 wants 4.5 and this
+     is small text, so it was the worst contrast in the editor. #666e7c is
+     5.08:1 and still reads as clearly secondary. */
+  --oc-faint-text-color: #666e7c;       /* tertiary / shortcuts */
   --oc-disabled-color: #b6bcc7;
   --oc-border-color: #e8eaee;      /* dividers, gridlines */
   --oc-control-border-color: #dfe2e8;    /* control outlines */
@@ -131,7 +135,8 @@
   --oc-text-color: #e7ebf0;
   --oc-icon-color: #b3bccb;
   --oc-muted-text-color: #9aa6b4;
-  --oc-faint-text-color: #6b7686;
+  /* 4.08:1 on the dark ground, just under the 4.5 floor. #7b8797 is 5.26. */
+  --oc-faint-text-color: #7b8797;
   --oc-disabled-color: #454e5c;
   --oc-border-color: #262c34;
   --oc-control-border-color: #2c333d;
@@ -176,7 +181,8 @@
     --oc-text-color: #e7ebf0;
     --oc-icon-color: #b3bccb;
     --oc-muted-text-color: #9aa6b4;
-    --oc-faint-text-color: #6b7686;
+    /* 4.08:1 on the dark ground, just under the 4.5 floor. #7b8797 is 5.26. */
+  --oc-faint-text-color: #7b8797;
     --oc-disabled-color: #454e5c;
     --oc-border-color: #262c34;
     --oc-control-border-color: #2c333d;
@@ -613,7 +619,19 @@ body {
    what `editor.narrow-screens` asks of every band in this column. */
 .oc-recovery-actions { margin-left: auto; display: inline-flex; gap: 6px; flex: 0 0 auto; }
 .oc-recovery-actions .oc-btn { padding: 4px 10px; font-size: 12px; }
-.oc-btn.primary { background: var(--oc-accent-color); border-color: var(--oc-accent-color); color: #fff; }
+/* White on the raw accent is 3.3:1 — measured on `#16a34a`, and WCAG 1.4.3
+   wants 4.5 for text this size. A quarter black takes it to about 5.4 and keeps
+   it recognisably the accent. Derived from the token, so an integrator who
+   swaps the accent gets a legible button rather than one that happened to work
+   for green. The ribbon's File tab carries the same correction. */
+.oc-btn.primary {
+  background: color-mix(in srgb, var(--oc-accent-color), #000 25%);
+  border-color: color-mix(in srgb, var(--oc-accent-color), #000 25%);
+  color: #fff;
+}
+@supports not (background: color-mix(in srgb, red, blue)) {
+  .oc-btn.primary { background: var(--oc-accent-color); border-color: var(--oc-accent-color); }
+}
 .oc-btn.primary:hover { filter: brightness(1.06); }
 
 /* ── Share ───────────────────────────────────────────────────────────────────
@@ -825,6 +843,43 @@ input.tb-size::placeholder, input.tb-font::placeholder { color: var(--oc-faint-t
   display: inline-flex; align-items: center; justify-content: center;
 }
 .settings-close:hover { background: var(--oc-surface-color); color: var(--oc-text-color); }
+
+/* The scroll-speed slider, themed.
+ *
+ * A bare `input[type=range]` draws the platform control, whose track is white —
+ * which in dark mode is a bright bar across the settings panel. Pre-existing,
+ * and found while auditing the chrome for exactly this class of defect: an
+ * element that is light because nobody told it not to be. */
+.settings-panel input[type="range"] {
+  appearance: none;
+  width: 110px;
+  height: 16px;
+  background: transparent;
+  cursor: pointer;
+}
+.settings-panel input[type="range"]::-webkit-slider-runnable-track {
+  height: 4px;
+  border-radius: 2px;
+  background: var(--oc-border-color);
+}
+.settings-panel input[type="range"]::-webkit-slider-thumb {
+  appearance: none;
+  width: 12px; height: 12px;
+  margin-top: -4px;
+  border: 0; border-radius: 50%;
+  background: var(--oc-accent-color);
+}
+.settings-panel input[type="range"]::-moz-range-track {
+  height: 4px; border-radius: 2px; background: var(--oc-border-color);
+}
+.settings-panel input[type="range"]::-moz-range-thumb {
+  width: 12px; height: 12px; border: 0; border-radius: 50%;
+  background: var(--oc-accent-color);
+}
+.settings-panel input[type="range"]:focus-visible {
+  outline: 2px solid var(--oc-accent-color);
+  outline-offset: 2px;
+}
 /* Only under the dialog form — a popover the user can dismiss by clicking the
    sheet must not put a sheet of glass over the sheet. */
 .settings-scrim { position: fixed; inset: 0; z-index: 69; background: rgba(15, 18, 24, .22); }
