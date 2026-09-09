@@ -1,0 +1,665 @@
+/* The ribbon chrome (`UX-RIB-04`, docs/91).
+ *
+ * Every value here comes from a token `editor.css` already defines, so the
+ * ribbon inherits the accent an integrator swapped and both themes at once.
+ * Nothing in this file names a colour: a literal here would be a colour that
+ * works in one theme and is wrong in the other, which is the defect this
+ * project has already paid for elsewhere.
+ *
+ * Loaded always, active only under `.oc-chrome-ribbon`. Absent that class the
+ * whole file is inert, which is what makes the switch reversible. */
+
+.oc-ribbon { display: none; }
+
+.oc-chrome-ribbon .oc-ribbon {
+  display: block;
+  background: var(--oc-background-color);
+  border-bottom: 1px solid var(--oc-border-color);
+  user-select: none;
+}
+
+/* The menu bar and the toolbar stay in the DOM and stop being drawn.
+ *
+ * Not `display: none` on the menu bar, and the reason is a shipped bug rather
+ * than a preference: `menuModel()` is wired to `#menubar .menu-top` and the
+ * desktop shell's readiness poll *blocks* on that model being non-empty, so an
+ * empty model does not fail — it hangs the shell forever. Off-screen keeps
+ * every node queryable, measurable and focusable by script, which is all the
+ * native menu builder and `listCommands()` need. */
+.oc-chrome-ribbon .menubar {
+  position: absolute;
+  left: -99999px;
+  top: 0;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+}
+
+/* **Off-screen, not `display: none`** — and this one was expensive to learn.
+ *
+ * The editor re-runs `reflowToolbar()` on every `window.resize`, and that walks
+ * `while (!fits())` moving controls into an overflow flyout. `fits()` measures
+ * the bar, a `display: none` bar measures zero, and zero never fits — so every
+ * resize spent its guard budget on sixty forced layouts, and anything that
+ * resized repeatedly (a chrome swap, a theme change, the grid settling) locked
+ * the renderer. Off-screen with a real width keeps the measurement honest and
+ * the reflow a no-op, and the nodes stay queryable for `listCommands()`. */
+.oc-chrome-ribbon .toolbar {
+  position: absolute;
+  left: -99999px;
+  top: 0;
+  width: 1400px;
+  height: 1px;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+/* ── Tab strip ─────────────────────────────────────────────────────────── */
+
+.oc-chrome-ribbon .rb-tabs {
+  display: flex;
+  align-items: stretch;
+  gap: 2px;
+  height: 32px;
+  padding: 0 8px;
+  border-bottom: 1px solid var(--oc-border-color);
+}
+
+.oc-chrome-ribbon .rb-tablist { display: flex; align-items: stretch; gap: 2px; flex: 1; min-width: 0; overflow-x: auto; scrollbar-width: none; }
+.oc-chrome-ribbon .rb-tablist::-webkit-scrollbar { display: none; }
+
+/* File is the accent-filled button Excel gives it — but filled with
+ * `--oc-accent-color`, the one host-swappable token, rather than Excel's green.
+ * `docs/91` §8 refuses the brand colour explicitly: an integrator's build
+ * should get their accent here, not Microsoft's. */
+.oc-chrome-ribbon .rb-file {
+  appearance: none; border: 0; cursor: pointer;
+  font: inherit; font-size: 13px; font-weight: 600;
+  padding: 0 14px; min-height: 26px; margin: 3px 6px 3px 0;
+  border-radius: 4px;
+  /* **Darkened, because white on the raw accent is 3.3:1.**
+   * Measured: `#16a34a` against `#fff` gives 3.30, and WCAG 1.4.3 wants 4.5 for
+   * text this size (13px/600 is not "large"). A quarter-black mix takes it to
+   * about 5.4 while still reading as the same accent — and it stays derived from
+   * the token, so an integrator who swaps the accent gets a legible File button
+   * rather than one that happens to work for green. */
+  background: color-mix(in srgb, var(--oc-accent-color), #000 25%);
+  color: #fff;
+}
+/* Browsers without `color-mix` keep the accent; the declaration above simply
+   does not apply, so this is a floor rather than a fallback. */
+@supports not (background: color-mix(in srgb, red, blue)) {
+  .oc-chrome-ribbon .rb-file { background: var(--oc-accent-color); }
+}
+.oc-chrome-ribbon .rb-file:hover { filter: brightness(1.08); }
+.oc-chrome-ribbon .rb-file:focus-visible { outline: 2px solid var(--oc-text-color); outline-offset: 2px; }
+
+.oc-chrome-ribbon .rb-layout {
+  appearance: none; border: 0; background: transparent; cursor: pointer;
+  color: var(--oc-muted-text-color, var(--oc-text-color));
+  font: inherit; min-width: 26px; min-height: 26px; margin: 3px 0;
+  border-radius: 4px; flex: none;
+}
+.oc-chrome-ribbon .rb-layout:hover { background: var(--oc-surface-color); }
+.oc-chrome-ribbon .rb-layout:focus-visible { outline: 2px solid var(--oc-accent-color); outline-offset: -2px; }
+
+.oc-chrome-ribbon .rb-tab {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: var(--oc-muted-text-color, var(--oc-text-color));
+  font: inherit;
+  font-size: 13px;
+  padding: 0 12px;
+  min-height: 32px;      /* WCAG 2.5.8: the strip is the full target height */
+  border-radius: 4px 4px 0 0;
+  cursor: pointer;
+  position: relative;
+  white-space: nowrap;
+}
+
+.oc-chrome-ribbon .rb-tab:hover { background: var(--oc-surface-color); }
+.oc-chrome-ribbon .rb-tab:focus-visible {
+  outline: 2px solid var(--oc-accent-color);
+  outline-offset: -2px;
+}
+.oc-chrome-ribbon .rb-tab.is-on { color: var(--oc-text-color); font-weight: 600; }
+
+/* The underline travels rather than cutting: one element would be better still,
+ * but a transitioned pseudo-element keeps this file additive. */
+.oc-chrome-ribbon .rb-tab::after {
+  content: "";
+  position: absolute;
+  left: 8px; right: 8px; bottom: 0;
+  height: 2px;
+  background: var(--oc-accent-color);
+  transform: scaleX(0);
+  transition: transform 120ms cubic-bezier(0, 0, 0.4, 1);
+}
+.oc-chrome-ribbon .rb-tab.is-on::after { transform: scaleX(1); }
+
+/* ── Ribbon body ───────────────────────────────────────────────────────── */
+
+.oc-chrome-ribbon .rb-body { padding: 0; }
+
+/* `[hidden]` is a `display: none` in the UA sheet and `display: flex` below
+ * would beat it on specificity, so every panel would draw at once — which is
+ * exactly what happened the first time this ran. The attribute is the state, so
+ * the attribute wins here explicitly. */
+.oc-chrome-ribbon .rb-panel[hidden] { display: none; }
+
+.oc-chrome-ribbon .rb-panel {
+  display: flex;
+  align-items: stretch;
+  gap: 0;
+  padding: 4px 8px 2px;
+  height: 78px;          /* 58 row + 14 caption + 6 padding: one band, always */
+  box-sizing: border-box;
+  /* **No scrollbar, ever.** This was `overflow-x: auto`, which put a scroll
+   * track across the bottom of the ribbon — a spreadsheet's chrome does not
+   * scroll, and none of Excel, Sheets or OnlyOffice has one there. Fitting the
+   * band is the collapse contract's job: groups fold in the authored `ord`
+   * order until the row fits, so overflow is a state that should not survive a
+   * layout pass rather than something to hand the user a bar for. */
+  overflow: hidden;
+}
+
+/* A group is a 1px rule and nothing else — no capsule.
+ *
+ * `docs/88` §3.1 measured this: every competitor separates groups with a rule,
+ * and a filled rounded container behind a group is a segmented-control idiom
+ * from mobile design systems, which is a large part of why the old toolbar read
+ * as a web page rather than as an application. */
+.oc-chrome-ribbon .rb-group {
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  padding: 0 10px;
+  border-right: 1px solid var(--oc-border-color);
+}
+.oc-chrome-ribbon .rb-group:last-child { border-right: 0; }
+
+/* **The band is one height on every tab, and that is the whole rule.**
+ *
+ * Measured before this existed: Home drew 78px, Insert 104px and Data 216px, so
+ * the grid jumped every time a tab was clicked. A ribbon that changes height as
+ * you move along it reads as a web page reflowing rather than as an
+ * application, and it is the most conspicuous tell there is.
+ *
+ * The packing is Excel's: small controls flow **down and then across**, so a
+ * group with ten of them becomes five columns of two rather than two rows of
+ * five stacked into a taller band. Height is fixed; width is what grows, and a
+ * panel that outgrows the window scrolls sideways instead of pushing the grid.
+ *
+ * **Grid rather than `flex-flow: column wrap`, and that was a defect, not a
+ * preference.** The flex form does not grow its container's width to fit the
+ * columns it creates, so the columns drew on top of one another — "Conditional
+ * formatting" overlapping "Unhide all rows and columns", legibly broken. Grid
+ * sizes the track set properly, which is the whole reason to reach for it. */
+.oc-chrome-ribbon .rb-row {
+  display: grid;
+  grid-auto-flow: column;
+  grid-template-rows: repeat(2, 26px);
+  grid-auto-columns: max-content;
+  align-items: center;
+  /* Icons need air or they read as one texture. 2px between neighbours was
+     enough when half the controls were words and is not now. */
+  gap: 3px 6px;
+  height: 58px;
+}
+
+/* A large control is the full height of the band by definition, so it spans
+ * both rows rather than being swept into a column with the small ones. */
+.oc-chrome-ribbon .rb-row > .rb-large { grid-row: span 2; height: 56px; }
+
+/* A label has to be allowed to end. Several of ours are whole sentences —
+ * "Unhide rows/columns in selection" — and an uncapped one sets the width of
+ * the column it lives in, which is how one verbose command pushes six others
+ * off the screen. */
+.oc-chrome-ribbon .rb-btn .rb-label {
+  max-width: 132px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.oc-chrome-ribbon .rb-cap {
+  text-align: center;
+  font-size: 11px;
+  line-height: 14px;
+  padding-top: 2px;
+  color: var(--oc-muted-text-color, var(--oc-text-color));
+  opacity: 0.8;
+}
+
+/* ── Controls ──────────────────────────────────────────────────────────── */
+
+.oc-chrome-ribbon .rb-btn {
+  appearance: none;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--oc-text-color);
+  font: inherit;
+  font-size: 12px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  /* WCAG 2.5.8 Target Size (Minimum) is 24x24 CSS px, and this is **26**.
+   *
+   * Not padding for its own sake. At 24 the measured height came back 23.99 on
+   * a 1.8x display — the browser snapping a 24px box to device pixels and
+   * handing back slightly less than was asked for. That is a rounding artifact
+   * rather than a design error, but 23.99 fails the criterion as written, and a
+   * conformance claim that depends on how a ratio rounds is not one worth
+   * making. Two extra pixels cost a little vertical space and settle it on
+   * every display instead. */
+  min-height: 26px;
+  min-width: 26px;
+  padding: 2px 6px;
+  border-radius: 3px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.oc-chrome-ribbon .rb-btn:hover:not(:disabled) { background: var(--oc-surface-color); }
+.oc-chrome-ribbon .rb-btn:active:not(:disabled) {
+  background: var(--oc-surface-color);
+  border-color: var(--oc-border-color);
+}
+.oc-chrome-ribbon .rb-btn:focus-visible {
+  outline: 2px solid var(--oc-accent-color);
+  outline-offset: 1px;
+}
+.oc-chrome-ribbon .rb-btn[aria-pressed="true"] {
+  background: var(--oc-surface-color);
+  border-color: var(--oc-border-color);
+}
+.oc-chrome-ribbon .rb-btn:disabled { opacity: 0.4; cursor: default; }
+
+.oc-chrome-ribbon .rb-btn svg {
+  width: 16px; height: 16px; flex: none;
+  fill: none; stroke: currentColor; stroke-width: 1.6;
+  stroke-linecap: round; stroke-linejoin: round;
+}
+
+/* An icon-only control is square and centred; only the ones that kept a label
+ * get side padding. This is what makes a group read as Excel's grid of glyphs
+ * rather than as a stack of words. */
+/* Icon-only, and therefore square — but **not** the list form, which carries its
+ * label by definition. Without the `:not(.rb-list)` this squeezed every pane
+ * button to 26px and clipped the words it had just been told to draw. */
+.oc-chrome-ribbon .rb-btn:not(.rb-large):not(.rb-noicon):not(.rb-list) {
+  padding: 0;
+  width: 26px;
+  justify-content: center;
+}
+.oc-chrome-ribbon .rb-btn.rb-noicon { font-size: 11px; }
+
+/* The large form: icon over label, which is how Excel draws the first control
+ * of a group and the only size distinction that reads at a glance. */
+.oc-chrome-ribbon .rb-btn.rb-large {
+  flex-direction: column;
+  gap: 2px;
+  min-width: 52px;
+  min-height: 56px;
+  padding: 4px 8px;
+  justify-content: center;
+}
+.oc-chrome-ribbon .rb-btn.rb-large svg { width: 20px; height: 20px; stroke-width: 1.5; }
+.oc-chrome-ribbon .rb-btn.rb-large .rb-label {
+  font-size: 11px;
+  line-height: 13px;
+  max-width: 72px;
+  white-space: normal;
+  text-align: center;
+}
+
+/* **A borrowed control does not keep its styling — it loses it.**
+ *
+ * This comment used to claim the opposite, and the measurement says otherwise.
+ * `editor.css` scopes its rules as `.toolbar .tb-btn`, so the instant a node is
+ * moved out of `.toolbar` every one of them stops matching and the browser's
+ * own button styling takes over. Measured on `toolbar.bold` inside the ribbon:
+ * `border: 2px outset rgb(0,0,0)`, `background: rgb(239,239,239)` — a light
+ * grey bevelled box, in a dark theme — `border-radius: 0`, and a 2.4px icon
+ * stroke beside the proxies' 1.6. Half the ribbon was raw `<button>`s.
+ *
+ * So the borrowed controls are restyled here to match the proxies exactly.
+ * Appearance only: no rule below touches behaviour, and the node is still the
+ * same node with the same listeners, which is the entire point of borrowing it. */
+.oc-chrome-ribbon .rb-row .rb-hosted,
+.oc-chrome-ribbon .rb-row .tb-btn,
+.oc-chrome-ribbon .rb-row .tb-icon {
+  appearance: none;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 3px;
+  box-shadow: none;
+  color: var(--oc-text-color);
+  font: inherit;
+  font-size: 12px;
+  min-height: 26px;
+  min-width: 26px;
+  padding: 0 4px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+}
+
+.oc-chrome-ribbon .rb-row .tb-btn:hover:not(:disabled),
+.oc-chrome-ribbon .rb-row .tb-icon:hover:not(:disabled) { background: var(--oc-surface-color); }
+.oc-chrome-ribbon .rb-row .tb-btn:active:not(:disabled) {
+  background: var(--oc-surface-color);
+  border-color: var(--oc-border-color);
+}
+.oc-chrome-ribbon .rb-row .tb-btn:focus-visible,
+.oc-chrome-ribbon .rb-row .tb-icon:focus-visible,
+.oc-chrome-ribbon .rb-row input:focus-visible {
+  outline: 2px solid var(--oc-accent-color);
+  outline-offset: 1px;
+}
+.oc-chrome-ribbon .rb-row .tb-btn[aria-pressed="true"],
+.oc-chrome-ribbon .rb-row .tb-toggle.is-on {
+  background: var(--oc-surface-color);
+  border-color: var(--oc-border-color);
+}
+.oc-chrome-ribbon .rb-row .tb-btn:disabled { opacity: 0.4; cursor: default; }
+
+/* **One icon size and one stroke weight across the whole band.** Measured
+ * before this: 18px, 16px and 14px glyphs side by side at 2.4px, 2px, 1.6px and
+ * 1.5px stroke. Nothing reads as one set of icons when the weights disagree —
+ * it is the difference a person sees before they can say what is wrong. */
+/* **Stroke weight is in user units, and the icons are drawn in a 24 viewBox.**
+ *
+ * `vector-effect: non-scaling-stroke` was here and was the bug: it pins the
+ * stroke to N *device* pixels whatever the scale, so a 24-unit glyph drawn at
+ * 16px rendered its 1.7 as a full 1.7px instead of the 1.13px the geometry
+ * implies — about 50% heavy. At 16px that closes the counters and the glyphs
+ * merge into blobs.
+ *
+ * Without it the maths is honest: rendered weight = width x (16 / 24). 1.9 user
+ * units gives 1.27px at 16, and 1.5 gives 1.25px at 20 — the same apparent
+ * weight at both sizes, which is what makes a set read as one set. */
+.oc-chrome-ribbon .rb-row svg,
+.oc-chrome-ribbon .rb-row .icon,
+.oc-chrome-ribbon .rb-btn svg {
+  width: 16px;
+  height: 16px;
+  stroke-width: 1.9;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  overflow: visible;
+}
+.oc-chrome-ribbon .rb-btn.rb-large svg { width: 20px; height: 20px; stroke-width: 1.5; }
+
+/* The text inputs in the Font and Number groups — a raw `<input>` outside
+ * `.toolbar` is a bevelled 2px box too. */
+.oc-chrome-ribbon .rb-row input.tb-select {
+  appearance: none;
+  height: 24px;
+  padding: 0 6px;
+  border: 1px solid var(--oc-border-color);
+  border-radius: 3px;
+  background: var(--oc-background-color);
+  color: var(--oc-text-color);
+  font: inherit;
+  font-size: 12px;
+}
+
+/* Two hosted controls carry their own width from a toolbar that laid them out
+ * in one long row, and both look wrong in a group: the number-format combo
+ * stretches and its caret is drawn at the combo's full height. Constrain the
+ * geometry only — never the colour or the glyph, which stay the toolbar's. */
+.oc-chrome-ribbon .rb-hosted.tb-combo,
+.oc-chrome-ribbon .rb-row > .menu-wrap { max-width: 150px; }
+.oc-chrome-ribbon .rb-row .tb-select { max-width: 110px; }
+.oc-chrome-ribbon .rb-row .tb-combo-caret,
+.oc-chrome-ribbon .rb-row .tbc-caret { width: 14px; height: 14px; flex: none; }
+.oc-chrome-ribbon .rb-row svg:not(.icon) { max-width: 18px; max-height: 18px; }
+
+@media (prefers-reduced-motion: reduce) {
+  .oc-chrome-ribbon .rb-tab::after { transition: none; }
+}
+
+
+/* ── Simplified layout (`docs/91` §4) ──────────────────────────────────────
+ *
+ * One row rather than a band: the group caption goes, controls sit on a single
+ * line, and what does not fit scrolls. This is the layout the product owner
+ * asked for by name ("flatten ribbon"), and it is the cheaper one — `docs/91`
+ * measures it at 144px of chrome against Classic's 196 and today's 162, which
+ * makes it an 18px *gain* over the toolbar it replaces. */
+.oc-chrome-ribbon .oc-ribbon.rb-simplified .rb-panel {
+  height: 38px;
+  padding: 4px 8px;
+  align-items: center;
+}
+.oc-chrome-ribbon .oc-ribbon.rb-simplified .rb-cap { display: none; }
+.oc-chrome-ribbon .oc-ribbon.rb-simplified .rb-row {
+  flex-flow: row nowrap;
+  height: 30px;
+}
+.oc-chrome-ribbon .oc-ribbon.rb-simplified .rb-btn.rb-large {
+  flex-direction: row;
+  min-width: 26px;
+  height: 26px;
+  min-height: 26px;
+}
+.oc-chrome-ribbon .oc-ribbon.rb-simplified .rb-btn.rb-large svg { width: 16px; height: 16px; }
+.oc-chrome-ribbon .oc-ribbon.rb-simplified .rb-btn.rb-large .rb-label {
+  max-width: none; white-space: nowrap; font-size: 12px; line-height: 16px;
+}
+.oc-chrome-ribbon .oc-ribbon.rb-simplified .rb-group { padding: 0 6px; }
+
+/* ── KeyTips (`docs/91` §7) ───────────────────────────────────────────────── */
+
+.oc-chrome-ribbon .rb-tip {
+  position: absolute;
+  top: 100%;
+  left: 50%;
+  transform: translate(-50%, -2px);
+  font-size: 10px;
+  line-height: 12px;
+  padding: 1px 4px;
+  border-radius: 2px;
+  background: var(--oc-text-color);
+  color: var(--oc-background-color);
+  pointer-events: none;
+  z-index: 5;
+}
+.oc-chrome-ribbon .rb-file, .oc-chrome-ribbon .rb-tab { position: relative; }
+
+/* ── Backstage (`docs/91` §6) ─────────────────────────────────────────────── */
+
+.oc-chrome-ribbon .rb-backstage {
+  position: fixed;
+  inset: 0;
+  /* Above the grid, the formula bar and the app header. It covers the window by
+   * design — Excel's does — so anything showing through is a bug, and one did:
+   * at `z-index: 40` inside `.oc-ribbon` the grid painted over it. */
+  z-index: 2147483000;
+  display: grid;
+  grid-template-columns: 200px 1fr;
+  grid-template-rows: 48px 1fr;
+  background: var(--oc-background-color);
+  color: var(--oc-text-color);
+  animation: rb-slide 180ms cubic-bezier(0, 0, 0.4, 1);
+}
+.oc-chrome-ribbon .rb-backstage[hidden] { display: none; }
+
+@keyframes rb-slide { from { transform: translateX(-24px); opacity: 0; } to { transform: none; opacity: 1; } }
+@media (prefers-reduced-motion: reduce) {
+  .oc-chrome-ribbon .rb-backstage { animation: none; }
+}
+
+.oc-chrome-ribbon .rb-back {
+  grid-column: 1; grid-row: 1;
+  appearance: none; border: 0; cursor: pointer;
+  background: transparent; color: var(--oc-text-color);
+  font: inherit; font-size: 18px;
+  min-width: 40px; min-height: 40px;
+  margin: 4px 0 0 8px; border-radius: 4px;
+  justify-self: start;
+}
+.oc-chrome-ribbon .rb-back:hover { background: var(--oc-surface-color); }
+.oc-chrome-ribbon .rb-back:focus-visible { outline: 2px solid var(--oc-accent-color); outline-offset: -2px; }
+
+.oc-chrome-ribbon .rb-rail {
+  grid-column: 1; grid-row: 2;
+  display: flex; flex-direction: column; gap: 2px;
+  padding: 8px; overflow-y: auto;
+  background: var(--oc-surface-color);
+}
+.oc-chrome-ribbon .rb-rail-item {
+  appearance: none; border: 0; cursor: pointer; text-align: left;
+  background: transparent; color: var(--oc-text-color);
+  font: inherit; font-size: 14px;
+  padding: 0 12px; min-height: 34px; border-radius: 4px;
+}
+.oc-chrome-ribbon .rb-rail-item:hover { background: var(--oc-background-color); }
+.oc-chrome-ribbon .rb-rail-item.is-on { background: var(--oc-background-color); font-weight: 600; }
+.oc-chrome-ribbon .rb-rail-item:focus-visible { outline: 2px solid var(--oc-accent-color); outline-offset: -2px; }
+
+.oc-chrome-ribbon .rb-pane {
+  grid-column: 2; grid-row: 1 / span 2;
+  padding: 24px 32px;
+  overflow-y: auto;
+  background: var(--oc-background-color);
+}
+.oc-chrome-ribbon .rb-pane-body[hidden] { display: none; }
+.oc-chrome-ribbon .rb-pane-body { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; }
+.oc-chrome-ribbon .rb-pane-title { font-size: 24px; font-weight: 600; margin: 0 0 12px; color: var(--oc-text-color); }
+.oc-chrome-ribbon .rb-pane-body .rb-btn.rb-large {
+  flex-direction: row; min-width: 0; min-height: 34px; height: auto;
+  padding: 4px 10px; justify-content: flex-start; gap: 10px;
+}
+.oc-chrome-ribbon .rb-pane-body .rb-btn.rb-large .rb-label {
+  max-width: none; white-space: nowrap; font-size: 14px; text-align: left;
+}
+
+/* The chooser in Settings.
+ *
+ * **It stacks under its label rather than sitting beside it**, and that is a
+ * fix rather than a preference. The settings popover is 230px wide — 202px of
+ * content — and three labelled options need 213px, so the row overflowed and
+ * the panel scrolled sideways. Every other row here is a label and one small
+ * control; this one is a label and three, so it gets its own line and divides
+ * the full width evenly. That holds at the popover's 202px and at the dialog's
+ * 272px without either being a special case. */
+.set-row:has(> .chrome-choice) {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 6px;
+}
+
+.chrome-choice {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 2px;
+  padding: 2px;
+  border-radius: 8px;
+  background: var(--oc-surface-color);
+  width: 100%;
+  box-sizing: border-box;
+}
+.chrome-choice button {
+  appearance: none; border: 0; cursor: pointer; font: inherit; font-size: 12px;
+  padding: 0 6px; min-height: 26px; border-radius: 6px;
+  background: transparent; color: var(--oc-muted-text-color, var(--oc-text-color));
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.chrome-choice button:hover { background: var(--oc-background-color); color: var(--oc-text-color); }
+.chrome-choice button.is-on {
+  background: var(--oc-background-color);
+  color: var(--oc-text-color);
+  font-weight: 600;
+  box-shadow: var(--oc-control-shadow, none);
+}
+.chrome-choice button:focus-visible { outline: 2px solid var(--oc-accent-color); outline-offset: -2px; }
+
+/* ── The collapse contract (`docs/91` §5) ─────────────────────────────────── */
+
+.oc-chrome-ribbon .rb-group { position: relative; }
+.oc-chrome-ribbon .rb-group.is-folded > .rb-row,
+.oc-chrome-ribbon .rb-group.is-folded > .rb-cap { display: none; }
+.oc-chrome-ribbon .rb-group.is-folded { justify-content: center; padding: 0 4px; }
+
+/* `appearance: none` and an explicit background are not optional on a `<button>`.
+ * Without them this drew at `rgb(239, 239, 239)` — the user agent's own grey —
+ * on a dark ground, which is precisely the "light things in dark mode" defect.
+ * Every button in this file states its own background for that reason. */
+.oc-chrome-ribbon .rb-folded {
+  appearance: none;
+  cursor: pointer;
+  border: 1px solid transparent;
+  border-radius: 3px;
+  background: transparent;
+  color: var(--oc-text-color);
+  font: inherit;
+  font-size: 11px;
+  min-height: 56px;
+  min-width: 44px;
+  padding: 4px 8px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+}
+.oc-chrome-ribbon .rb-folded::after {
+  content: "";
+  width: 0; height: 0;
+  border-left: 3.5px solid transparent;
+  border-right: 3.5px solid transparent;
+  border-top: 4px solid currentColor;
+}
+.oc-chrome-ribbon .rb-folded span { max-width: 72px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.oc-chrome-ribbon .rb-folded:hover { background: var(--oc-surface-color); }
+.oc-chrome-ribbon .rb-folded:focus-visible { outline: 2px solid var(--oc-accent-color); outline-offset: 1px; }
+
+/* A folded group opens its own contents below itself — the same controls at the
+ * same sizes, so nothing has to be learned twice. */
+.oc-chrome-ribbon .rb-group.is-folded.is-open > .rb-row {
+  display: grid;
+  position: absolute;
+  z-index: 30;
+  top: 100%;
+  margin-top: 2px;
+  padding: 6px 8px;
+  background: var(--oc-popover-background-color, var(--oc-background-color));
+  border: 1px solid var(--oc-border-color);
+  border-radius: 4px;
+  box-shadow: var(--oc-popover-shadow, 0 6px 20px rgba(0, 0, 0, 0.28));
+}
+
+/* ── "All commands", the long tail the tabs do not place ──────────────────── */
+
+.oc-chrome-ribbon .rb-pane-note { margin: -6px 0 18px; opacity: 0.75; font-size: 13px; }
+.oc-chrome-ribbon .rb-all-group { margin-bottom: 18px; width: 100%; }
+.oc-chrome-ribbon .rb-all-group h3 {
+  font-size: 12px; font-weight: 600; text-transform: uppercase;
+  letter-spacing: 0.04em; opacity: 0.6; margin: 0 0 6px;
+}
+.oc-chrome-ribbon .rb-all-items { display: flex; flex-wrap: wrap; gap: 4px; }
+.oc-chrome-ribbon .rb-all-items .rb-btn {
+  min-height: 28px; padding: 0 10px;
+  border: 1px solid var(--oc-border-color); border-radius: 4px;
+}
+
+/* ── The list form: icon, then words, one per line ────────────────────────── */
+
+.oc-chrome-ribbon .rb-btn.rb-list {
+  justify-content: flex-start;
+  gap: 10px;
+  min-height: 32px;
+  padding: 0 12px;
+  width: 100%;
+  max-width: 380px;
+  text-align: left;
+}
+.oc-chrome-ribbon .rb-btn.rb-list .rb-label { max-width: none; }
+.oc-chrome-ribbon .rb-all-items .rb-btn.rb-list { width: auto; min-width: 190px; max-width: 260px; }

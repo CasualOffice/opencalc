@@ -34,6 +34,10 @@ NAMED_BUT_ABSENT = {
                    "absent from a clean checkout by design",
     "webapp/pkg": "as above",
     "crates/casual-calc-wasm/pkg/": "wasm-pack's output directory, generated",
+    "webapp/locales": "docs/92 names it to say it is NOT there: the i18n mechanism "
+                      "exists and ships no catalogue, so the absent directory is the "
+                      "finding. `messages` is an empty Map (webapp/editor.core.js:4901). "
+                      "Remove this entry when a catalogue lands and the row closes",
 }
 
 # `docs` is deliberately absent: `docs/65` is how this project *cites* a
