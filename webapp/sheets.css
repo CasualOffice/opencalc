@@ -1,0 +1,140 @@
+/* The Sheets chrome (`UX-GS-01`, docs/93).
+ *
+ * Loaded always, active only under `.oc-chrome-sheets`, so it costs the other
+ * two chromes nothing. Every value is a token `editor.css` already defines —
+ * a literal here would be a colour that works in one theme and is wrong in the
+ * other, which is the defect this project has already paid for elsewhere.
+ *
+ * The visual difference from the ribbon is deliberate and is the point: rounded
+ * pill containers, a tonal surface rather than borders, and one short row.
+ * Sheets' density, not Excel's. */
+
+.oc-sheets { display: none; }
+
+.oc-chrome-sheets .oc-sheets {
+  display: block;
+  background: var(--oc-bg-color);
+  padding: 4px 8px 6px;
+}
+
+/* The menu bar **stays visible here**, unlike under the ribbon: Sheets has one,
+ * ours is already the complete command surface, and the cheapest correct thing
+ * is to leave it where it is rather than rebuild it. It only gets Sheets'
+ * lighter metrics. */
+.oc-chrome-sheets .menubar {
+  border-bottom: 0;
+  padding-left: 4px;
+  min-height: 30px;
+}
+
+/* The editor's own toolbar is not drawn — its controls have been borrowed into
+ * the row below and will be given back. */
+.oc-chrome-sheets .toolbar { display: none; }
+
+/* ── The one row ───────────────────────────────────────────────────────────
+ *
+ * A pill, which is Sheets' signature container and the one place a filled
+ * rounded shape is right — it holds a single continuous row of controls rather
+ * than grouping them, so it reads as one surface instead of as a segmented
+ * control pretending groups exist. */
+.oc-chrome-sheets .gs-bar {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 1px;
+  height: 40px;
+  padding: 0 8px;
+  border-radius: 20px;
+  background: var(--oc-surface-color);
+  overflow: hidden;
+}
+
+.oc-chrome-sheets .gs-sep {
+  width: 1px;
+  height: 20px;
+  margin: 0 6px;
+  background: var(--oc-border-color);
+  flex: none;
+}
+
+.oc-chrome-sheets .gs-btn,
+.oc-chrome-sheets .gs-more {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: var(--oc-text-color);
+  font: inherit;
+  font-size: 12px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  /* WCAG 2.5.8: 28px here rather than the ribbon's 26 — this row has the space
+   * for it, and Sheets' own targets are the larger of the two. */
+  width: 28px;
+  height: 28px;
+  min-width: 28px;
+  min-height: 28px;
+  border-radius: 50%;
+  cursor: pointer;
+  flex: none;
+}
+.oc-chrome-sheets .gs-btn.gs-text { width: auto; padding: 0 10px; border-radius: 14px; }
+
+.oc-chrome-sheets .gs-btn:hover:not(:disabled),
+.oc-chrome-sheets .gs-more:hover { background: var(--oc-bg-color); }
+.oc-chrome-sheets .gs-btn:active:not(:disabled) { background: var(--oc-border-color); }
+.oc-chrome-sheets .gs-btn:focus-visible,
+.oc-chrome-sheets .gs-more:focus-visible {
+  outline: 2px solid var(--oc-accent-color);
+  outline-offset: 1px;
+}
+.oc-chrome-sheets .gs-btn[aria-pressed="true"] { background: var(--oc-bg-color); }
+.oc-chrome-sheets .gs-btn:disabled { opacity: 0.38; cursor: default; }
+
+.oc-chrome-sheets .gs-btn svg {
+  width: 18px; height: 18px;
+  fill: none; stroke: currentColor; stroke-width: 1.6;
+  stroke-linecap: round; stroke-linejoin: round;
+}
+
+/* A borrowed control keeps its own look — it is the same node, and restyling it
+ * would mean the two chromes disagreed about what Bold is. Only the target-size
+ * floor and the round shape are asserted, and the floor reaches the button
+ * inside a `.menu-wrap` rather than stopping at the wrapper. */
+.oc-chrome-sheets .gs-hosted { min-height: 28px; border-radius: 14px; }
+.oc-chrome-sheets .gs-bar button { min-height: 28px; }
+.oc-chrome-sheets .gs-bar button:not(.tb-combo-caret) { min-width: 28px; }
+.oc-chrome-sheets .gs-bar .tb-select { max-width: 104px; height: 28px; }
+.oc-chrome-sheets .gs-bar .tb-combo-caret { width: 16px; min-width: 16px; }
+.oc-chrome-sheets .gs-bar svg:not(.icon) { max-width: 18px; max-height: 18px; }
+
+/* ── Overflow ──────────────────────────────────────────────────────────────
+ *
+ * The row never wraps and never scrolls sideways: what does not fit moves
+ * behind `⋮`, right to left, because the selection rule puts the daily verbs at
+ * the left and the rightmost slot is by construction the most expendable. */
+.oc-chrome-sheets .gs-more { margin-left: auto; font-size: 16px; }
+
+.oc-chrome-sheets .gs-overflow {
+  position: absolute;
+  right: 4px;
+  top: 100%;
+  z-index: 30;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px;
+  width: max-content;
+  max-width: 320px;
+  padding: 6px;
+  background: var(--oc-bg-color);
+  border: 1px solid var(--oc-border-color);
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.3);
+}
+.oc-chrome-sheets .gs-overflow[hidden] { display: none; }
+
+/* The pill clips its own overflow so the row cannot spill; the popup has to
+ * escape that, so it is measured from the bar and drawn outside it. */
+.oc-chrome-sheets .oc-sheets { overflow: visible; }
+.oc-chrome-sheets .gs-bar { overflow: visible; }

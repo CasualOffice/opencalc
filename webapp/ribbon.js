@@ -48,19 +48,24 @@ const LAYOUT_KEY = "oc.ribbon.layout";
 ///   3. the per-mount default. `?mode=desktop` / `?chrome=native` means the
 ///      desktop shell, where `docs/91` makes the ribbon the default; a browser
 ///      tab keeps the toolbar until asked.
+const CHROMES = ["toolbar", "ribbon", "sheets"];
+
 export function chosenChrome() {
   const asked = (PARAMS.get("chrome") || "").toLowerCase();
-  if (asked === "ribbon" || asked === "toolbar") return asked;
+  if (CHROMES.includes(asked)) return asked;
   let stored = null;
   try { stored = localStorage.getItem(STORE_KEY); } catch { /* private mode */ }
-  if (stored === "ribbon" || stored === "toolbar") return stored;
+  if (CHROMES.includes(stored)) return stored;
   const native = asked === "native" || (PARAMS.get("mode") || "") === "desktop";
   return native ? "ribbon" : "toolbar";
 }
 
+/// Switching is the caller's job to sequence, because the two chromes borrow
+/// from the same toolbar: whichever is up must give its controls back *before*
+/// the other takes them, or the second finds an empty toolbar and draws a row
+/// of nothing. `editor.html` owns that order; this only records the choice.
 export function setChrome(which) {
   try { localStorage.setItem(STORE_KEY, which); } catch { /* private mode */ }
-  toggle(which === "ribbon");
 }
 
 function storedLayout() {

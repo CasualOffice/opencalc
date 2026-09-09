@@ -10,6 +10,7 @@
          `.oc-chrome-ribbon` class, so loading it unconditionally costs the
          default chrome nothing and keeps the switch a one-class change. -->
     <link rel="stylesheet" href="./ribbon.css?v=9" />
+    <link rel="stylesheet" href="./sheets.css?v=1" />
   </head>
   <body class="editor-body">
     <!-- **This strip names the document, not the product** (`UX-CHR-03`,
@@ -169,6 +170,7 @@
         <span class="chrome-choice" id="set-chrome" role="radiogroup" aria-label="Interface">
           <button type="button" data-chrome="toolbar" role="radio" aria-checked="true">Toolbar</button>
           <button type="button" data-chrome="ribbon" role="radio" aria-checked="false">Ribbon</button>
+          <button type="button" data-chrome="sheets" role="radio" aria-checked="false">Compact</button>
         </span>
       </div>
       <div class="set-row">
@@ -687,20 +689,33 @@
          inserts its buttons later still, so a ribbon built on `DOMContentLoaded`
          would find half the editor and silently draw the half it found. -->
     <script type="module">
-      import { ribbonRequested, start, setChrome, chosenChrome } from "./ribbon.js?v=7";
+      import { ribbonRequested, start as startRibbon, stop as stopRibbon,
+               setChrome, chosenChrome } from "./ribbon.js?v=8";
+      import { start as startSheets, stop as stopSheets } from "./sheets.js?v=1";
       // The wait is for the *command layer*, not for `load`. Toolbar controls
       // are stamped with `data-oc-command` after boot and `buildMenuBar()`
-      // inserts its buttons later still, so a ribbon built on `DOMContentLoaded`
+      // inserts its buttons later still, so a chrome built on `DOMContentLoaded`
       // would find half the editor and silently draw the half it found.
       const ready = () => document.querySelector('[data-oc-command="toolbar.bold"]');
       let tries = 0;
       (function wait() {
         if (ready()) { boot(); return; }
-        if (++tries > 200) { console.warn("[ribbon] command layer never appeared"); return; }
+        if (++tries > 200) { console.warn("[chrome] command layer never appeared"); return; }
         setTimeout(wait, 25);
       })();
+
+      // **Tear the old one down before building the new one.** Both chromes
+      // borrow the same live toolbar controls, so building first would hand the
+      // second an already-emptied toolbar and it would draw a row of gaps.
+      async function apply(which) {
+        stopRibbon();
+        stopSheets();
+        if (which === "ribbon") await startRibbon();
+        else if (which === "sheets") await startSheets();
+      }
+
       async function boot() {
-        if (ribbonRequested()) await start();
+        await apply(chosenChrome());
         const box = document.getElementById("set-chrome");
         if (!box) return;
         const paint = () => {
@@ -711,14 +726,14 @@
             b.classList.toggle("is-on", on);
           }
         };
-        box.addEventListener("click", (e) => {
+        box.addEventListener("click", async (e) => {
           const b = e.target.closest("[data-chrome]");
           if (!b) return;
-          // `setChrome` stores the preference and switches in place. It does not
-          // reload: the ribbon borrows live controls and gives them back, so the
-          // document, the selection and the undo history all survive the switch
-          // — which is the difference between a setting and a restart.
+          // No reload: each chrome gives its borrowed controls back, so the
+          // document, the selection and the undo history all survive the
+          // switch. That is the difference between a setting and a restart.
           setChrome(b.dataset.chrome);
+          await apply(b.dataset.chrome);
           paint();
         });
         paint();
