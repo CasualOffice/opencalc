@@ -60,12 +60,16 @@
   display: flex;
   align-items: stretch;
   gap: 2px;
-  height: 32px;
-  padding: 0 8px;
-  border-bottom: 1px solid var(--oc-border-color);
+  /* 28px, ONLYOFFICE's `@toolbar-height-tabs-top-title` — the height their tab
+   * strip takes when it sits under the document title rather than beside it
+   * (`variables.less:104-105`; the layout is chosen by one config flag at
+   * `Viewport.js:197`). `UX-RIB-15`, ../opendoc docs/123 §3. */
+  height: var(--h-tab);
+  padding: 0 var(--chrome-card-inset-x);
+  border-bottom: 1px solid var(--line);
 }
 
-.oc-chrome-ribbon .rb-tablist { display: flex; align-items: stretch; gap: 2px; flex: 1; min-width: 0; overflow-x: auto; scrollbar-width: none; }
+.oc-chrome-ribbon .rb-tablist { display: flex; align-items: stretch; gap: 2px; flex: 1; min-width: 0; overflow-x: auto; scrollbar-width: none; font-size: var(--fs-ribbon-tab); }
 .oc-chrome-ribbon .rb-tablist::-webkit-scrollbar { display: none; }
 
 /* File is the accent-filled button Excel gives it — but filled with
@@ -152,8 +156,13 @@
   display: flex;
   align-items: stretch;
   gap: 0;
-  padding: 4px 8px 2px;
-  height: 78px;          /* 58 row + 14 caption + 6 padding: one band, always */
+  padding: 5px var(--chrome-card-inset-x) 6px;
+  /* 74px: the measured band (`UX-RIB-15`, ../opendoc docs/123 §2). ONLYOFFICE's
+   * is 66px (`colors-table.less:529`); ours is 8px taller because our controls
+   * stay at 30px where theirs are 20px, and a 20px target fails WCAG 2.2
+   * SC 2.5.8. That 8px is the accessibility margin, not slack — a later pass
+   * tightening this band must not spend it. */
+  height: var(--ribbon-band-h);
   box-sizing: border-box;
   /* **No scrollbar, ever.** This was `overflow-x: auto`, which put a scroll
    * track across the bottom of the ribbon — a spreadsheet's chrome does not
@@ -173,9 +182,15 @@
 .oc-chrome-ribbon .rb-group {
   display: flex;
   flex-direction: column;
-  justify-content: space-between;
-  padding: 0 10px;
-  border-right: 1px solid var(--oc-border-color);
+  justify-content: center;
+  /* 6px a side plus a 1px rule — ONLYOFFICE's `.group` padding (`toolbar.less:498`)
+   * plus their `.separator`'s 6px margin (`separator.less:8`), which is 12px of
+   * air between neighbours. Was 10px. */
+  padding: 0 6px;
+  /* `--line-strong`, not `--line`. With the caption gone from paint this rule
+   * is the ONLY thing left saying where a group ends, so it is a step darker
+   * than an ordinary divider (docs/123 §4.2). */
+  border-right: 1px solid var(--line-strong);
 }
 .oc-chrome-ribbon .rb-group:last-child { border-right: 0; }
 
@@ -199,18 +214,21 @@
 .oc-chrome-ribbon .rb-row {
   display: grid;
   grid-auto-flow: column;
-  grid-template-rows: repeat(2, 26px);
+  grid-template-rows: repeat(2, 30px);
   grid-auto-columns: max-content;
   align-items: center;
   /* Icons need air or they read as one texture. 2px between neighbours was
      enough when half the controls were words and is not now. */
   gap: 3px 6px;
-  height: 58px;
+  /* 63px, the measured group box inside a 74px band. Two 30px control rows and
+   * the 3px between them: the 30px is `docs/123` §4.4, the one row where this
+   * contract knowingly differs from ONLYOFFICE, for WCAG 2.2 SC 2.5.8. */
+  height: 63px;
 }
 
 /* A large control is the full height of the band by definition, so it spans
  * both rows rather than being swept into a column with the small ones. */
-.oc-chrome-ribbon .rb-row > .rb-large { grid-row: span 2; height: 56px; }
+.oc-chrome-ribbon .rb-row > .rb-large { grid-row: span 2; height: 63px; }
 
 /* A label has to be allowed to end. Several of ours are whole sentences —
  * "Unhide rows/columns in selection" — and an uncapped one sets the width of
@@ -223,13 +241,44 @@
   white-space: nowrap;
 }
 
+/* **The group caption leaves the paint and stays in the DOM** (`UX-RIB-15`,
+ * ../opendoc docs/123 §4.1).
+ *
+ * ONLYOFFICE has no caption element at all: `toolbar.less:498` is the whole
+ * `.group` rule and `Toolbar.template` carries nothing to caption it with.
+ * Grouping is said by the `.separator` rule and the padding either side, which
+ * is what `--line-strong` above is now doing. Word does caption its groups; the
+ * references this chrome was asked for do not, and the caption row cost 13.5px
+ * of text plus a 3px gap out of the band — the single largest saving in the
+ * measured contract.
+ *
+ * **Not `display: none`.** The text is the group's accessible name, and it is
+ * what the overflow menu prints as its section heading — where there is room
+ * for it, and where Word shows the same words. Removing it from the tree would
+ * take both. */
 .oc-chrome-ribbon .rb-cap {
-  text-align: center;
-  font-size: 11px;
-  line-height: 14px;
-  padding-top: 2px;
-  color: var(--oc-muted-text-color, var(--oc-text-color));
-  opacity: 0.8;
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* ...and comes back where there is room for it. */
+.oc-chrome-ribbon .rb-all-group .rb-cap,
+.oc-chrome-ribbon .rb-folded .rb-cap {
+  position: static;
+  width: auto;
+  height: auto;
+  margin: 0;
+  overflow: visible;
+  clip-path: none;
+  font-size: var(--fs-ribbon-caption);
+  color: var(--muted);
 }
 
 /* ── Controls ──────────────────────────────────────────────────────────── */
@@ -465,7 +514,11 @@
   padding: 4px 8px;
   align-items: center;
 }
-.oc-chrome-ribbon .oc-ribbon.rb-simplified .rb-cap { display: none; }
+/* Simplified used to hide the caption; the caption is now out of paint in every
+ * layout (`UX-RIB-15`), so this rule added nothing but a `display: none` — which
+ * removes the group's accessible name and the overflow menu's section heading.
+ * Deleted rather than kept: two mechanisms for one state, and the weaker one
+ * silently costs accessibility. */
 .oc-chrome-ribbon .oc-ribbon.rb-simplified .rb-row {
   flex-flow: row nowrap;
   height: 30px;
@@ -613,7 +666,12 @@
 
 .oc-chrome-ribbon .rb-group { position: relative; }
 .oc-chrome-ribbon .rb-group.is-folded > .rb-row,
-.oc-chrome-ribbon .rb-group.is-folded > .rb-cap { display: none; }
+/* A folded group's caption is likewise already invisible. It must NOT be
+ * `display: none`: the folded group's flyout prints this very text as its
+ * heading, and a screen reader needs it to name the group at all. Caught by
+ * `editor.ribbon-visual-contract.spec.mjs`, which asserts no caption is
+ * display-none precisely because "invisible" and "absent" look identical in a
+ * screenshot and are not the same thing. */
 .oc-chrome-ribbon .rb-group.is-folded { justify-content: center; padding: 0 4px; }
 
 /* `appearance: none` and an explicit background are not optional on a `<button>`.
