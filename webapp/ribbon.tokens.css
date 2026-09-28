@@ -51,8 +51,19 @@
   /* Surfaces. `--bg` is the chrome strip (header, tab row, band); `--bg-2` the
    * sunken panes and the File page's rail; `--surface` anything that floats
    * above them — a panel, a dropdown, a dialog. */
-  --bg: var(--oc-surface-color);
-  --bg-2: var(--oc-surface-color);
+  /* The chrome field the band's card floats on.
+   *
+   * This must be a *visibly* different shade from `--surface` or the card
+   * treatment does not exist: white on white separates by nothing. Aliasing
+   * this straight to `--oc-surface-color` (#f6f7f9, very nearly white) is what
+   * made the first attempt look flat — the geometry was right and the shading
+   * carried none of it.
+   *
+   * Derived rather than pasted, so the aliasing rule still holds: it is a wash
+   * of the accent over the surface, which tracks a host's brand and re-resolves
+   * in dark mode, where the sibling's literal `#eef1f7` would be a light slab. */
+  --bg: color-mix(in srgb, var(--oc-accent-color) 7%, var(--oc-surface-color));
+  --bg-2: color-mix(in srgb, var(--oc-accent-color) 4%, var(--oc-surface-color));
   --surface: var(--oc-background-color);
 
   /* Text, in three weights of emphasis. `--faint` is the one with a history:
