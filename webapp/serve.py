@@ -54,12 +54,24 @@ _digests: dict[str, tuple[tuple[int, int], str]] = {}
 #
 # Anchored on the `from`/`import` in front of it so it cannot touch a string
 # that merely looks like a path — `editor.dialogs.js` really does contain
-# `from "Heading 3"` — and requiring the quote immediately after `.js` so a
-# specifier that already carries a query is left alone, which makes the rewrite
-# idempotent. ``import(`./collab.js?b=${BUILD}`)`` is a template literal and is
-# skipped for both reasons; it carries the tag already.
+# `from "Heading 3"`.
+#
+# The query is matched and DISCARDED rather than excluded. This rule used to
+# require the quote immediately after `.js`, so that a specifier already
+# carrying one was left alone and the rewrite stayed idempotent. Idempotency is
+# a real requirement and that reasoning was right; the conclusion was one step
+# too strong. A hand-written `?v=4` is not a stamp this server produced, and
+# skipping it means never stamping that module at all — `ribbon.model.js?v=4`
+# was fetched under a URL that had not moved since the number was typed, which
+# is the stale-module hazard this file exists to prevent (`CI-035`). Replacing
+# the query is idempotent too, and it is idempotent for a better reason: the
+# output depends on the tag alone, not on what was there before.
+#
+# ``import(`./collab.js?b=${BUILD}`)`` is a template literal and is still
+# skipped — the quote class is `["\']` — for the reason it always was: it
+# interpolates the tag itself.
 MODULE_SPECIFIER = re.compile(
-    r'((?:\bfrom|\bimport)\s*\(?\s*)(["\'])(\.{1,2}/[\w./-]+\.js)\2'
+    r'((?:\bfrom|\bimport)\s*\(?\s*)(["\'])(\.{1,2}/[\w./-]+\.js)(?:\?[^"\']*)?\2'
 )
 
 # What a stamp looks like, and the only thing this server will echo back into a

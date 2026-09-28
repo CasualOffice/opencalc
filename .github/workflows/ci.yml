@@ -486,6 +486,23 @@ jobs:
       # which is the part that stops it recurring.
       - name: The gates pass their own checks
         run: python3 tools/check-gate-selftest.py
+      # A module whose URL does not move when the tree moves is served stale for
+      # as long as the cache holds it. `serve.py` declined to stamp any specifier
+      # that already carried a query, so a hand-written `?v=4` meant "never
+      # stamped" — `gate.served-tree` caught the symptom in a browser and named
+      # no cause (`CI-035`). This asserts the mechanism: a query is replaced, the
+      # rewrite stays idempotent, and no import hand-writes a version.
+      - name: Every module specifier carries the tree's stamp
+        run: python3 tools/check-module-stamping.py
+      # An undefined custom property is dropped silently — no error, no warning,
+      # and an element that looks plausible at the wrong size. The chrome is
+      # drawn against a contract ported from ../opendoc's docs/123, and when the
+      # port began none of its 29 tokens existed here (`UX-RIB-14`). Also holds
+      # the two halves apart: colours must alias --oc-* (or dark mode and host
+      # theming stop reaching the chrome), geometry must stay literal (or the
+      # measured number no longer lives where its source is recorded).
+      - name: Every chrome token resolves
+        run: python3 tools/check-chrome-tokens.py
       # `UX-EMBED-02` moved a default: a frame or shadow root that says nothing
       # now resolves to `embedded`, not `standalone`. That is right, and it
       # moved underneath three shipped callers — the costly one being WOPI,

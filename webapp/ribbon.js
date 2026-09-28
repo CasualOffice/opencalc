@@ -29,8 +29,8 @@
 /// SDK's published surface each time the user clicked a tab. Inactive panels
 /// hide with CSS.
 
-import { ASSIGN, item } from "./ribbon.model.js?v=4";
-import { iconIds } from "./ribbon.icons.js?v=2";
+import { ASSIGN, item } from "./ribbon.model.js";
+import { iconIds } from "./ribbon.icons.js";
 
 const PARAMS = new URL(location.href).searchParams;
 const STORE_KEY = "oc.chrome";
@@ -276,6 +276,19 @@ const RAIL = [
   { label: "Print", cmds: ["file.print", "file.export-as-pdf", "file.page-setup", "file.page-break-here"] },
   { label: "Share", cmds: ["file.share", "file.version-history"] },
   { label: "Info", cmds: ["file.properties"] },
+  // **Options, and why the theme lives here.**
+  //
+  // The ribbon hides the menu bar, so `UX-CHR-01`'s "theme is in View" stops
+  // being a route the moment this chrome is up — which is the gap a second
+  // theme control in the Settings popover was added to cover, and two controls
+  // for one setting is the defect `UX-DESK-01` had already closed once.
+  //
+  // This is the route instead, and it is not invented: Excel puts the theme at
+  // **File > Options > General > Office Theme**, a backstage rail entry, which
+  // is exactly this shape. So the menu keeps the single definition of the
+  // current theme, the ribbon gets a pointer route to it, and there is still
+  // only one control (`UX-RIB-16`).
+  { label: "Options", cmds: ["view.theme"] },
 ];
 
 /// Every command the ribbon did not place.
@@ -290,8 +303,8 @@ const RAIL = [
 /// They go in the backstage rather than into a tab, because they are the long
 /// tail by definition: if one turns out to be used daily it has earned a place
 /// in `docs/91` §3, and this list is the evidence for that argument.
-function unplacedCommands(root) {
-  const placed = new Set();
+function unplacedCommands(root, alreadyPlaced = []) {
+  const placed = new Set(alreadyPlaced);
   for (const n of root.querySelectorAll("[data-oc-command]")) placed.add(n.dataset.ocCommand);
   for (const n of root.querySelectorAll("[data-oc-proxy]")) placed.add(n.dataset.ocProxy);
   const out = [];
@@ -328,6 +341,13 @@ function buildBackstage() {
   bs.append(back, rail, pane);
 
   const panes = [];
+  // What the rail panes drew. `unplacedCommands()` is given the ribbon element
+  // to decide what the TABS placed, and the backstage is not inside it — it is
+  // appended to `document.body`, because it covers the window. So the rail's
+  // own commands looked unplaced to it and were drawn a second time under
+  // "All commands": measured, 15 of 18. Two buttons for one verb, in one
+  // dialog, which is `UX-RIB-18`.
+  const railPlaced = [];
   for (const entry of RAIL) {
     // Each listed id **and everything beneath it**. `file.download` is a
     // submenu whose children are generated from the formats the engine can
@@ -356,7 +376,7 @@ function buildBackstage() {
     h.className = "rb-pane-title";
     h.textContent = entry.label;
     p.appendChild(h);
-    for (const [id, node] of live) p.appendChild(proxy(node, id, "list"));
+    for (const [id, node] of live) { railPlaced.push(id); p.appendChild(proxy(node, id, "list")); }
     pane.appendChild(p);
     rail.appendChild(r);
     panes.push([r, p]);
@@ -365,7 +385,7 @@ function buildBackstage() {
     });
   }
   // The long tail, grouped by the menu it came from so it stays findable.
-  const rest = unplacedCommands(el);
+  const rest = unplacedCommands(el, railPlaced);
   if (rest.length) {
     const r = document.createElement("button");
     r.type = "button";

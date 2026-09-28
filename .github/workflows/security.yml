@@ -19,6 +19,20 @@ on:
     - cron: "17 6 * * 1"
   # So it can be run on demand when an advisory lands, without waiting a week.
   workflow_dispatch:
+  # The half the schedule cannot cover quickly: a vulnerable version WE pulled
+  # in. `rustls 0.23.43` shipped RUSTSEC-2026-0285 and sat red on `main` for a
+  # week, because the only thing that looked was a Monday cron and the result
+  # arrived where nobody was reading (`DEP-20`). Scoped to the lockfile on
+  # purpose — that keeps the reasoning above intact. A failure here is still
+  # "the world changed" whenever it fires from the schedule; when it fires from
+  # a push it is "this commit changed what we depend on", which is the author's
+  # business and should be answered in minutes rather than by Monday.
+  push:
+    branches: [main]
+    paths:
+      - "Cargo.lock"
+      - "**/Cargo.toml"
+      - "deny.toml"
 
 permissions:
   contents: read

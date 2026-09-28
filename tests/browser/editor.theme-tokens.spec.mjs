@@ -88,3 +88,60 @@ test("floating surfaces share one elevation, and it is theme-aware", async ({ pa
   expect(dark).not.toBe("");
   expect(dark, "the overlay shadow is the same in dark mode — it is not theme-aware").not.toBe(light);
 });
+
+/// **The ported chrome's tokens resolve, and the colour half really is aliased.**
+///
+/// The ribbon and Compact chromes are drawn against a visual contract ported
+/// from the sibling editor's `docs/123` (`UX-RIB-14`), whose stylesheet depends
+/// on 29 custom properties that did not exist here. `tools/check-chrome-tokens.py`
+/// proves statically that each one is *declared*; only a browser can prove they
+/// **resolve**, because the value travels through an alias chain into the
+/// `--oc-*` spine and, for two of them, through `color-mix`.
+///
+/// The second half is the one worth having. An undefined custom property is
+/// dropped in silence — no error, no warning, an element that merely looks
+/// plausible at the wrong size — and a *literal* in the colour half is worse
+/// still: it resolves perfectly, passes every light-mode check, and is simply
+/// dark-blind. So the assertion is not "it has a value" but "it has a
+/// **different** value once the theme flips", which a hardcoded hex cannot
+/// satisfy.
+test("the ported chrome tokens resolve, and the colour half follows the theme", async ({ page }) => {
+  // The geometry half: measured numbers from docs/123, identical in both
+  // themes by definition — a band does not change height in the dark.
+  const GEOMETRY = {
+    "--h-header": "58px",
+    "--h-tab": "28px",
+    "--ribbon-band-h": "74px",
+    "--icon-control": "18px",
+    "--fs-ribbon-tab": "13.5px",
+  };
+  // The colour half: aliases onto `--oc-*`, so each must MOVE with the theme.
+  const COLOURS = ["--ink", "--muted", "--faint", "--line", "--line-strong", "--bg", "--surface"];
+
+  await boot(page, "?chrome=ribbon");
+  const light = {};
+  for (const name of [...Object.keys(GEOMETRY), ...COLOURS]) {
+    const value = await token(page, name);
+    expect(value, `${name} resolved to nothing — the token spine is not loaded`).not.toBe("");
+    light[name] = value;
+  }
+  for (const [name, expected] of Object.entries(GEOMETRY)) {
+    expect(light[name], `${name} is not the measured value from docs/123`).toBe(expected);
+  }
+
+  await page.emulateMedia({ colorScheme: "dark" });
+  await boot(page, "?chrome=ribbon");
+  for (const name of COLOURS) {
+    const dark = await token(page, name);
+    expect(dark, `${name} resolved to nothing in dark mode`).not.toBe("");
+    expect(
+      dark,
+      `${name} is identical in both themes (${dark}) — it is a literal, not an alias ` +
+        "onto the --oc-* spine, so the chrome is dark-blind here",
+    ).not.toBe(light[name]);
+  }
+  // Geometry does not move with the theme.
+  for (const [name, expected] of Object.entries(GEOMETRY)) {
+    expect(await token(page, name), `${name} changed with the theme`).toBe(expected);
+  }
+});
