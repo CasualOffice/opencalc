@@ -17,7 +17,7 @@
 /// ours is already the complete command surface, so the cheapest correct thing
 /// is to leave it alone and restyle it.
 
-import { iconIds } from "./ribbon.icons.js?v=2";
+import { iconIds } from "./ribbon.icons.js";
 
 /* ── What earns a toolbar slot ────────────────────────────────────────────── */
 

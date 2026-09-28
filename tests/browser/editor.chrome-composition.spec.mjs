@@ -250,23 +250,49 @@ test("a toolbar group is stated by a rule, not by a capsule", async ({ page }) =
   expect(bar.button, "the button metric").toMatchObject({ w: 28, h: 28 });
 });
 
-/// **One metric set, so the two chromes cannot drift.**
+/// **One metric set, so the two MOUNTS cannot drift.**
 ///
 /// Two existed only because the web one was too loose; once it is right there
 /// is nothing for the desktop one to correct, and `docs/88` §7's "one
 /// composition, three mounts" is what makes the desktop and the page one editor
-/// rather than two designs. Asserted per band and per control, in both chromes,
-/// because a single number would be satisfied by a coincidence.
-test("the desktop and the page draw one toolbar, at one set of metrics", async ({ page }) => {
+/// rather than two designs. Asserted per band and per control, because a single
+/// number would be satisfied by a coincidence.
+///
+/// **Retaken for the chrome chooser (`UX-RIB-17`).** This compared `boot()`
+/// against `bootShell()` and read the difference as "the mount". That held
+/// while there was one chrome. There are now three, and the shell defaults to a
+/// different one from the page, so the comparison had quietly become
+/// *toolbar-in-a-page* against *ribbon-in-a-shell* — two chromes, and it failed
+/// reporting `.toolbar: 2` against `.toolbar: 42` as though a metric had
+/// drifted. Nothing had: the ribbon parks the toolbar off-screen by design.
+///
+/// The claim is about the **mount**, so the chrome is now pinned and the mount
+/// varied — and it runs for **both** chromes, which is a wider claim than the
+/// original, not a narrower one. Pinning uses the shipped precedence rather than
+/// a test-only hook: `?chrome=native` is not one of the three chrome names, so
+/// `chosenChrome()` falls past it to the stored preference.
+const pinChrome = (page, which) =>
+  page.addInitScript((w) => {
+    try { localStorage.setItem("oc.chrome", w); } catch { /* private mode */ }
+  }, which);
+
+for (const chrome of ["toolbar", "ribbon"]) {
+test(`the desktop and the page draw one ${chrome} chrome, at one set of metrics`, async ({ page }) => {
   await page.setViewportSize({ width: 1600, height: 900 });
+  await pinChrome(page, chrome);
 
   const metrics = () =>
     page.evaluate(() => {
       const out = { band: {}, box: {} };
-      for (const sel of [".toolbar", ".formula-bar", ".bottom-bar"]) {
+      // The command band each chrome actually draws: `.toolbar` under the
+      // classic chrome, `.oc-ribbon` under the ribbon, which parks `.toolbar`
+      // off-screen so its own reflow stays measurable. Measuring the parked one
+      // compares a chrome against its own scaffolding.
+      const commandBand = document.querySelector(".oc-chrome-ribbon") ? ".oc-ribbon" : ".toolbar";
+      for (const sel of [commandBand, ".formula-bar", ".bottom-bar"]) {
         out.band[sel] = +document.querySelector(sel).getBoundingClientRect().height.toFixed(1);
       }
-      for (const sel of [".toolbar .tb-btn", ".toolbar input.tb-font", "#formula-input", "#cell-ref", ".sheet-tab"]) {
+      for (const sel of [".tb-btn", "input.tb-font", "#formula-input", "#cell-ref", ".sheet-tab"]) {
         const r = document.querySelector(sel)?.getBoundingClientRect();
         if (r && r.height > 0) out.box[sel] = +r.height.toFixed(1);
       }
@@ -283,4 +309,7 @@ test("the desktop and the page draw one toolbar, at one set of metrics", async (
   // Not a vacuous pass: the selectors have to have found something.
   expect(Object.keys(native.box).length, "nothing was measurable; the selectors moved")
     .toBeGreaterThanOrEqual(4);
+  expect(Object.keys(native.band).length, "no band was measurable; the chrome did not draw")
+    .toBe(3);
 });
+}

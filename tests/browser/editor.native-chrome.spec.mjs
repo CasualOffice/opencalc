@@ -66,6 +66,23 @@ async function bootShell(page, query = "?chrome=native") {
   await boot(page, query);
 }
 
+/// Pin the chrome, so a test about the **mount** does not vary the chrome too.
+///
+/// `?chrome=native` asks for desktop *density*; which of the three chromes is
+/// drawn is a separate axis, and since `UX-RIB-17` the shell and the page no
+/// longer default to the same one. A test comparing shell against page must
+/// therefore say which chrome it means, or it is comparing two things at once —
+/// which is exactly how these specs failed, reporting `.toolbar: 2` against
+/// `42` as a drifted metric when the ribbon was simply parking it off-screen.
+///
+/// Uses the shipped precedence rather than a test-only hook: `native` is not one
+/// of the three chrome names, so `chosenChrome()` falls past `?chrome=` to the
+/// stored preference.
+const pinChrome = (page, which) =>
+  page.addInitScript((w) => {
+    try { localStorage.setItem("oc.chrome", w); } catch { /* private mode */ }
+  }, which);
+
 const model = (page) => page.evaluate(() => window.opencalcEditor.menuModel());
 
 test("the menu model describes the whole menu bar", async ({ page }) => {
@@ -111,7 +128,15 @@ test("every command in the model can be dispatched", async ({ page }) => {
   expect(unknown, "no id in the model is unknown to runCommand").toEqual([]);
 });
 
+/// **Pinned to the classic chrome (`UX-RIB-17`).** The claim is about the menu
+/// bar: hide it, and its height goes to the sheet. That is only a claim where
+/// the menu bar is the chrome's navigation axis. Under the ribbon the axis is
+/// the tab strip and the bar is already parked off-screen, so there is no
+/// height left to reclaim and the measurement is 0 — which is correct
+/// behaviour, not a regression, and asserting it here would be asserting the
+/// ribbon's scaffolding rather than `UX-DESK-01`'s reclaim.
 test("the shell's chrome hides the HTML bar and gives the height to the grid", async ({ page }) => {
+  await pinChrome(page, "toolbar");
   await boot(page);
   const webGrid = await page.locator("#grid").boundingBox();
   const barHeight = await page.evaluate(() => document.getElementById("menubar").getBoundingClientRect().height);
@@ -316,10 +341,18 @@ const NATIVE_TEXT = [
   ".toolbar .tb-select", ".toolbar input.tb-font", ".toolbar input.tb-size", "#zoom-level",
 ];
 
+/// **Pinned to the classic chrome (`UX-RIB-17`).** Same reason as above, plus
+/// one specific to this test: `region` measures `.app-header` and `#menubar`
+/// and asserts the grid gained exactly those two. Under the ribbon the menu bar
+/// is off-screen in *both* mounts, so "the regions desktop chrome drops" is no
+/// longer the difference between them, and the arithmetic stops describing
+/// anything. The ribbon's own mount-parity is covered by
+/// `editor.chrome-composition.spec.mjs`, which runs for both chromes.
 test("the desktop and the page share one metric set, and the sheet gets the regions", async ({ page }) => {
   // Wide enough that no toolbar group has collapsed into a flyout, or half
   // these controls measure 0x0 because they are not on the bar at all.
   await page.setViewportSize({ width: 1600, height: 900 });
+  await pinChrome(page, "toolbar");
 
   const metrics = () =>
     page.evaluate(({ bands, controls, text }) => {
@@ -704,24 +737,60 @@ test("the settings popover no longer carries a second theme control", async ({ p
 // absence is exactly why this shipped: run in a browser, `?chrome=native`
 // changes CSS and nothing can tell you whether a native bar took over.
 
-/// **Asking for desktop chrome does not take the menus away.**
-test("chrome=native in a browser keeps its menu bar, because nothing replaced it", async ({ page }) => {
+/// **Asking for desktop chrome does not take the navigation away.**
+///
+/// **Retaken for the chrome chooser (`UX-RIB-17`).** The rule this defends is
+/// `UX-CHR-02`'s and it has not moved: *hiding a navigation surface requires
+/// evidence another one exists.* What moved is what counts as evidence. The
+/// title said "because nothing replaced it", and under `?chrome=native`
+/// something now does — the ribbon draws a tab strip with a File tab, which is
+/// a navigation axis by the same definition the menu bar was one.
+///
+/// So this asserts the **rule** rather than one implementation of it: an axis
+/// is painted, and File and View are reachable on it. That is doc/122's
+/// one-axis rule — each chrome has exactly one navigation axis, never two on
+/// screen together — and it fails, as before, if a chrome hides the menus and
+/// draws nothing in their place.
+test("chrome=native in a browser keeps a navigation axis, whichever chrome draws it", async ({ page }) => {
   await boot(page, "?chrome=native");
 
-  await expect(page.locator("#menubar"), "the menus went and nothing drew any")
-    .toBeVisible();
-  const onBar = await page.evaluate(() =>
-    [...document.querySelectorAll(".menubar button.menu-top")]
-      .filter((b) => !b.hidden && b.getBoundingClientRect().height > 0)
-      .map((b) => b.textContent.trim()));
-  expect(onBar, "File is not on the bar").toContain("File");
-  expect(onBar, "View is not on the bar").toContain("View");
+  const axis = await page.evaluate(() => {
+    const shown = (el) => {
+      if (!el) return false;
+      const r = el.getBoundingClientRect();
+      const st = getComputedStyle(el);
+      // Inside the window, not merely attached: both chromes park their unused
+      // surface off-screen at a negative x rather than `display: none`, and an
+      // off-screen node is `toBeVisible()` as far as Playwright is concerned.
+      return st.display !== "none" && st.visibility !== "hidden" &&
+        r.width > 0 && r.height > 0 && r.right > 0 && r.bottom > 0;
+    };
+    const labels = (nodes) => nodes.filter(shown).map((n) => n.textContent.trim());
+    const bar = labels([...document.querySelectorAll(".menubar button.menu-top")]);
+    if (bar.length) return { kind: "menubar", labels: bar };
+    // `.rb-file` is a sibling of the tab list, not a member of it: File opens
+    // a full-window page rather than a band, so `role="tablist"` must not
+    // contain it. It is still the strip's first entry on screen, and leaving it
+    // out would report a tab strip with no File on it.
+    const tabs = labels([...document.querySelectorAll(".rb-file, .rb-tab")]);
+    if (tabs.length) return { kind: "tabstrip", labels: tabs };
+    const compact = labels([...document.querySelectorAll(".gs-bar button.menu-top")]);
+    if (compact.length) return { kind: "compact", labels: compact };
+    return { kind: "none", labels: [] };
+  });
+
+  expect(axis.kind, "the menus went and nothing drew a navigation axis in their place")
+    .not.toBe("none");
+  expect(axis.labels, `File is not on the ${axis.kind}`).toContain("File");
+  expect(axis.labels, `View is not on the ${axis.kind}`).toContain("View");
 
   // The density half of desktop chrome is still applied — this is not a revert
-  // of `UX-DESK-01`, it is a split of what that row bundled together.
+  // of `UX-DESK-01`, it is a split of what that row bundled together. Asserted
+  // as the region that is dropped, not as `.toolbar`'s height: under the ribbon
+  // `.toolbar` is parked off-screen at 1px, so a `< 49` ceiling on it would
+  // pass against the scaffolding while measuring nothing. Band metrics for both
+  // chromes are `editor.chrome-composition.spec.mjs`'s job.
   await expect(page.locator(".app-header")).toBeHidden();
-  expect(await page.evaluate(() => document.querySelector(".toolbar").getBoundingClientRect().height))
-    .toBeLessThan(49);
 
   // **And the bar the fix put back may not carry a control that cannot act.**
   //
@@ -741,6 +810,9 @@ test("chrome=native in a browser keeps its menu bar, because nothing replaced it
 /// The other half of the same claim: the fix must not be "never hide the menu
 /// bar", which would undo `UX-DESK-01` rather than correct it.
 test("the shell's bridge is the evidence that hides the bar", async ({ page }) => {
+  // Pinned to the classic chrome (`UX-RIB-17`): the reclaim this asserts is the
+  // menu bar's height, which only exists where the menu bar is the axis.
+  await pinChrome(page, "toolbar");
   await boot(page, "?chrome=native");
   const withoutShell = await page.evaluate(() => ({
     barSeen: document.getElementById("menubar").getBoundingClientRect().height > 0,
@@ -787,6 +859,20 @@ for (const [name, how] of [
       const view = [...document.querySelectorAll(".menubar button.menu-top")]
         .find((b) => b.dataset.ocLabel === "View");
       if (shown(view)) return "menubar";
+      // ...or the ribbon's backstage, which is where Excel keeps it too:
+      // File > Options > General > Office Theme. The ribbon hides the menu bar,
+      // so `UX-CHR-01`'s "theme is in View" stops being a route the moment this
+      // chrome is up; `UX-RIB-16` gave the backstage an Options pane carrying
+      // the same `view.theme.*` nodes, so the menu still owns the state and
+      // there is still exactly one control.
+      //
+      // The File TAB has to be on screen for this to count — a pane inside a
+      // dialog nothing can open is not a route, which is the same trap the
+      // `menuModel()` note below describes.
+      const fileTab = document.querySelector(".rb-file");
+      const themeInBackstage = document.querySelector(
+        '.rb-backstage [data-oc-proxy^="view.theme."]');
+      if (shown(fileTab) && themeInBackstage) return "backstage";
       // ...or the operating system's.
       //
       // **`menuModel()` alone is not evidence of a route, and this is the trap

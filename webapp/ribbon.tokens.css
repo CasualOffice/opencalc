@@ -1,0 +1,187 @@
+/* The chrome's token spine, and the icon font (`UX-RIB-14`).
+ *
+ * This file exists so the visual contract measured in the sibling editor can be
+ * ported here rather than re-derived. That editor is at `../opendoc`; its
+ * `docs/123-RIBBON-AND-FILE-PAGE-VISUAL-DESIGN.md` measured a ribbon and a File
+ * page first-hand against **ONLYOFFICE 9.4.1** (their own running build, with
+ * every LESS variable resolved) and a **live Google Docs at 1408x723**, and
+ * recorded the file and line for each number so it can be re-read. Its chrome
+ * stylesheet depends on 29 custom properties and **not one of them existed in
+ * this repository** — so pasting those rules unshimmed renders unstyled boxes.
+ * This is the shim.
+ *
+ * It is deliberately two halves, and the split is the whole idea.
+ *
+ * ## The colour half aliases, it does not copy
+ *
+ * Every colour name resolves to one of this editor's own `--oc-*` tokens rather
+ * than to the sibling's hex. Three things fall out of that, and each is a bug
+ * avoided rather than a tidiness preference:
+ *
+ *   1. **Dark mode comes for free.** `editor.css` redefines the `--oc-*` block
+ *      under `[data-theme="dark"]` and under the OS preference. A `var()` is
+ *      substituted at use time, not at declaration time, so a rule written
+ *      `color: var(--ink)` re-resolves the moment the theme flips. Pasting
+ *      `#1f1f1f` instead would have given a chrome that is dark-blind, and
+ *      blind in a way no light-mode screenshot shows.
+ *   2. **Hosts keep theming the chrome.** `--oc-accent-color` and friends are
+ *      the *published* SDK theme contract; a host that sets `accentColor` today
+ *      themes the toolbar. Aliasing means it themes the ribbon too, without the
+ *      SDK growing a second vocabulary to document.
+ *   3. **One palette, not two.** The sibling's `--bg` is `#eef1f7` where ours
+ *      is `#f6f7f9`. Those are two products' brands, and the thing being ported
+ *      is the geometry, not the skin. Aliasing keeps this editor looking like
+ *      itself.
+ *
+ * ## The geometry half carries the numbers across verbatim
+ *
+ * These are the measurements, and changing one silently discards the research
+ * behind it. Each carries its source. The one number we knowingly refuse is
+ * recorded where it is declared (`--icon-control`, `--ribbon-band-h`): a 20px
+ * control is ONLYOFFICE's and fails WCAG 2.2 SC 2.5.8, so our band is 8px
+ * taller than theirs on purpose. That 8px is the accessibility margin, not
+ * slack, and a later pass "tightening" the band must not spend it.
+ *
+ * Loaded before `ribbon.css` and `sheets.css`, which consume these names.
+ */
+
+:root, :host {
+  /* ---- Colour: aliases onto the published `--oc-*` contract ------------- */
+
+  /* Surfaces. `--bg` is the chrome strip (header, tab row, band); `--bg-2` the
+   * sunken panes and the File page's rail; `--surface` anything that floats
+   * above them — a panel, a dropdown, a dialog. */
+  --bg: var(--oc-surface-color);
+  --bg-2: var(--oc-surface-color);
+  --surface: var(--oc-background-color);
+
+  /* Text, in three weights of emphasis. `--faint` is the one with a history:
+   * it is 5.08:1 on white because its predecessor was 2.63:1 and failed WCAG
+   * 1.4.3 on the smallest text in the editor. It is aliased, not restated, so
+   * that fix cannot be undone here by accident. */
+  --ink: var(--oc-text-color);
+  --muted: var(--oc-muted-text-color);
+  --faint: var(--oc-faint-text-color);
+
+  /* Rules. `--line-strong` is not decoration: with group captions deleted from
+   * paint (docs/123 §4.1) the vertical rule is the *only* thing left saying
+   * where one group ends and the next begins, so it is a step darker than the
+   * ordinary divider. */
+  --line: var(--oc-border-color);
+  --line-strong: var(--oc-control-border-color);
+
+  /* Accent. `--accent-text` is the accent as foreground/edge on a themed
+   * surface; `--accent-soft` the wash behind a selected tab. Both already exist
+   * here — `--oc-accent-soft` is declared in `editor.css` precisely because
+   * focus rings had been written as literal `rgba(47, 109, 246, …)`, the
+   * *default* accent spelled out, so a host's brand accent gave brand buttons
+   * and blue rings (`UX-TOKEN-01`). Aliasing inherits that fix. */
+  --accent-text: var(--oc-accent-color);
+  --accent-soft: var(--oc-accent-soft);
+
+  --shadow-popover: var(--oc-popover-shadow);
+
+  /* ---- Geometry: the measured contract, ported verbatim ----------------- */
+
+  /* Type scale. One scale for the whole chrome — a second body size for one
+   * surface is a fork, not a decision, which is why ONLYOFFICE's 11-12px is
+   * not adopted (docs/123 §2.1). */
+  --fs-body: 13px;
+  --fs-small: 12px;
+  --fs-caption: 10px;
+  --fs-ribbon-tab: 13.5px;
+  --fs-ribbon-caption: 10.5px;
+
+  /* The header block: 3 + 24 + 28 + 3 = 58.
+   *
+   * The tab strip lives INSIDE the header, under the document title, rather
+   * than on a row of its own. That is not an invention: ONLYOFFICE ships
+   * exactly two header layouts and picks between them with one config flag
+   * (`Viewport.js:197`) — `twoLevelHeader` gives the title a 28px row and puts
+   * the tab strip 28px beneath it. Google Docs spends ~59px on the same
+   * title-plus-menu-bar block. The sibling was spending 92px on it before this
+   * contract, and 58px after.
+   *
+   * The payoff is that the chrome's one navigation axis is always in the same
+   * place whichever chrome is up: Compact puts its menu bar here, the ribbon
+   * puts its tab strip here, and switching does not move the navigation. */
+  --h-header: 58px;
+  --h-tab: 28px;
+
+  /* The band. ONLYOFFICE's is 66px (`colors-table.less:529`); ours is 74px and
+   * the 8px difference is deliberate — see `--icon-control`. */
+  --ribbon-band-h: 74px;
+
+  /* Control icon size. The controls themselves stay at **30px**, which is the
+   * one row where this contract knowingly differs from ONLYOFFICE by a
+   * measurable amount: theirs are 20x20 (`@x-small-btn-size`), and a 20px
+   * target fails WCAG 2.2 SC 2.5.8 (Target Size (Minimum), 24x24 CSS px). This
+   * repository's floor is touch-usable. Do not "recover" the 8px. */
+  --icon-control: 18px;
+
+  /* Corner radii. */
+  --radius: 8px;
+  --radius-sm: 6px;
+  --radius-popover: 10px;
+
+  /* The band's outer card inset — fluid, so the band breathes on a wide screen
+   * without the groups drifting apart on a narrow one. */
+  --chrome-card-radius: clamp(10px, 1.1vw, 18px);
+  --chrome-card-inset-x: clamp(2px, 0.3vw, 10px);
+  --chrome-card-inset-y: clamp(1px, 0.25vh, 4px);
+
+  /* ---- Stacking ------------------------------------------------------
+   * Three rungs, not a ladder: only the surfaces the ported chrome rules
+   * actually name. A tooltip outranks a menu because it is
+   * `pointer-events: none` and can never let someone act on chrome the menu has
+   * taken control of. */
+  --z-selection-toolbar: 40;
+  --z-menu: 60;
+  --z-tooltip: 1000;
+}
+
+/* ---- The icon font --------------------------------------------------------
+ *
+ * Material Symbols Outlined, Apache-2.0, self-hosted beside the document fonts
+ * with its licence text (`fonts/LICENSE-Material-Symbols.txt`). Never a CDN:
+ * the editor is offline-capable and runs under a strict CSP.
+ *
+ * This closes `UX-RIB-03`, which is open because the 42 glyphs this editor
+ * draws today are inline stroked SVG on a 24-unit viewBox with **no recorded
+ * provenance anywhere in the tree**, and a ribbon at `docs/91`'s structure
+ * needs roughly 230 of them in one weight on one grid. Sourcing that many by
+ * hand was the programme's longest lead time. One licensed family answers the
+ * volume and the provenance in the same move.
+ *
+ * `font-display: block` rather than `swap`, and this is the one place that is
+ * right: these glyphs are ligatures of English words, so a swap period paints
+ * the literal text "format_bold" in the toolbar before the font lands. Better a
+ * blank box for 100ms than a row of words where the icons go.
+ */
+@font-face {
+  font-family: "Material Symbols Outlined";
+  font-style: normal;
+  font-weight: 400;
+  font-display: block;
+  src: url("./fonts/material-symbols-outlined.woff2") format("woff2");
+}
+
+.ms {
+  display: inline-block;
+  overflow: hidden;
+  font-family: "Material Symbols Outlined";
+  font-size: 1em;
+  font-style: normal;
+  font-weight: 400;
+  line-height: 1;
+  letter-spacing: normal;
+  text-transform: none;
+  white-space: nowrap;
+  word-wrap: normal;
+  direction: ltr;
+  font-feature-settings: "liga";
+  font-variation-settings: "FILL" 0, "wght" 400, "GRAD" 0, "opsz" 24;
+  -webkit-font-feature-settings: "liga";
+  -webkit-font-smoothing: antialiased;
+  user-select: none;
+}

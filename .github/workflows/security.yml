@@ -19,13 +19,45 @@ on:
     - cron: "17 6 * * 1"
   # So it can be run on demand when an advisory lands, without waiting a week.
   workflow_dispatch:
+  # The half the schedule cannot cover quickly: a vulnerable version WE pulled
+  # in. `rustls 0.23.43` shipped RUSTSEC-2026-0285 and sat red on `main` for a
+  # week, because the only thing that looked was a Monday cron and the result
+  # arrived where nobody was reading (`DEP-20`). Scoped to the lockfile on
+  # purpose — that keeps the reasoning above intact. A failure here is still
+  # "the world changed" whenever it fires from the schedule; when it fires from
+  # a push it is "this commit changed what we depend on", which is the author's
+  # business and should be answered in minutes rather than by Monday.
+  push:
+    branches: [main]
+    paths:
+      - "Cargo.lock"
+      - "**/Cargo.toml"
+      - "deny.toml"
 
 permissions:
   contents: read
 
+# **This workflow gates main now, so it keeps its run on main.**
+#
+# It used to run only from a schedule and a manual dispatch, where one global
+# group and `cancel-in-progress: true` were right: two Monday crons racing are
+# the same question asked twice, and the newer answer is the one worth having.
+# Adding the lockfile `push` trigger changed what this workflow *is* — a run on
+# main is now the record of whether main's dependencies are clean, there is one
+# per merge, and cancelling it destroys the only evidence.
+#
+# That matters here specifically. `DEP-20` is a row about an advisory signal
+# that arrived where nobody was reading; a signal that is *cancelled* is the
+# same defect with fewer traces. `check-workflow-concurrency` caught this the
+# moment the trigger landed, which is the gate working exactly as intended.
+#
+# The expression is `ci.yml`'s, and asymmetric for the reason stated there: the
+# commit goes in the group on main so a queued run is not discarded when a
+# newer one joins, while a pull request keeps the per-ref group because there
+# superseding is the point.
 concurrency:
-  group: security
-  cancel-in-progress: true
+  group: security-${{ github.workflow }}-${{ github.ref }}-${{ github.ref == 'refs/heads/main' && github.sha || 'branch' }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
   advisories:
