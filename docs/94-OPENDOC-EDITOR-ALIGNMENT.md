@@ -52,3 +52,13 @@ chrome family without adding a package or font service.
 
 ## Tracker
 UX-OD-01. Public website redesign is outside the selected editor-first scope.
+
+## CI prerequisite — dependency audit
+
+The PR exposed five existing RustSec advisories in quinn-proto 0.11.16
+(RUSTSEC-2026-0338 through RUSTSEC-2026-0342). Update its resolved version to
+0.11.18 in both the workspace and fuzz lockfiles; dependency declarations and
+advisory policy stay as configured. This is a patch upgrade of an existing
+transitive dependency, requiring no new API or architecture decision.
+Both lockfiles must pass `cargo audit --deny warnings`, and the fuzz manifest
+must still agree with its lockfile. Recorded as DEP-21.
