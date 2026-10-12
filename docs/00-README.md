@@ -142,6 +142,8 @@ the other way around. This index is the map.
 | 92 | [Competitive gap analysis: what are we missing?](92-COMPETITIVE-GAP-ANALYSIS.md) | Fifty-eight gaps against Excel, Google Sheets and OnlyOffice, stated as tasks a person cannot do rather than features absent: the five `P0`s, sixteen switching blockers, and the nine that are engine-capable and editor-unreachable — the cheapest round available. Supersedes the stale half of [12](12-COMPETITIVE-ANALYSIS.md) and says which sections it leaves standing |
 | 93 | [Google Sheets' chrome, as this editor's other one](93-SHEETS-CHROME-DESIGN.md) | The second of two selectable chromes, paired with [91](91-EXCEL-RIBBON-CHROME-DESIGN.md): the app bar and the collaboration surfaces this project already runs a server for; the stated rule for what earns one of about thirty toolbar slots; panels where the ribbon uses modals; the motion token set; and the chrome chooser — where the preference lives, what precedence it has against an integrator's setting, and what survives the switch |
 
+| 94 | [OpenDoc editor alignment](94-OPENDOC-EDITOR-ALIGNMENT.md) | Editor-first shell, typography, navigation and functional acceptance gates |
+
 ### Measured gap trackers (50–53, 73)
 
 Generated or audited against the code rather than written by hand, so a row
