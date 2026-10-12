@@ -6,7 +6,8 @@ navigation, a quiet blue ribbon, consistent typography, floating surfaces and
 status controls. The user selected editor-first scope on 2026-10-13.
 
 ## Research
-Reference: sibling OpenDoc `webapp/src/style.css`, `fonts.css`, `editor.html`
+Reference: sibling OpenDoc `../opendoc/webapp/src/style.css`, `../opendoc/webapp/src/fonts.css`,
+`../opendoc/webapp/editor.html`
 and chrome wiring, inspected 2026-10-13. Existing OpenCalc designs 91 and 93
 supply command ownership, keyboard navigation and chrome switching.
 
