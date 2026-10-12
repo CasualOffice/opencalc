@@ -61,3 +61,11 @@ Both the browser canvas and the PNG backend draw real glyphs, from bundled
 metric-compatible faces (Carlito for Calibri, Liberation Sans for Arial, and so
 on), so a sheet looks the same on a machine that has none of the original fonts
 installed.
+
+## Editor shell
+
+The browser editor defaults to the OpenDoc-style ribbon with self-hosted Inter,
+shared title/navigation geometry, quick undo/redo and responsive sheet status.
+Settings retains Toolbar, Ribbon and Sheets choices; saved preferences and
+`?chrome=toolbar|ribbon|sheets` override the default. Workbook fonts and command
+ownership are independent of the shell. See [the design](../docs/94-OPENDOC-EDITOR-ALIGNMENT.md).

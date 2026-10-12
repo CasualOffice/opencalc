@@ -46,8 +46,8 @@ const LAYOUT_KEY = "oc.ribbon.layout";
 ///   2. the stored user preference — the product owner's requirement, and the
 ///      only level a person sets by clicking something.
 ///   3. the per-mount default. `?mode=desktop` / `?chrome=native` means the
-///      desktop shell, where `docs/91` makes the ribbon the default; a browser
-///      tab keeps the toolbar until asked.
+///      desktop shell. Both browser and desktop default to the sibling-style
+///      ribbon (docs/94); explicit and saved choices keep precedence.
 const CHROMES = ["toolbar", "ribbon", "sheets"];
 
 export function chosenChrome() {
@@ -56,8 +56,7 @@ export function chosenChrome() {
   let stored = null;
   try { stored = localStorage.getItem(STORE_KEY); } catch { /* private mode */ }
   if (CHROMES.includes(stored)) return stored;
-  const native = asked === "native" || (PARAMS.get("mode") || "") === "desktop";
-  return native ? "ribbon" : "toolbar";
+  return "ribbon";
 }
 
 /// Switching is the caller's job to sequence, because the two chromes borrow
@@ -601,7 +600,17 @@ export async function start() {
   layoutBtn.title = "Ribbon layout";
   layoutBtn.setAttribute("aria-label", "Ribbon layout");
 
-  strip.append(fileBtn, tablist, layoutBtn);
+  // Undo/redo must be reachable without opening File > All commands.
+  // Proxies preserve the transaction owner and follow its disabled state.
+  const quick = document.createElement("div");
+  quick.className = "rb-quick";
+  quick.setAttribute("role", "group");
+  quick.setAttribute("aria-label", "History");
+  for (const id of ["toolbar.undo", "toolbar.redo"]) {
+    const source = byCommand(id);
+    if (source) quick.appendChild(proxy(source, id, "small"));
+  }
+  strip.append(fileBtn, tablist, quick, layoutBtn);
 
   const body = document.createElement("div");
   body.className = "rb-body";

@@ -141,9 +141,9 @@ test("one undo reverses one edit", async ({ page }) => {
   await expect(cell(page, D5)).toHaveText("43.48");
 
   // And by the toolbar, which is the same command by another route.
-  await page.click("#tb-redo");
+  await page.click('[data-oc-proxy="toolbar.redo"]');
   await expect(cell(page, D2)).toHaveText("45");
-  await page.click("#tb-undo");
+  await page.click('[data-oc-proxy="toolbar.undo"]');
   await expect(cell(page, D2)).toHaveText("13.5");
 });
 

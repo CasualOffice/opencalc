@@ -16,7 +16,17 @@ _Generated 2026-08-06. Two parts: the **current** de-facto design language extra
 > AG Grid-style typed suffixes and called the rename *"cheap now and impossible
 > after the first release"*, and the release has happened.
 
-## Part A — Current design language (as-built)
+## Current editor alignment
+
+[94](94-OPENDOC-EDITOR-ALIGNMENT.md) adopts OpenDoc's Inter chrome, Studio blue
+light palette, title/navigation header, ribbon card and floating-surface radii.
+The browser now defaults to ribbon; explicit URLs and saved preferences win.
+Undo/redo remain visible beside every tab. Phone ribbons support swiping folded
+groups and the status line wraps beneath sheet/zoom controls. Spreadsheet content
+fonts, grid geometry and public theme-token names retain their existing contract.
+The detailed inventory below predates this alignment.
+
+## Part A — Earlier design inventory
 
 **Colors**
 

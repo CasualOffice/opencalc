@@ -1,3 +1,11 @@
+/* OpenDoc chrome family; SIL OFL license beside the self-hosted font. */
+@font-face {
+  font-family: "Inter";
+  font-style: normal;
+  font-weight: 400 700;
+  font-display: swap;
+  src: url("./fonts/inter-latin-400-700.woff2") format("woff2");
+}
 /* Bundled fonts (Apache-2.0 / SIL OFL-1.1) — the metric-compatible substitutes
    the canvas renders through so a cell's font shows deterministically on every
    machine (e.g. Calibri→Carlito, Arial→Liberation Sans), regardless of what the
@@ -53,7 +61,7 @@
      and `all: initial`; containment added nothing that those two do not. */
   /* Re-established after `all: initial`, because the subtree inherits from
      here and `initial` for `font` is not a font anyone wants to read. */
-  font: 400 13px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  font: 400 13px/1.5 "Inter", -apple-system, "Segoe UI", Roboto, sans-serif;
   color: var(--oc-text-color);
   text-align: left;
   direction: ltr;
@@ -70,23 +78,23 @@
 :root, :host {
   --oc-freeze-line-color: #5f6368;
   --oc-background-color: #ffffff;
-  --oc-text-color: #0b0d12;
-  --oc-icon-color: #454b57;        /* default toolbar icon */
-  --oc-muted-text-color: #7b8391;       /* secondary text */
+  --oc-text-color: #1f1f1f;
+  --oc-icon-color: #5f6368;        /* default toolbar icon */
+  --oc-muted-text-color: #5f6368;       /* secondary text */
   /* Tertiary text: shortcut hints, the save state, the status line.
      Was #9aa1ad, which is 2.63:1 on white — WCAG 1.4.3 wants 4.5 and this
      is small text, so it was the worst contrast in the editor. #666e7c is
      5.08:1 and still reads as clearly secondary. */
   --oc-faint-text-color: #666e7c;       /* tertiary / shortcuts */
   --oc-disabled-color: #b6bcc7;
-  --oc-border-color: #e8eaee;      /* dividers, gridlines */
-  --oc-control-border-color: #dfe2e8;    /* control outlines */
+  --oc-border-color: #e3e8f1;      /* dividers, gridlines */
+  --oc-control-border-color: #cfd6e4;    /* control outlines */
   --oc-border-hover-color: #c9cfd9;
-  --oc-surface-color: #f6f7f9;     /* toolbar pill groups, name box */
+  --oc-surface-color: #eef1f7;     /* toolbar pill groups, name box */
   --oc-popover-background-color: #ffffff;        /* popovers, panels */
   --oc-gridline-color: #d3d7de;        /* interior gridlines — see the contrast note */
-  --oc-accent-color: #2f6df6;
-  --oc-accent-hover-color: #1f56cf;
+  --oc-accent-color: #3355c4;
+  --oc-accent-hover-color: #2945a1;
   --oc-accent-contrast-color: #ffffff;
   --oc-selection-color: rgba(47, 109, 246, .10);
   --oc-find-highlight-color: rgba(245, 158, 11, .28);
@@ -223,7 +231,9 @@
 }
 body {
   margin: 0;
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, sans-serif;
+  font-size: 13px;
+  line-height: 1.5;
+  font-family: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, sans-serif;
   color: var(--oc-text-color);
   background: var(--oc-background-color);
   -webkit-font-smoothing: antialiased;
@@ -2352,3 +2362,34 @@ button.doc-name:focus-visible { outline: 2px solid var(--oc-accent-color); outli
 .hist-size { grid-row: 1; font-size: 11px; color: var(--oc-faint-text-color);
   font-variant-numeric: tabular-nums; }
 .hist-restore, .hist-hide { grid-row: 2; font-size: 11.5px; padding: 2px 8px; }
+
+/* OpenDoc sibling shell (docs/94): floating surfaces share one visual language. */
+html, .editor-body { overscroll-behavior: none; }
+.skip-link {
+  position: fixed; inset-inline-start: 8px; top: 8px; z-index: 1000;
+  padding: 8px 12px; border-radius: 6px;
+  background: var(--oc-background-color); color: var(--oc-text-color);
+  transform: translateY(-150%);
+}
+.skip-link:focus { transform: none; outline: 2px solid var(--oc-accent-color); }
+.popmenu { border-radius: 10px; }
+.menu-item { min-height: 30px; box-sizing: border-box; }
+.bottom-bar { background: var(--oc-surface-color); }
+.sheet-tabs { background: transparent; border-radius: 0; }
+.sheet-tab { height: 30px; border-radius: 6px 6px 0 0; }
+.sheet-tab.active {
+  color: var(--oc-accent-color); background: var(--oc-background-color);
+  box-shadow: inset 0 -2px var(--oc-accent-color);
+}
+.bottom-status { font-variant-numeric: tabular-nums; }
+@media (max-width: 600px) {
+  /* Engine progress/errors retain readable text instead of a one-letter
+     sliver; routine version detail remains available through Help > About. */
+  .bottom-bar { flex-wrap: wrap; height: auto; min-height: 34px; padding-block: 3px; }
+  .bottom-bar .tb-status {
+    order: 10; flex: 1 0 100%; min-width: 0;
+    white-space: normal; overflow-wrap: anywhere; font-size: 11px;
+  }
+  .bottom-bar .bottom-status { font-size: 11px; }
+  .bottom-bar { gap: 6px; }
+}

@@ -692,3 +692,60 @@
 }
 .oc-chrome-ribbon .rb-btn.rb-list .rb-label { max-width: none; }
 .oc-chrome-ribbon .rb-all-items .rb-btn.rb-list { width: auto; min-width: 190px; max-width: 260px; }
+
+/* OpenDoc title + navigation composition (docs/94). The strip stays owned by
+   the ribbon so switching chromes removes every ribbon listener and node. */
+.oc-chrome-ribbon .app-header {
+  height: var(--h-header); box-sizing: border-box;
+  align-items: flex-start; padding-top: 5px;
+  background: var(--bg); border-bottom: 0;
+}
+.oc-chrome-ribbon .app-header .brand-logo { align-self: center; }
+.oc-chrome-ribbon .app-header .doc-identity { height: 24px; align-items: center; }
+.oc-chrome-ribbon .app-header .header-right { align-self: center; }
+.oc-chrome-ribbon:not(.oc-chrome-native):not(.oc-chrome-embedded):not(.oc-hide-header) .rb-tabs {
+  position: absolute; top: 30px; left: 54px; right: 150px;
+  height: var(--h-tab); padding: 0; border-bottom: 0;
+}
+.oc-chrome-ribbon .oc-ribbon { background: var(--bg); border-bottom: 0; }
+.oc-chrome-ribbon .rb-tabs { background: var(--bg); }
+.oc-chrome-ribbon .rb-file {
+  background: transparent; color: var(--ink); border-radius: 6px;
+  font-weight: 500; padding-inline: 10px;
+}
+.oc-chrome-ribbon .rb-file:hover { background: var(--accent-soft); filter: none; }
+.oc-chrome-ribbon .rb-tab { font-size: var(--fs-ribbon-tab); }
+.oc-chrome-ribbon .rb-tab.is-on { color: var(--accent-text); background: transparent; font-weight: 600; }
+.oc-chrome-ribbon .rb-body {
+  margin: var(--chrome-card-inset-y) var(--chrome-card-inset-x);
+  background: var(--surface); border: 1px solid var(--line);
+  border-radius: var(--chrome-card-radius);
+}
+.oc-chrome-ribbon .rb-panel { height: var(--ribbon-band-h); padding: 7px 8px; }
+.oc-chrome-ribbon .rb-cap { display: none; }
+.oc-chrome-ribbon .rb-group { justify-content: center; border-color: var(--line-strong); }
+.oc-chrome-ribbon .rb-row { grid-template-rows: repeat(2, 28px); height: 59px; }
+.oc-chrome-ribbon .rb-btn { border-radius: var(--radius-sm); }
+@media (max-width: 600px) {
+  .oc-chrome-ribbon .app-header { height: 48px; padding-top: 0; align-items: center; }
+  .oc-chrome-ribbon:not(.oc-chrome-native):not(.oc-chrome-embedded):not(.oc-hide-header) .rb-tabs {
+    position: static; height: 32px; padding: 0 8px;
+  }
+}
+@media (max-width: 600px) {
+  /* Folded groups still need a horizontal path when their minimum widths
+     exceed a phone. The page and grid keep their own independent scrollers. */
+  .oc-chrome-ribbon .rb-panel { overflow-x: auto; scrollbar-width: none; }
+  .oc-chrome-ribbon .rb-panel::-webkit-scrollbar { display: none; }
+  .oc-chrome-ribbon .rb-group { flex: 0 0 auto; }
+}
+
+.oc-chrome-ribbon .rb-quick {
+  display: flex; align-items: center; gap: 2px; flex: 0 0 auto;
+  padding-inline: 4px; border-inline-start: 1px solid var(--line-strong);
+}
+.oc-chrome-ribbon .rb-quick .rb-btn { min-height: 26px; }
+
+.oc-chrome-ribbon .app-header button.doc-name { font-weight: 600; }
+/* Keep the active underline inside the shared header's navigation row. */
+.oc-chrome-ribbon .rb-tabs .rb-tab { height: var(--h-tab); margin-block: 0; box-sizing: border-box; }
