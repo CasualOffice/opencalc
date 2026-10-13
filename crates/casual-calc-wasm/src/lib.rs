@@ -228,7 +228,10 @@ pub(crate) fn cell_input_text(wb: &Workbook, cell: &Cell, at: CellRef) -> String
     if let Some(handle) = cell.formula
         && let Some(expr) = wb.formula(handle)
     {
-        return format!("={}", casual_calc_formula::print_at(expr, Origin::at(at.row, at.col)));
+        return format!(
+            "={}",
+            casual_calc_formula::print_at(expr, Origin::at(at.row, at.col))
+        );
     }
     value_text(wb, &cell.value)
 }

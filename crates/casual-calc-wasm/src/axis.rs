@@ -1459,7 +1459,9 @@ mod offset_overflow_tests {
 
 #[cfg(test)]
 mod show_formulas_tests {
-    use crate::{session_cells, session_find_opts, session_new, session_set_cell, session_set_view_option};
+    use crate::{
+        session_cells, session_find_opts, session_new, session_set_cell, session_set_view_option,
+    };
 
     /// **Show Formulas prints each formula as typed** (fit-gap XL-UX-001).
     ///
@@ -1478,7 +1480,10 @@ mod show_formulas_tests {
         session_set_cell(0, 4, 2, "=B5*2").unwrap();
         session_set_view_option(0, "formulas", true).unwrap();
         let json = session_cells(0, 4, 1, 4, 2);
-        assert!(json.contains("\"=SUM(B2:B4)\""), "Show Formulas printed {json}");
+        assert!(
+            json.contains("\"=SUM(B2:B4)\""),
+            "Show Formulas printed {json}"
+        );
         assert!(json.contains("\"=B5*2\""), "Show Formulas printed {json}");
         assert!(!json.contains("#REF!"), "Show Formulas printed {json}");
     }
@@ -1491,6 +1496,9 @@ mod show_formulas_tests {
         session_set_cell(0, 1, 1, "3").unwrap();
         session_set_cell(0, 4, 1, "=SUM(B2:B4)").unwrap();
         let hits = session_find_opts(0, "B2:B4", false, false, false, false, false);
-        assert!(hits.contains("\"r\":4"), "Find did not see the formula: {hits}");
+        assert!(
+            hits.contains("\"r\":4"),
+            "Find did not see the formula: {hits}"
+        );
     }
 }
