@@ -764,6 +764,10 @@ export async function start() {
       // `#sheet-ctx` and only an outside click closed them (UX-SHELL-09).
       const ctx = document.getElementById("sheet-ctx");
       if (ctx) { e.preventDefault(); ctx.remove(); refocusGrid(); return; }
+      // A toolbar popup the ribbon opened and re-anchored (colours, borders,
+      // orientation, merge) closes the same way (fit-gap XL-UX-004).
+      const tbPop = [...document.querySelectorAll(".toolbar .popmenu")].filter((m) => !m.hidden);
+      if (tbPop.length) { e.preventDefault(); for (const m of tbPop) m.hidden = true; refocusGrid(); return; }
       closeBackstage();
       return;
     }

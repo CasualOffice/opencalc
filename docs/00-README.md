@@ -144,6 +144,7 @@ the other way around. This index is the map.
 
 | 94 | [OpenDoc editor alignment](94-OPENDOC-EDITOR-ALIGNMENT.md) | Editor-first shell, typography, navigation and functional acceptance gates |
 | 95 | [The Excel shell](95-EXCEL-SHELL-TARGET.md) | Owner-approved target: Excel's shell with our identity and lowest cognitive load; prototype in `prototypes/excel-shell-2026/`; rows `UX-SHELL-01..18` |
+| 96 | [Excel fit-gap](96-EXCEL-FIT-GAP.md) | Features and UX against Excel, prioritised, every row in the tracker as `XL-FEAT-*` / `XL-UX-*` |
 
 ### Measured gap trackers (50–53, 73)
 

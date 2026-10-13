@@ -25,3 +25,17 @@ for (const [what, open] of [
     expect(await page.evaluate(() => document.activeElement?.id)).toBe("grid");
   });
 }
+
+// The toolbar's own popups (fill and font colour, borders, orientation, merge)
+// opened from a ribbon button are re-anchored under it; Escape must close them
+// too, or they linger across whatever is done next (fit-gap XL-UX-004).
+for (const id of ["toolbar.fillcolor", "toolbar.fontcolor", "toolbar.rotate", "toolbar.merge"]) {
+  test(`Escape closes the ${id} popup opened from the ribbon`, async ({ page }) => {
+    await boot(page);
+    await page.locator(`.oc-ribbon [data-cmd="${id}"]`).click();
+    const open = page.locator(".toolbar .popmenu:not([hidden])");
+    await expect(open).toHaveCount(1);
+    await page.keyboard.press("Escape");
+    await expect(open).toHaveCount(0);
+  });
+}
