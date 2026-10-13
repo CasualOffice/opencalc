@@ -29,6 +29,7 @@ mod functions;
 mod graph;
 pub mod pivot;
 mod ranges;
+mod structured;
 
 pub use graph::{dependents_of, precedents_of};
 mod value;
@@ -353,6 +354,91 @@ fn recalculate_once_within(
     Stopped::No(spilled)
 }
 
+/// Whether `cell` should go on showing the value its file cached rather than
+/// anything this engine computes: it carries [`CellFlags::FILE_CACHED`] and its
+/// formula uses something [`cannot_compute`] names.
+pub(crate) fn keeps_file_value(workbook: &Workbook, cell: &casual_calc_model::Cell) -> bool {
+    cell.flags.contains(CellFlags::FILE_CACHED)
+        && cell
+            .formula
+            .and_then(|h| workbook.formula(h))
+            .is_some_and(|expr| !cannot_compute(workbook, expr).is_empty())
+}
+
+/// What in `expr` this engine cannot compute: each function it does not
+/// implement (by name, as written), and `"(unparsed formula)"` for text the
+/// parser could not read. Empty when everything in it is computable.
+///
+/// A function counts as computable when it is a builtin, a defined name bound
+/// to a `LAMBDA`, or a name bound by a `LET` or `LAMBDA` inside the formula
+/// itself — the last over-approximated across the whole tree, which can only
+/// err towards computing.
+///
+/// Excel computed the cached value with a function it implements. This engine
+/// answering `#NAME?` over it is a regression the author did not make, so the
+/// cached value is kept — what Excel shows — and the caller reports that the
+/// cell is not being recalculated.
+#[must_use]
+pub fn cannot_compute(workbook: &Workbook, expr: &casual_calc_formula::Expr) -> Vec<String> {
+    use casual_calc_formula::Expr;
+    fn bound(expr: &Expr, out: &mut Vec<String>) {
+        match expr {
+            Expr::Function { name, args } => {
+                if name == "LET" || name == "LAMBDA" {
+                    for a in args {
+                        if let Expr::Name(n) = a {
+                            out.push(n.to_ascii_uppercase());
+                        }
+                    }
+                }
+                args.iter().for_each(|a| bound(a, out));
+            }
+            Expr::Call { callee, args } => {
+                bound(callee, out);
+                args.iter().for_each(|a| bound(a, out));
+            }
+            Expr::Unary { operand, .. } => bound(operand, out),
+            Expr::Binary { left, right, .. } => {
+                bound(left, out);
+                bound(right, out);
+            }
+            _ => {}
+        }
+    }
+    fn walk(workbook: &Workbook, expr: &Expr, bound: &[String], out: &mut Vec<String>) {
+        match expr {
+            Expr::Raw(_) => out.push("(unparsed formula)".to_owned()),
+            Expr::Function { name, args } => {
+                let known = functions::is_builtin(name)
+                    || bound.iter().any(|b| b.eq_ignore_ascii_case(name))
+                    || workbook
+                        .defined_names
+                        .iter()
+                        .any(|d| d.name.eq_ignore_ascii_case(name));
+                if !known && !out.contains(name) {
+                    out.push(name.clone());
+                }
+                args.iter().for_each(|a| walk(workbook, a, bound, out));
+            }
+            Expr::Call { callee, args } => {
+                walk(workbook, callee, bound, out);
+                args.iter().for_each(|a| walk(workbook, a, bound, out));
+            }
+            Expr::Unary { operand, .. } => walk(workbook, operand, bound, out),
+            Expr::Binary { left, right, .. } => {
+                walk(workbook, left, bound, out);
+                walk(workbook, right, bound, out);
+            }
+            _ => {}
+        }
+    }
+    let mut names = Vec::new();
+    bound(expr, &mut names);
+    let mut out = Vec::new();
+    walk(workbook, expr, &names, &mut out);
+    out
+}
+
 /// Remove every cell that a previous pass filled by spilling.
 ///
 /// Done wholesale before writing, because a formula that used to produce a
@@ -382,6 +468,22 @@ fn clear_spill_children(workbook: &mut Workbook) {
 /// behaviour a spreadsheet must never have.
 /// Returns whether this result spilled into neighbouring cells.
 fn write_result(workbook: &mut Workbook, sheet_index: usize, at: CellRef, value: Value) -> bool {
+    // A value the file cached for a formula this engine cannot compute is kept
+    // exactly as it is (`XL-FEAT-005`); one it can compute is now the engine's
+    // own, and stops being marked as the file's.
+    if let Some(existing) = workbook
+        .sheets
+        .get(sheet_index)
+        .and_then(|s| s.cells.get(at))
+        && existing.flags.contains(CellFlags::FILE_CACHED)
+    {
+        if keeps_file_value(workbook, existing) {
+            return false;
+        }
+        let mut updated = existing.clone();
+        updated.flags.remove(CellFlags::FILE_CACHED);
+        workbook.sheets[sheet_index].cells.set(at, updated);
+    }
     let Value::Array { rows, cols, cells } = value else {
         let cell_value = value_to_cell(workbook, value);
         if let Some(existing) = workbook.sheets[sheet_index].cells.get(at) {

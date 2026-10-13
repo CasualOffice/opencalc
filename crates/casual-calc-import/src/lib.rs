@@ -1050,6 +1050,19 @@ pub fn import_package_cancellable(
             })
             .cloned()
             .collect();
+        // `XL-FEAT-007`: sparklines, `x14` rules, slicer references. Not
+        // modelled, so carried as text and written back as it came.
+        if let Some(ext) = &worksheet.ext_lst {
+            sheet.ext_lst = Some(ext.clone());
+            report.record("extLst", ModelOutcome::Omitted, RetentionOutcome::Preserved);
+        }
+        if worksheet.ext_lst_unreadable {
+            report.record(
+                "extLst/notUtf8",
+                ModelOutcome::Omitted,
+                RetentionOutcome::NotRetained,
+            );
+        }
         sheet.format_pr = worksheet.format_pr.clone();
         sheet.view.right_to_left = worksheet.right_to_left;
         sheet.view.show_formulas = worksheet.show_formulas;
@@ -1129,8 +1142,20 @@ pub fn import_package_cancellable(
                         report.record("f", ModelOutcome::Mapped, RetentionOutcome::NotApplicable);
                     }
                     Err(_) => {
-                        // Cached value kept; the formula text did not parse.
-                        report.record("f", ModelOutcome::Degraded, RetentionOutcome::NotRetained);
+                        // `XL-FEAT-006`. The text did not parse — an array
+                        // constant, a 3-D or external reference, `A1#` — and
+                        // this used to keep only the cached value, so the first
+                        // edited save turned the formula into a constant. It is
+                        // kept as written instead: displayed and saved verbatim,
+                        // showing the file's cached value (see `FILE_CACHED`),
+                        // and not shifted by structural edits, on the rule
+                        // `Expr::Raw` already follows for defined names.
+                        cell.formula = Some(workbook.store_formula(Expr::Raw(text.to_owned())));
+                        report.record(
+                            "f/unparsed",
+                            ModelOutcome::Degraded,
+                            RetentionOutcome::Preserved,
+                        );
                     }
                 },
                 // An empty `<f>` is a shared-formula follower: it takes its
@@ -1156,6 +1181,7 @@ pub fn import_package_cancellable(
                     // carries them out, so the check belongs after the rebuild,
                     // not on the master. Either way the follower keeps its
                     // cached value and is reported `Degraded` below.
+                    let had_master = rebuilt.is_some();
                     match rebuilt
                         .filter(|e| expr_within_grid(e, Origin::at(cell_ref.row, cell_ref.col)))
                     {
@@ -1167,9 +1193,20 @@ pub fn import_package_cancellable(
                                 RetentionOutcome::NotApplicable,
                             );
                         }
+                        // A follower has no text of its own — only "the
+                        // master's formula, shifted" — and a master the parser
+                        // could not read cannot be shifted. Its own key, so the
+                        // count is of exactly these and a save can name them.
+                        None if !had_master => {
+                            report.record(
+                                "f/sharedFollowerOfUnparsed",
+                                ModelOutcome::Degraded,
+                                RetentionOutcome::NotRetained,
+                            );
+                        }
                         None => {
                             report.record(
-                                "f",
+                                "f/outOfGrid",
                                 ModelOutcome::Degraded,
                                 RetentionOutcome::NotRetained,
                             );
@@ -1177,6 +1214,11 @@ pub fn import_package_cancellable(
                     }
                 }
                 None => {}
+            }
+            // What the file computed, marked as such, so the evaluator can keep
+            // it for a formula it cannot compute itself (`XL-FEAT-005`).
+            if cell.formula.is_some() && !cell.value.is_empty() {
+                cell.flags.insert(casual_calc_model::CellFlags::FILE_CACHED);
             }
             if !cell.is_blank() {
                 // Across every sheet, not this one: the sum is the thing being
@@ -1656,6 +1698,16 @@ pub fn import_package_cancellable(
     // nothing about the feature.
     let sheet_parts: Vec<String> = package.sheets().iter().map(|s| s.part.clone()).collect();
     retain_unmodelled(&mut package, &mut workbook, &sheet_parts, &mut report)?;
+    // `XL-FEAT-010`: a signed package. Kept as it came, and valid only for as
+    // long as the bytes are the ones it signed — so it is recorded, for an
+    // editor to warn before the first edit and for a save to name its removal.
+    if workbook.is_signed() {
+        report.record(
+            "signature",
+            ModelOutcome::Omitted,
+            RetentionOutcome::Preserved,
+        );
+    }
 
     // Defined names, resolved against the sheet ids assigned above.
     let workbook_part = package.workbook_part().to_owned();

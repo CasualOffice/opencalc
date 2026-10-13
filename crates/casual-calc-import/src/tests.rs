@@ -152,7 +152,10 @@ fn formula_cells_are_parsed_to_ast_with_cached_value() {
 }
 
 #[test]
-fn unparseable_formula_is_degraded_but_keeps_value() {
+fn unparseable_formula_is_degraded_but_keeps_value_and_text() {
+    // `XL-FEAT-006`: the text is kept as written, not only the cached value —
+    // dropping it is what turned the formula into a constant on the first
+    // edited save.
     let rows = r#"<row r="1"><c r="A1"><f>1+</f><v>5</v></c></row>"#;
     let bytes = package_with_sheet(sheet_with(rows), None);
     let import = import_package(bytes).unwrap();
@@ -161,14 +164,21 @@ fn unparseable_formula_is_degraded_but_keeps_value() {
         .get(CellRef::new(0, 0))
         .unwrap();
     assert_eq!(cell.value, CellValue::Number(5.0));
-    assert!(cell.formula.is_none());
+    let kept = cell.formula.and_then(|h| import.workbook.formula(h));
+    assert_eq!(kept, Some(&casual_calc_formula::Expr::Raw("1+".to_owned())));
+    assert!(
+        cell.flags
+            .contains(casual_calc_model::CellFlags::FILE_CACHED),
+        "the cached value is marked as the file's"
+    );
     let entry = import
         .report
         .entries()
         .into_iter()
-        .find(|e| e.feature == "f")
+        .find(|e| e.feature == "f/unparsed")
         .unwrap();
     assert_eq!(entry.model, ModelOutcome::Degraded);
+    assert_eq!(entry.retention, crate::RetentionOutcome::Preserved);
 }
 
 #[test]

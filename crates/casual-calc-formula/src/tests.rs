@@ -175,6 +175,14 @@ fn structured_references_parse_and_print() {
         "SUM(Sales[#All])",
         "SUM([Amount])",
         "SUM(Sales[[#Headers],[Amount]])",
+        // XL-FEAT-008: this-row and multi-item forms, which an xlsx writes as
+        // `[#This Row]` and the UI as `@`; both must come back as written.
+        "Sales[@Amount]*2",
+        "[@[Unit Price]]*[@Qty]",
+        "Sales[[#This Row],[Unit Price]]",
+        "SUM(Sales[[#Data],[Unit Price]:[Qty]])",
+        "SUM(Sales[@])",
+        "SUBTOTAL(109,[Qty])",
     ] {
         let expr = parse(text).unwrap_or_else(|e| panic!("{text}: {e}"));
         assert_eq!(expr.to_string(), text, "round trip of {text}");

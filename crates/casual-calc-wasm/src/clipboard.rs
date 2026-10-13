@@ -1102,6 +1102,9 @@ pub fn session_clip_paste_mode(
                             .and_then(|c| c.style);
                         let mut out = cc.cell.clone();
                         out.style = target_style;
+                        // The source's cached value is the *source's* answer;
+                        // at a new address it is nobody's (`XL-FEAT-005`).
+                        out.flags.remove(casual_calc_model::CellFlags::FILE_CACHED);
                         if let Some(expr) = &cc.formula {
                             // **No shift.** The tree is stored relative to the
                             // cell it came from, so storing it at the
@@ -1130,6 +1133,13 @@ pub fn session_clip_paste_mode(
                         // needs nothing done to it; a cut has to be re-stored,
                         // or its offsets would measure from the new cell and
                         // point somewhere it never referred to.
+                        // A cut keeps the file's cached value — the formula
+                        // still means what it meant — but a copy's formula is
+                        // read from a new cell, and the source's value is not
+                        // its answer (`XL-FEAT-005`).
+                        if !cut {
+                            out.flags.remove(casual_calc_model::CellFlags::FILE_CACHED);
+                        }
                         if cut && move_delta.is_none() {
                             move_delta =
                                 Some((at.row as i64 - cc.sr as i64, at.col as i64 - cc.sc as i64));

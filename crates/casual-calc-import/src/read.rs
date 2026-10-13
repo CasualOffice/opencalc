@@ -557,6 +557,12 @@ pub struct Worksheet {
     pub sort_state: Option<SortState>,
     /// Sheet-level elements carried verbatim, in document order.
     pub carried: Vec<RetainedRef>,
+    /// The worksheet's `<extLst>` as self-contained XML text, if it had one.
+    pub ext_lst: Option<String>,
+    /// An `<extLst>` was present but its bytes were not UTF-8, so it could not
+    /// be carried as text. Counted rather than reported here because this
+    /// reader has no compatibility report; `import_package` names it.
+    pub ext_lst_unreadable: bool,
     /// `<sheetFormatPr>` attributes as read.
     pub format_pr: BTreeMap<String, String>,
     /// `<sheetView>` flags beyond grid lines and headers.
@@ -1028,12 +1034,55 @@ pub fn parse_worksheet(xml: &[u8], theme: &ThemePalette) -> Result<Worksheet, Im
     // attributes are optional; a file using neither is a plain sequence.
     let mut row_now: u32 = 0;
     let mut col_next: u32 = 0;
+    // The root's namespace declarations, for making a carried `<extLst>`
+    // self-contained; and, while inside that `<extLst>`, the byte offset it
+    // started at. Everything inside it is skipped by the dispatch below — its
+    // `<xm:f>` and `<x14:dataValidation>` share local names with elements this
+    // reader *does* interpret, and are not those elements.
+    let mut root_namespaces: Vec<(String, String)> = Vec::new();
+    let mut ext_lst_from: Option<usize> = None;
 
     loop {
-        match reader.read_event_into(&mut buf).map_err(xml_err)? {
+        let event_at = usize::try_from(reader.buffer_position()).unwrap_or(usize::MAX);
+        let event = reader.read_event_into(&mut buf).map_err(xml_err)?;
+        if let Some(from) = ext_lst_from {
+            // Still counted against the reader's bounds: carrying text verbatim
+            // is no reason to let it be deeper or larger than anything else.
+            match &event {
+                Event::Start(_) => bounds.open()?,
+                Event::Empty(_) => bounds.count()?,
+                Event::End(_) => {
+                    bounds.close();
+                    // Back at the `<worksheet>`'s own depth: the `<extLst>` closed.
+                    if bounds.depth == 1 {
+                        ext_lst_from = None;
+                        let end = usize::try_from(reader.buffer_position()).unwrap_or(usize::MAX);
+                        match xml.get(from..end).map(std::str::from_utf8) {
+                            Some(Ok(text)) => {
+                                result.ext_lst = Some(self_contained(text, &root_namespaces));
+                            }
+                            _ => result.ext_lst_unreadable = true,
+                        }
+                    }
+                }
+                Event::Eof => break,
+                _ => {}
+            }
+            buf.clear();
+            continue;
+        }
+        match event {
             Event::Start(e) => {
                 bounds.open()?;
+                if bounds.depth == 1 && e.local_name().as_ref() == b"worksheet" {
+                    root_namespaces = namespace_declarations(&e)?;
+                }
                 match e.local_name().as_ref() {
+                    // The worksheet's own extension list, carried verbatim
+                    // (`XL-FEAT-007`). Only the direct child of `<worksheet>`:
+                    // a `<cfRule>` or `<dataValidation>` has its own, which
+                    // belongs to that element.
+                    b"extLst" if bounds.depth == 2 => ext_lst_from = Some(event_at),
                     b"c" => {
                         current = Some(RawCell {
                             reference: cell_reference(&e, row_now, &mut col_next)?,
@@ -1493,6 +1542,60 @@ fn read_protection(e: &BytesStart<'_>) -> Result<BTreeMap<String, String>, Impor
 }
 
 /// Every attribute of an element, by local name, in a deterministic order.
+/// The `xmlns:prefix="uri"` declarations on an element, as `(prefix, uri)`.
+fn namespace_declarations(e: &BytesStart<'_>) -> Result<Vec<(String, String)>, ImportError> {
+    let mut out = Vec::new();
+    for a in e.attributes() {
+        let a = a.map_err(|err| xml_err(quick_xml::Error::from(err)))?;
+        if let Some(prefix) = a.key.as_ref().strip_prefix(b"xmlns:") {
+            // The raw (still escaped) value: it is written back into XML.
+            out.push((
+                String::from_utf8_lossy(prefix).into_owned(),
+                String::from_utf8_lossy(&a.value).into_owned(),
+            ));
+        }
+    }
+    Ok(out)
+}
+
+/// `fragment` with every namespace prefix it uses, but does not itself
+/// declare, declared on its first start tag from `inherited`.
+///
+/// Excel declares `x14`, `xm` and the rest on the `<worksheet>` root, and the
+/// writer's root is not the file's, so a fragment copied out of one and into
+/// the other would otherwise use prefixes nothing declares — a sheet Excel
+/// refuses to open, which is worse than the loss this carries it to avoid.
+///
+/// Declared on the first tag even when something inside re-declares it: a use
+/// outside that inner scope still needs the root's binding, and repeating a
+/// binding is harmless.
+pub(crate) fn self_contained(fragment: &str, inherited: &[(String, String)]) -> String {
+    let first_tag = fragment.find('>').map_or(fragment, |i| &fragment[..i]);
+    let mut extra = String::new();
+    for (prefix, uri) in inherited {
+        let used =
+            fragment.contains(&format!("<{prefix}:")) || fragment.contains(&format!(" {prefix}:"));
+        let declared = first_tag.contains(&format!("xmlns:{prefix}="));
+        if used && !declared {
+            extra.push_str(&format!(" xmlns:{prefix}=\"{uri}\""));
+        }
+    }
+    if extra.is_empty() {
+        return fragment.to_owned();
+    }
+    // After the element's qualified name: the first whitespace, `/` or `>`.
+    let name_end = fragment
+        .char_indices()
+        .skip(1)
+        .find(|(_, c)| c.is_whitespace() || *c == '/' || *c == '>')
+        .map_or(fragment.len(), |(i, _)| i);
+    let mut out = String::with_capacity(fragment.len() + extra.len());
+    out.push_str(&fragment[..name_end]);
+    out.push_str(&extra);
+    out.push_str(&fragment[name_end..]);
+    out
+}
+
 fn read_attrs(e: &BytesStart<'_>) -> Result<BTreeMap<String, String>, ImportError> {
     let mut attrs = BTreeMap::new();
     for a in e.attributes() {

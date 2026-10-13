@@ -219,6 +219,28 @@ pub fn write_workbook(workbook: &Workbook) -> Result<Vec<u8>, ExportError> {
 ///
 /// As [`write_workbook`]: an unwritable workbook or a zip failure.
 pub fn write_workbook_as(workbook: &Workbook, kind: PackageKind) -> Result<Vec<u8>, ExportError> {
+    // **A signature never survives this writer** (`XL-FEAT-010`). It covers
+    // the bytes it was made over, and this writer rebuilds the package rather
+    // than reproducing them, so a carried signature would vouch for content
+    // that has changed — which the recipient reads as tampering. Excel removes
+    // it on an edited save; so does this, and the SDK's save-loss report names
+    // the removal (`signature/removed`). Decided here, not by each caller, so
+    // no route to a semantic write can forget it. Cloning only when signed
+    // keeps the ordinary save free of it.
+    //
+    // Not by recursing into this function: if the removal ever left a
+    // signature relationship behind, that would loop until the stack ran out
+    // rather than write a file a test can inspect.
+    if workbook.is_signed() {
+        let mut unsigned = workbook.clone();
+        unsigned.remove_signature();
+        return write_unsigned(&unsigned, kind);
+    }
+    write_unsigned(workbook, kind)
+}
+
+/// [`write_workbook_as`] for a workbook already carrying no signature.
+fn write_unsigned(workbook: &Workbook, kind: PackageKind) -> Result<Vec<u8>, ExportError> {
     let kind = match PackageKind::for_workbook(workbook) {
         PackageKind::MacroEnabled => PackageKind::MacroEnabled,
         PackageKind::Workbook => kind,
@@ -2854,6 +2876,12 @@ fn worksheet_xml(
             s.push_str(&format!("<tablePart r:id=\"{}\"/>", table_rel_id(j)));
         }
         s.push_str("</tableParts>");
+    }
+    // `<extLst>` is CT_Worksheet's last child. Carried verbatim — sparklines,
+    // `x14` rules — and already self-contained, every prefix it uses declared
+    // on its own start tag at import (`XL-FEAT-007`).
+    if let Some(ext) = &sheet.ext_lst {
+        s.push_str(ext);
     }
 
     s.push_str("</worksheet>");

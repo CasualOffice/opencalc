@@ -1360,6 +1360,150 @@ fn a_totals_row_formula_does_not_include_itself() {
     assert_eq!(value_at(&wb, 3, 1), CellValue::Number(300.0));
 }
 
+/// `XL-FEAT-008`. A `Sales` table over A1:D5 — header row, three data rows, a
+/// totals row — whose `Line` column is a calculated column written three ways,
+/// and a column name with a space in it. Formulas outside the table, in F,
+/// exercise every other specifier form.
+fn this_row_workbook(outside: &[(u32, &str)]) -> Workbook {
+    use casual_calc_model::{CellRange, Table, TableColumn};
+    let mut b = Builder::new();
+    b.text((0, 0), "Region")
+        .text((0, 1), "Unit Price")
+        .text((0, 2), "Qty")
+        .text((0, 3), "Line")
+        .text((1, 0), "North")
+        .number((1, 1), 10.0)
+        .number((1, 2), 2.0)
+        .formula((1, 3), "[@[Unit Price]]*[@Qty]")
+        .text((2, 0), "South")
+        .number((2, 1), 20.0)
+        .number((2, 2), 3.0)
+        .formula((2, 3), "Sales[@[Unit Price]]*Sales[@Qty]")
+        .text((3, 0), "East")
+        .number((3, 1), 30.0)
+        .number((3, 2), 4.0)
+        .formula(
+            (3, 3),
+            "Sales[[#This Row],[Unit Price]]*[[#This Row],[Qty]]",
+        )
+        .text((4, 0), "Total")
+        .formula((4, 1), "SUBTOTAL(109,[Unit Price])")
+        .formula((4, 2), "SUBTOTAL(109,Sales[Qty])")
+        .formula((4, 3), "SUBTOTAL(109,[Line])");
+    for (row, text) in outside {
+        b.formula((*row, 5), text);
+    }
+    let mut wb = b.build();
+    let column = |id: u32, name: &str| TableColumn {
+        id,
+        name: name.to_owned(),
+        totals_row_function: None,
+        totals_row_label: None,
+        calculated_column_formula: None,
+        totals_row_formula: None,
+    };
+    wb.sheets[0].tables.push(Table {
+        id: 1,
+        name: "Sales".to_owned(),
+        display_name: "Sales".to_owned(),
+        range: CellRange {
+            start: CellRef::new(0, 0),
+            end: CellRef::new(4, 3),
+        },
+        header_row_count: 1,
+        totals_row_count: 1,
+        columns: vec![
+            column(1, "Region"),
+            column(2, "Unit Price"),
+            column(3, "Qty"),
+            column(4, "Line"),
+        ],
+        auto_filter: None,
+        style: Default::default(),
+        attrs: Default::default(),
+    });
+    recalculate(&mut wb);
+    wb
+}
+
+#[test]
+fn this_row_references_read_the_formulas_own_row() {
+    let wb = this_row_workbook(&[]);
+    // `[@[Unit Price]]*[@Qty]`, `Sales[@[Unit Price]]*Sales[@Qty]` and
+    // `Sales[[#This Row],[Unit Price]]*[[#This Row],[Qty]]` — the three
+    // spellings of one calculated column. Each must read its own row.
+    assert_eq!(value_at(&wb, 1, 3), CellValue::Number(20.0));
+    assert_eq!(value_at(&wb, 2, 3), CellValue::Number(60.0));
+    assert_eq!(value_at(&wb, 3, 3), CellValue::Number(120.0));
+    // The totals row still aggregates the data body — of a calculated column
+    // too, which is what breaks first when a this-row reference errors.
+    assert_eq!(value_at(&wb, 4, 1), CellValue::Number(60.0));
+    assert_eq!(value_at(&wb, 4, 2), CellValue::Number(9.0));
+    assert_eq!(value_at(&wb, 4, 3), CellValue::Number(200.0));
+}
+
+#[test]
+fn this_row_from_outside_the_table_intersects_by_row() {
+    use casual_calc_model::ErrorValue;
+    let wb = this_row_workbook(&[
+        // Header row, data rows, totals row, below the table.
+        (0, "Sales[@Qty]*10"),
+        (1, "Sales[@Qty]*10"),
+        (2, "SUM(Sales[#This Row])"),
+        (3, "SUM(Sales[@])"),
+        (4, "Sales[@Qty]"),
+        (6, "Sales[@Qty]"),
+        (7, "SUM(Sales[@[Unit Price]:[Qty]])"),
+    ]);
+    // Excel intersects the formula's row with the table's data rows; outside
+    // them there is no row to read, and the answer is #VALUE!.
+    assert_eq!(value_at(&wb, 0, 5), CellValue::Error(ErrorValue::Value));
+    assert_eq!(value_at(&wb, 1, 5), CellValue::Number(20.0));
+    // The whole row, not the whole table: 20 + 3 + 60 ("South" is text).
+    assert_eq!(value_at(&wb, 2, 5), CellValue::Number(83.0));
+    assert_eq!(value_at(&wb, 3, 5), CellValue::Number(154.0));
+    assert_eq!(value_at(&wb, 4, 5), CellValue::Error(ErrorValue::Value));
+    assert_eq!(value_at(&wb, 6, 5), CellValue::Error(ErrorValue::Value));
+    assert_eq!(value_at(&wb, 7, 5), CellValue::Error(ErrorValue::Value));
+}
+
+#[test]
+fn special_item_specifiers_select_the_right_rows_and_columns() {
+    use casual_calc_model::ErrorValue;
+    let wb = this_row_workbook(&[
+        (6, "SUM(Sales[[#Data],[Qty]])"),
+        (7, "SUM(Sales[[#Totals],[Qty]])"),
+        (8, "SUM(Sales[[#All],[Qty]])"),
+        (9, "COUNTA(Sales[[#Headers],[Unit Price]:[Line]])"),
+        (10, "SUM(Sales[[Unit Price]:[Qty]])"),
+        (11, "SUM(Sales[[#Data],[Unit Price]:[Qty]])"),
+        (12, "SUM(Sales[#Totals])"),
+        (13, "SUM(Sales[[#Headers],[#Data],[Qty]])"),
+        (14, "SUM(Sales[[#Data],[#Totals],[Qty]])"),
+        (15, "SUM(Sales[Unit Price])"),
+        (16, "SUM(Sales[[Unit Price]])"),
+        (17, "SUM(Sales[Nope])"),
+        (18, "SUM(Sales[[#Data],[Nope]])"),
+        (19, "COUNTA(Sales[#Headers])"),
+        (20, "SUM(Sales[ [#Data] , [Qty] ])"),
+    ]);
+    assert_eq!(value_at(&wb, 6, 5), CellValue::Number(9.0));
+    assert_eq!(value_at(&wb, 7, 5), CellValue::Number(9.0));
+    assert_eq!(value_at(&wb, 8, 5), CellValue::Number(18.0));
+    assert_eq!(value_at(&wb, 9, 5), CellValue::Number(3.0));
+    assert_eq!(value_at(&wb, 10, 5), CellValue::Number(69.0));
+    assert_eq!(value_at(&wb, 11, 5), CellValue::Number(69.0));
+    assert_eq!(value_at(&wb, 12, 5), CellValue::Number(269.0));
+    assert_eq!(value_at(&wb, 13, 5), CellValue::Number(9.0));
+    assert_eq!(value_at(&wb, 14, 5), CellValue::Number(18.0));
+    assert_eq!(value_at(&wb, 15, 5), CellValue::Number(60.0));
+    assert_eq!(value_at(&wb, 16, 5), CellValue::Number(60.0));
+    assert_eq!(value_at(&wb, 17, 5), CellValue::Error(ErrorValue::Ref));
+    assert_eq!(value_at(&wb, 18, 5), CellValue::Error(ErrorValue::Ref));
+    assert_eq!(value_at(&wb, 19, 5), CellValue::Number(4.0));
+    assert_eq!(value_at(&wb, 20, 5), CellValue::Number(9.0));
+}
+
 #[test]
 fn time_components_round_before_splitting() {
     // 13:45:30 as a day fraction is not exactly representable, so truncating

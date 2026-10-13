@@ -3609,6 +3609,13 @@ function resetNavRuns() {
   tabOrigin = null;
 }
 
+/// Hold `b` as the selection with the active cell where it is (Ctrl+A,
+/// XL-UX-013): Excel selects the current region and leaves the active cell
+/// inside it, which anchor+sel alone cannot say.
+export function holdBlock(b) {
+  navBlock = { r0: b.r0, c0: b.c0, r1: b.r1, c1: b.c1 };
+}
+
 // The block Enter/Tab should walk, or null for a single cell.
 
 // Step the active cell within `b`, wrapping at the edges. `axis` is "row" for
@@ -3686,12 +3693,41 @@ export function select(row, col) {
 // `selRect` takes the min and max of the two, so which end moves makes no
 // difference to the block; it decides only where the active cell ends up.
 export function extend(row, col) {
+  // A held block (an Enter walk, Ctrl+A) is resized from its own corners, not
+  // from anchor+sel: the active cell is inside it, so deriving the block from
+  // the two would shrink it to the active cell. The corner opposite the
+  // travelling one stays fixed and becomes the active cell, and the hold ends.
+  if (navBlock) {
+    const b = navBlock;
+    navBlock = null;
+    tabOrigin = null;
+    state.sel = {
+      row: state.anchor.row === b.r0 ? b.r1 : b.r0,
+      col: state.anchor.col === b.c0 ? b.c1 : b.c0,
+    };
+  }
   state.anchor = { row: Math.max(0, row), col: Math.max(0, col) };
   state.selKind = "cells";
   extending = true;
+  endExtendOnShiftUp();
   // Follow the travelling corner, not the active cell, which is not moving.
   ensureVisible(state.anchor.row, state.anchor.col);
   draw();
+}
+
+// Extending ends when Shift is let go (XL-UX-014). The name box shows "2R x 2C"
+// only while the block is being made, then the active cell again, as in Excel;
+// `extending` used to clear only on the next `select`, so the size readout
+// outlived the gesture. Armed lazily, so a page that never extends pays nothing.
+let shiftUpArmed = false;
+function endExtendOnShiftUp() {
+  if (shiftUpArmed || typeof document === "undefined") return;
+  shiftUpArmed = true;
+  document.addEventListener("keyup", (e) => {
+    if (e.key !== "Shift" || !extending) return;
+    extending = false;
+    draw();
+  }, true);
 }
 
 // Scroll the body just enough to show a cell — the active one by default, or

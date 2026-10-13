@@ -94,6 +94,7 @@ import {
   usedBounds,
   wasm,
   wrap,
+  holdBlock,
 } from "./editor.core.js";
 
 export function updateStats() {
@@ -636,11 +637,18 @@ export function ctrlA() {
   const covers = (r0, c0, r1, c1) =>
     state.selKind === "cells" && r.r0 === r0 && r.c0 === c0 && r.r1 === r1 && r.c1 === c1;
 
+  // The active cell stays where it was (XL-UX-013): Excel selects the region
+  // around it. The far corner travels for Shift+arrows afterwards.
   const select = (r0, c0, r1, c1) => {
+    const { row, col } = state.sel;
     state.selKind = "cells";
     state.ranges = [];
-    state.anchor = { row: r0, col: c0 };
-    state.sel = { row: r1, col: c1 };
+    state.anchor = { row: r1, col: c1 };
+    if (row >= r0 && row <= r1 && col >= c0 && col <= c1 && !(row === r0 && col === c0)) {
+      holdBlock({ r0, c0, r1, c1 });
+    } else {
+      state.sel = { row: r0, col: c0 };
+    }
     endInline();
     draw();
   };
