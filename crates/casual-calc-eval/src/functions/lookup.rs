@@ -434,7 +434,7 @@ pub(crate) fn range_cells(
             (target, ev.range_bounds(target, a, b))
         }
         Expr::StructuredRef { table, spec } => {
-            let (target, range) = ev.resolve_structured(sheet, table.as_deref(), spec)?;
+            let (target, range) = ev.resolve_structured(sheet, table.as_deref(), spec).ok()?;
             (
                 target,
                 (

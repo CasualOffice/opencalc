@@ -29,6 +29,7 @@ mod functions;
 mod graph;
 pub mod pivot;
 mod ranges;
+mod structured;
 
 pub use graph::{dependents_of, precedents_of};
 mod value;

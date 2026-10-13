@@ -1552,6 +1552,20 @@ pub(crate) fn flatten_values(ev: &mut Evaluator<'_>, sheet: usize, arg: &Expr) -
             }
         }
         out
+    } else if let Expr::StructuredRef { table, spec } = arg {
+        // The same expansion `flatten_numbers` does: `COUNTA(Sales[Region])`
+        // counts the column, not the one #VALUE! a bare range evaluates to.
+        let (target, range) = match ev.resolve_structured(sheet, table.as_deref(), spec) {
+            Ok(found) => found,
+            Err(e) => return vec![Value::Error(e)],
+        };
+        let mut out = Vec::new();
+        for row in range.start.row..=range.end.row {
+            for col in range.start.col..=range.end.col {
+                out.push(ev.eval_cell(target, CellRef::new(row, col)));
+            }
+        }
+        out
     } else {
         vec![ev.eval_expr(sheet, arg)]
     }
@@ -1569,12 +1583,10 @@ pub(crate) fn flatten_numbers(
         // writing one. It is expanded here rather than at parse time because
         // only the evaluator can see the table's geometry.
         if let Expr::StructuredRef { table, spec } = arg {
-            let Some((target, range)) = ev.resolve_structured(sheet, table.as_deref(), spec) else {
-                // The table or column is gone. #REF! is what Excel shows, and
-                // it is important that this is *not* silently empty: a SUM over
-                // a deleted table must not read as zero.
-                return Err(ErrorValue::Ref);
-            };
+            // The table or column is gone (#REF!, what Excel shows), or a
+            // this-row reference has no row (#VALUE!). Either way it is *not*
+            // silently empty: a SUM over a deleted table must not read as zero.
+            let (target, range) = ev.resolve_structured(sheet, table.as_deref(), spec)?;
             for row in range.start.row..=range.end.row {
                 for col in range.start.col..=range.end.col {
                     match ev.eval_cell(target, CellRef::new(row, col)) {

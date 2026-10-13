@@ -181,15 +181,18 @@ impl<'a> Evaluator<'a> {
 
     /// Resolve a structured reference to the range it names.
     ///
-    /// Returns `None` when no table of that name exists or the specifier names
-    /// no column — the caller reports `#REF!`, which is what Excel shows for a
-    /// reference to a table that has been deleted.
+    /// `#REF!` when no table of that name exists, a column is not in it, or the
+    /// specifier is not one Excel accepts — which is what Excel shows for a
+    /// reference to a table that has been deleted. `#VALUE!` for a this-row
+    /// reference (`[@Col]`, `[#This Row]`) from a formula whose row is not one
+    /// of the table's data rows: Excel's implicit intersection finds nothing.
     pub fn resolve_structured(
         &self,
         sheet_index: usize,
         table: Option<&str>,
         spec: &str,
-    ) -> Option<(usize, CellRange)> {
+    ) -> Result<(usize, CellRange), ErrorValue> {
+        use crate::structured::{Rows, parse_spec};
         // An unqualified `[Column]` means the table containing this formula.
         let (si, found) = match table {
             Some(name) => self.workbook.sheets.iter().enumerate().find_map(|(i, s)| {
@@ -197,9 +200,8 @@ impl<'a> Evaluator<'a> {
                     .iter()
                     .find(|t| t.name.eq_ignore_ascii_case(name))
                     .map(|t| (i, t))
-            })?,
-            None => {
-                let (_, at) = self.current_cell()?;
+            }),
+            None => self.current_cell().and_then(|(_, at)| {
                 let sheet = self.workbook.sheets.get(sheet_index)?;
                 let table = sheet.tables.iter().find(|t| {
                     at.row >= t.range.start.row
@@ -207,37 +209,68 @@ impl<'a> Evaluator<'a> {
                         && at.col >= t.range.start.col
                         && at.col <= t.range.end.col
                 })?;
-                (sheet_index, table)
-            }
-        };
+                Some((sheet_index, table))
+            }),
+        }
+        .ok_or(ErrorValue::Ref)?;
 
-        let spec = spec.trim();
+        let spec = parse_spec(spec).ok_or(ErrorValue::Ref)?;
         // The data body: everything but the header and totals rows. That is
         // what a bare `Table[Column]` means, and getting it wrong silently
         // includes the header text or the totals row in every aggregate.
-        let first_data = found.range.start.row + found.header_row_count;
-        let last_data = found.range.end.row.saturating_sub(found.totals_row_count);
+        let (start, end) = (found.range.start.row, found.range.end.row);
+        let first_data = start + found.header_row_count;
+        let last_data = end.saturating_sub(found.totals_row_count);
+        let has_headers = found.header_row_count > 0;
+        let has_totals = found.totals_row_count > 0;
 
-        let (top, bottom) = match spec {
-            "#All" => (found.range.start.row, found.range.end.row),
-            "#Data" | "" => (first_data, last_data),
-            "#Headers" => (found.range.start.row, first_data.saturating_sub(1)),
-            "#Totals" => (last_data + 1, found.range.end.row),
-            _ => (first_data, last_data),
+        let (top, bottom) = match spec.rows {
+            Rows::All => (start, end),
+            Rows::Data => (first_data, last_data),
+            Rows::Headers if has_headers => (start, first_data - 1),
+            Rows::Totals if has_totals => (last_data + 1, end),
+            Rows::HeadersData => (start, last_data),
+            Rows::DataTotals => (first_data, end),
+            // A missing header or totals row is a reference to nothing.
+            Rows::Headers | Rows::Totals => return Err(ErrorValue::Ref),
+            // The formula's own row, which must be a data row: the header, the
+            // totals row and anything outside the table have no value to give.
+            Rows::ThisRow => {
+                let (_, at) = self.current_cell().ok_or(ErrorValue::Value)?;
+                if at.row < first_data || at.row > last_data {
+                    return Err(ErrorValue::Value);
+                }
+                (at.row, at.row)
+            }
         };
+        if top > bottom {
+            return Err(ErrorValue::Ref);
+        }
 
-        // A column name narrows the span; a `#` keyword covers every column.
-        let (left, right) = if spec.starts_with('#') || spec.is_empty() {
-            (found.range.start.col, found.range.end.col)
-        } else {
+        // A column name narrows the span; no column means every column.
+        let column = |name: &str| -> Result<u32, ErrorValue> {
             let index = found
                 .columns
                 .iter()
-                .position(|c| c.name.eq_ignore_ascii_case(spec))?;
-            let col = found.range.start.col + index as u32;
-            (col, col)
+                .position(|c| c.name.eq_ignore_ascii_case(name))
+                .or_else(|| {
+                    let name = name.trim();
+                    found
+                        .columns
+                        .iter()
+                        .position(|c| c.name.trim().eq_ignore_ascii_case(name))
+                })
+                .ok_or(ErrorValue::Ref)?;
+            Ok(found.range.start.col + index as u32)
         };
-        Some((
+        let (left, right) = match &spec.columns {
+            None => (found.range.start.col, found.range.end.col),
+            Some((a, b)) => {
+                let (a, b) = (column(a)?, column(b)?);
+                (a.min(b), a.max(b))
+            }
+        };
+        Ok((
             si,
             CellRange {
                 start: CellRef::new(top, left),
@@ -330,7 +363,18 @@ impl<'a> Evaluator<'a> {
             // A structured reference resolves to a range, so on its own it is
             // as much a #VALUE! as `A1:B2` is; it is the aggregate around it
             // that consumes the range.
-            Expr::StructuredRef { .. } => Value::Error(ErrorValue::Value),
+            // A single cell — `[@Col]`, `[[#This Row],[Col]]` — is that cell's
+            // value; a wider one is as much a #VALUE! as `A1:B2` is, and it is
+            // the aggregate around it that consumes the range.
+            Expr::StructuredRef { table, spec } => {
+                match self.resolve_structured(sheet_index, table.as_deref(), spec) {
+                    Ok((target, range)) if range.start == range.end => {
+                        self.eval_cell(target, range.start)
+                    }
+                    Ok(_) => Value::Error(ErrorValue::Value),
+                    Err(e) => Value::Error(e),
+                }
+            }
             Expr::Unary { op, operand } => self.eval_unary(sheet_index, *op, operand),
             Expr::Binary { op, left, right } => self.eval_binary(sheet_index, *op, left, right),
             Expr::Function { name, args } if name == "LET" => self.eval_let(sheet_index, args),
