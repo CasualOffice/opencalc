@@ -77,6 +77,26 @@ function docKey() {
   return documentName() || "__untitled__";
 }
 
+/// **Each snapshot's storage key is its own, never its session id**
+/// (fit-gap XL-FEAT-009).
+///
+/// Version ids restart at 1 in every session and stored bytes are immutable,
+/// so keying bytes by `${doc}:${id}` let a second workbook with the same name
+/// be silently backed by the first one's snapshot — restoring "version 1"
+/// brought back the other document — and its save then replaced the shared
+/// manifest and swept the first workbook's bytes away. Every snapshot now gets
+/// a storage key (`sk`) at capture that no other can share; the session id is
+/// only this tab's handle on it.
+const skById = new Map();      // session version id -> { sk, at } (at = capturedAtMs)
+const migratedLegacy = new Set();   // pre-`sk` row ids this session re-stored
+
+function newStorageKey() {
+  if (typeof crypto !== "undefined" && crypto.randomUUID) return crypto.randomUUID();
+  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+}
+/// Rows written before `sk` existed are keyed by their id; still readable.
+const bytesKey = (doc, entry) => (entry.sk ? `${doc}:sk:${entry.sk}` : `${doc}:${entry.id}`);
+
 /// `CompressionStream` if this browser has it, otherwise identity.
 ///
 /// Safari shipped it in 16.4 and every current engine has it, but a host may be
@@ -111,7 +131,7 @@ async function inflate(row) {
 /// what the next reload should show. The whole manifest is rewritten rather
 /// than diffed: it is a few kilobytes, and a diff that got it wrong would drop
 /// a version silently.
-export async function persistVersions(wasm) {
+export async function persistVersions(wasm, evictedIds = []) {
   let manifest;
   try { manifest = JSON.parse(wasm.session_versions_manifest() || "[]"); }
   catch { return; }
@@ -119,12 +139,25 @@ export async function persistVersions(wasm) {
   let db;
   try { db = await open(); } catch { return; }
 
+  // What the retention ring took on this capture, by the storage key it had.
+  // Read before `mine` is built, while the id still maps to its snapshot.
+  const evicted = new Set();
+  for (const id of evictedIds) { const k = skById.get(id); if (k) evicted.add(k.sk); }
+
   // Bytes first, then the manifest. If the tab dies between the two, storage
-  // holds bytes no manifest names — wasted space, cleaned up on the next write
-  // — rather than a manifest naming bytes that are not there, which would be a
-  // version the panel offers and cannot restore.
+  // holds bytes no manifest names — wasted space — rather than a manifest
+  // naming bytes that are not there, a version offered and not restorable.
+  const mine = [];
   for (const v of manifest) {
-    const key = `${doc}:${v.id}`;
+    // A session id names a snapshot only together with its capture time: ids
+    // restart when another workbook is opened in this tab, and a bare id would
+    // map the new "version 1" onto the old one's bytes.
+    const known = skById.get(v.id);
+    let sk = known && known.at === v.capturedAtMs ? known.sk : null;
+    if (!sk) { sk = newStorageKey(); skById.set(v.id, { sk, at: v.capturedAtMs }); }
+    const entry = { ...v, sk };
+    mine.push(entry);
+    const key = bytesKey(doc, entry);
     const existing = await done(db.transaction("bytes").objectStore("bytes").get(key)).catch(() => null);
     if (existing) continue;   // snapshots are immutable; only metadata changes
     let raw;
@@ -134,20 +167,22 @@ export async function persistVersions(wasm) {
     await done(tx.objectStore("bytes").put({ key, data, codec })).catch(() => {});
   }
 
+  // **Merge, never replace.** An entry this session does not hold belongs to
+  // another document of the same name, or another tab, and is kept — unless
+  // the retention ring evicted it here, or it is a pre-`sk` row this session
+  // has already re-stored under a key of its own.
+  const mineSk = new Set(mine.map((e) => e.sk));
+  const stored = await done(db.transaction("meta").objectStore("meta").get(doc)).catch(() => null);
+  const others = (stored && Array.isArray(stored.versions) ? stored.versions : []).filter((e) =>
+    e.sk ? !mineSk.has(e.sk) && !evicted.has(e.sk) : !migratedLegacy.has(e.id));
   const tx = db.transaction("meta", "readwrite");
-  const store = tx.objectStore("meta");
-  await done(store.put({ key: doc, versions: manifest })).catch(() => {});
+  await done(tx.objectStore("meta").put({ key: doc, versions: others.concat(mine) })).catch(() => {});
 
-  // Drop bytes for versions the retention ring evicted, so the store does not
-  // grow forever behind a list that shrank.
-  const live = new Set(manifest.map((v) => `${doc}:${v.id}`));
-  const btx = db.transaction("bytes", "readwrite");
-  const all = await done(btx.objectStore("bytes").getAllKeys()).catch(() => []);
-  for (const key of all) {
-    if (typeof key === "string" && key.startsWith(`${doc}:`) && !live.has(key)) {
-      const dtx = db.transaction("bytes", "readwrite");
-      await done(dtx.objectStore("bytes").delete(key)).catch(() => {});
-    }
+  // Delete bytes only for what was evicted here — never for a version this
+  // session does not own.
+  for (const sk of evicted) {
+    const dtx = db.transaction("bytes", "readwrite");
+    await done(dtx.objectStore("bytes").delete(`${doc}:sk:${sk}`)).catch(() => {});
   }
 }
 
@@ -165,14 +200,24 @@ export async function loadVersions(wasm) {
   if (!row || !Array.isArray(row.versions)) return 0;
 
   let restored = 0;
+  // Ids are per-session, so two documents' "version 1" meet here: each stored
+  // entry gets a fresh session id past every id already in use, or adding it
+  // would silently replace the one already loaded.
+  let next = 1;
+  try { for (const v of JSON.parse(wasm.session_versions_manifest() || "[]")) next = Math.max(next, v.id + 1); } catch {}
   for (const v of row.versions) {
-    const key = `${doc}:${v.id}`;
+    const key = bytesKey(doc, v);
     const stored = await done(db.transaction("bytes").objectStore("bytes").get(key)).catch(() => null);
     if (!stored) continue;   // a manifest entry with no bytes is not offered
     let bytes;
     try { bytes = await inflate(stored); } catch { continue; }
+    const id = next++;
+    const { sk: _sk, ...meta } = v;
     try {
-      wasm.session_version_add(JSON.stringify(v), bytes);
+      wasm.session_version_add(JSON.stringify({ ...meta, id }), bytes);
+      const sk = v.sk || null;
+      if (sk) skById.set(id, { sk, at: v.capturedAtMs });
+      else migratedLegacy.add(v.id);
       restored += 1;
     } catch { /* one unreadable version must not take the rest with it */ }
   }

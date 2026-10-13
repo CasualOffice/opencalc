@@ -477,9 +477,12 @@ test("leaving desktop chrome puts the moved node back", async ({ page }) => {
   await page.evaluate(() => window.opencalcEditor.setCapabilities({ mode: "standalone" }));
   await expect(page.locator(".app-header")).toBeVisible();
 
-  expect(
-    await page.evaluate(() => !!document.querySelector("#menubar #presence")),
-    "the roster went home",
+  // Home is where the shell shows it: the ribbon's title bar, beside Share.
+  // `#menubar` was home once, but the ribbon parks that bar off-screen, so a
+  // roster put back there could not be seen (UX-SHELL-21).
+  await expect.poll(
+    () => page.evaluate(() => !!document.querySelector(".app-header #presence")),
+    { message: "the roster went home" },
   ).toBe(true);
 
   // **`#tb-status` is not in this list any more, and that is the fix rather

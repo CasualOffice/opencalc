@@ -133,6 +133,7 @@ function commandMenu(owner, ids) {
       if (!c || (c.hidden && c.hidden())) continue;   // a rule took it away
       const b = h("button", "rb-pop-item", c.label || id);
       b.type = "button";
+      b.dataset.cmd = id;
       b.setAttribute("role", "menuitem");
       if (c.shortcut) b.appendChild(h("span", "rb-pop-key", c.shortcut));
       if (c.enabled && !c.enabled()) b.disabled = true;
@@ -444,6 +445,32 @@ function buildTitleBar() {
   }
 }
 
+/// Who else is here. The roster's markup lives in the menu bar, which this
+/// shell parks off-screen — left there, nobody could see a co-editor. It sits
+/// beside Share in the title bar, as in Excel; a host that hides the title bar
+/// (`hide: header`, embedded mode) still gets it, at the end of the tab row,
+/// because who you are working with is not chrome (`UX-CHROME-01`).
+/// Moved, not copied: `renderPresence` keeps its node, and `stop()` puts it
+/// back where it came from.
+function seatPresence(strip) {
+  const presence = document.getElementById("presence");
+  if (!presence) return;
+  const home = presence.parentNode, next = presence.nextSibling;
+  cleanups.push(() => home.insertBefore(presence, next));
+  const seat = () => {
+    // Desktop chrome already gives it a visible home in the status bar; two
+    // movers would take turns pulling it back and forth.
+    if (presence.closest(".bottom-bar")) return;
+    const header = document.querySelector(".app-header");
+    const right = header?.querySelector(".header-right");
+    const shown = header && right && getComputedStyle(header).display !== "none";
+    const target = shown ? right : strip;
+    if (presence.parentNode !== target) target[shown ? "prepend" : "append"](presence);
+  };
+  seat();
+  sync.add(seat);
+}
+
 function buildBackstage() {
   const bs = h("div", "rb-backstage");
   bs.hidden = true;
@@ -674,22 +701,29 @@ function buildMobile(select, current) {
       icons.appendChild(b);
       const li = h("button", "rb-mitem");
       li.type = "button";
+      li.dataset.cmd = it.id;
       li.append(icon(it.icon, 20), h("span", null, shortLabel(it.label)));
-      if (it.menu || it.popup) li.appendChild(icon("chevron_right", 16));
+      if (it.menu || it.popup) { li.setAttribute("aria-haspopup", "true"); li.appendChild(icon("chevron_right", 16)); }
       li.addEventListener("click", (e) => { e.stopPropagation(); runItem(it, li); });
       list.appendChild(li);
     }
-    chips.textContent = "";
-    const file = h("button", "rb-mchip", "File");
-    file.type = "button";
-    file.addEventListener("click", () => { toggle(false); openBackstage(); });
-    chips.appendChild(file);
-    for (const t of TABS) {
-      const chip = h("button", "rb-mchip", t.label);
-      chip.type = "button";
-      chip.setAttribute("aria-pressed", t.id === tab.id ? "true" : "false");
-      chip.addEventListener("click", (e) => { e.stopPropagation(); select(t.id); paint(); });
-      chips.appendChild(chip);
+    // Built once: every sync repaints, and rebuilding the chips each time took
+    // keyboard focus out of an open sheet and detached the chip under a finger.
+    if (!chips.firstChild) {
+      const file = h("button", "rb-mchip", "File");
+      file.type = "button";
+      file.addEventListener("click", () => { toggle(false); openBackstage(); });
+      chips.appendChild(file);
+      for (const t of TABS) {
+        const chip = h("button", "rb-mchip", t.label);
+        chip.type = "button";
+        chip.dataset.tab = t.id;
+        chip.addEventListener("click", (e) => { e.stopPropagation(); select(t.id); paint(); });
+        chips.appendChild(chip);
+      }
+    }
+    for (const chip of chips.querySelectorAll("[data-tab]")) {
+      chip.setAttribute("aria-pressed", chip.dataset.tab === tab.id ? "true" : "false");
     }
   };
   const toggle = (open) => {
@@ -882,6 +916,7 @@ export async function start() {
     t.addEventListener("click", () => { currentTab = t.id.replace("rb-tab-", ""); mobile?._paint(); });
   }
   sync.add(() => mobile?._paint());
+  seatPresence(strip);
 
   select(TABS[0].id);
   return el;

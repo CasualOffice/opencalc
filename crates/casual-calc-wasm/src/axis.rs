@@ -587,7 +587,7 @@ pub fn session_cells(
             let text = if sheet.view.show_formulas {
                 // `showFormulas` shows the formula in place of its result. A
                 // cell without one still shows its value, as in Excel.
-                cell_input_text(wb, cell)
+                cell_input_text(wb, cell, at)
             } else {
                 display_text(wb, cell)
             };
@@ -1454,5 +1454,51 @@ mod offset_overflow_tests {
     fn an_offset_past_what_the_boundary_can_carry_saturates_instead_of_trapping() {
         assert_eq!(px_from_twips(i64::MAX), i32::MAX);
         assert_eq!(px_from_twips(-1), 0);
+    }
+}
+
+#[cfg(test)]
+mod show_formulas_tests {
+    use crate::{
+        session_cells, session_find_opts, session_new, session_set_cell, session_set_view_option,
+    };
+
+    /// **Show Formulas prints each formula as typed** (fit-gap XL-UX-001).
+    ///
+    /// A stored formula's references are offsets from the cell that holds it
+    /// (`PERF-11`), so printing the tree with no origin turned every relative
+    /// reference into `#REF!`: Ctrl+` showed `=SUM(#REF!:#REF!)` for
+    /// `=SUM(D2:D4)`. The formula bar printed at the cell and was right, which
+    /// is why only the grid's view was wrong.
+    #[test]
+    fn show_formulas_prints_relative_references_at_their_cell() {
+        session_new();
+        for (r, v) in [(1, "3"), (2, "5"), (3, "2")] {
+            session_set_cell(0, r, 1, v).unwrap();
+        }
+        session_set_cell(0, 4, 1, "=SUM(B2:B4)").unwrap();
+        session_set_cell(0, 4, 2, "=B5*2").unwrap();
+        session_set_view_option(0, "formulas", true).unwrap();
+        let json = session_cells(0, 4, 1, 4, 2);
+        assert!(
+            json.contains("\"=SUM(B2:B4)\""),
+            "Show Formulas printed {json}"
+        );
+        assert!(json.contains("\"=B5*2\""), "Show Formulas printed {json}");
+        assert!(!json.contains("#REF!"), "Show Formulas printed {json}");
+    }
+
+    /// Find searches formulas as typed too: the same printer fed it, so a
+    /// search for `B2` inside a formula found nothing.
+    #[test]
+    fn find_in_formulas_sees_the_references_as_typed() {
+        session_new();
+        session_set_cell(0, 1, 1, "3").unwrap();
+        session_set_cell(0, 4, 1, "=SUM(B2:B4)").unwrap();
+        let hits = session_find_opts(0, "B2:B4", false, false, false, false, false);
+        assert!(
+            hits.contains("\"r\":4"),
+            "Find did not see the formula: {hits}"
+        );
     }
 }

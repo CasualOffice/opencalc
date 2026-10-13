@@ -530,6 +530,24 @@ fn is_text_format(code: &str) -> bool {
     !trimmed.is_empty() && !trimmed.contains(';') && trimmed.contains('@')
 }
 
+/// Whether a cell's explicit number format survives an entry of `kind`.
+///
+/// Excel keeps a format the person chose when the entry is of the same kind —
+/// a plain number into `0.000`, a date into `dd/mm/yyyy`, `50%` into `0.00%`
+/// — and replaces it when the entry is of another kind, since `50%` shown
+/// through `0.00` reads `0.50`, which is not what was typed.
+fn keeps_format(code: &str, kind: entry::Kind) -> bool {
+    use entry::Kind;
+    let date = casual_calc_io::is_date_format(code);
+    match kind {
+        Kind::Plain | Kind::Bool | Kind::Grouped | Kind::Fraction | Kind::Scientific => true,
+        Kind::Percent => code.contains('%'),
+        Kind::Currency => code.contains('$'),
+        Kind::Date | Kind::DateTime => date,
+        Kind::Time => date && code.contains(['h', 'H', 's', 'S']),
+    }
+}
+
 /// Whether an entry has a leading zero worth preserving — `007`, `0123`.
 ///
 /// Parsed as a number these lose the zero, and the entry a person typed is not
@@ -1157,6 +1175,46 @@ impl WorkbookSession {
             .and_then(|id| self.workbook().styles.get(id))
             .and_then(|st| st.number_format.as_deref())
             .is_some_and(is_text_format);
+
+        // Everything else Excel (en-US) reads on entry: booleans, `1,234.5`,
+        // `50%`, `$5.00`, `(5)`, `1e3`, `0 1/2`, `12/31/2026`, `1:30 PM`
+        // (`XL-FEAT-001`). The value and the format it implies land in one
+        // operation, so one undo takes both back.
+        if !text_formatted && let Some(entry) = entry::parse(trimmed, self.config.environment.now) {
+            if let Some(b) = entry.boolean {
+                return Operation::SetValue {
+                    sheet,
+                    at,
+                    value: CellValue::Bool(b),
+                };
+            }
+            let current = existing_style
+                .and_then(|id| self.workbook().styles.get(id))
+                .and_then(|st| st.number_format.as_deref())
+                .filter(|code| !code.trim().is_empty() && !code.eq_ignore_ascii_case("general"));
+            if entry.format.is_none() || current.is_some_and(|code| keeps_format(code, entry.kind))
+            {
+                return Operation::SetValue {
+                    sheet,
+                    at,
+                    value: CellValue::Number(entry.number),
+                };
+            }
+            let mut style = existing_style
+                .and_then(|id| self.workbook().styles.get(id))
+                .cloned()
+                .unwrap_or_default();
+            style.number_format = entry.format;
+            let style = self.workbook_mut().intern_style(style);
+            let mut cell = Cell::value(CellValue::Number(entry.number));
+            cell.style = Some(style);
+            return Operation::SetCell {
+                sheet,
+                at,
+                cell: Some(cell),
+            };
+        }
+
         // An ISO date becomes a real date, keeping the same rules the importer uses
         // so that typing a date and pasting one from a file agree. It brings its own
         // format, since a bare serial displayed as a number is not what was typed.
@@ -2639,6 +2697,8 @@ fn recalc_plan(op: &Operation) -> RecalcPlan {
 }
 
 pub mod views;
+
+mod entry;
 
 use std::collections::{BTreeMap, BTreeSet};
 

@@ -101,7 +101,7 @@ pub fn session_find_opts(
                 let haystack = if in_values {
                     display_text(wb, cell)
                 } else {
-                    cell_input_text(wb, cell)
+                    cell_input_text(wb, cell, at)
                 };
                 if matches(&haystack) {
                     hits.push(format!(
@@ -145,7 +145,7 @@ pub fn session_replace_all(
         if let Some(sh) = session.workbook().sheets.get(sheet) {
             let wb = session.workbook();
             for (at, c) in sh.cells.iter() {
-                let input = cell_input_text(wb, c);
+                let input = cell_input_text(wb, c, at);
                 if !contains_ci(&input, find, match_case) {
                     continue;
                 }
@@ -213,7 +213,7 @@ pub fn session_replace_at(
         let input = {
             let wb = session.workbook();
             match wb.sheets.get(sheet).and_then(|s| s.cells.get(at)) {
-                Some(c) => cell_input_text(wb, c),
+                Some(c) => cell_input_text(wb, c, at),
                 None => return Ok(false),
             }
         };

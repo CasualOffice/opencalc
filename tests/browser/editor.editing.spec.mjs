@@ -131,6 +131,12 @@ test.describe("fill", () => {
   });
 });
 
+/// Pick "Entire row" in Excel's Insert / Delete dialog (XL-UX-002/005).
+async function entireRow(page) {
+  await page.locator('#oc-modal input[value="row"]').check();
+  await page.locator("#oc-modal .oc-btn.primary").click();
+}
+
 test.describe("structural edits", () => {
   test("inserting a row moves the formulas below it", async ({ page }) => {
     await boot(page);
@@ -138,6 +144,8 @@ test.describe("structural edits", () => {
     // the same three cells.
     await goTo(page, "A2");
     await shortcut(page, "ControlOrMeta+Shift+=");
+    // A cell selection asks how, as Excel does (XL-UX-005); this is the row.
+    await entireRow(page);
 
     expect(await inputAt(page, "D6")).toBe("=SUM(D3:D5)");
     await expect(cell(page, 5, 3), "the total is unchanged").toHaveText("43.48");
@@ -155,6 +163,8 @@ test.describe("structural edits", () => {
     await boot(page);
     await goTo(page, "A2");
     await shortcut(page, "ControlOrMeta+Shift+=");
+    // A cell selection asks how, as Excel does (XL-UX-005); this is the row.
+    await entireRow(page);
 
     // Widget's quantity, now a row further down. 10 * 4.50 = 45.
     await goTo(page, "B3");
@@ -178,6 +188,7 @@ test.describe("structural edits", () => {
     await type(page, "=A3");
     await goTo(page, "A3");
     await shortcut(page, "ControlOrMeta+-");
+    await entireRow(page);
 
     expect(await inputAt(page, "F2")).toBe("=#REF!");
   });

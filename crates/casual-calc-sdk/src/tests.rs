@@ -3919,3 +3919,395 @@ mod attribution {
         );
     }
 }
+
+/// Typed entry is read the way Excel (en-US) reads it (`XL-FEAT-001`).
+///
+/// Before this, only plain numbers and ISO dates were recognised, so `50%`,
+/// `$5.00`, `1,234.5`, `TRUE`, `(5)` and `12/31/2026` all landed as **text** —
+/// they looked right in the cell and then summed to zero. Each case checks
+/// the stored value *and* the number format the entry implies, since a serial
+/// with no date format is not what was typed either.
+mod typed_entry {
+    use casual_calc_model::{Cell, CellRef, CellValue, Id, Sheet, SheetId, Style};
+
+    use crate::{Environment, WorkbookSession};
+
+    /// 2026-10-14, so a year-less entry (`1/2`, `31-Dec`) has a year to take.
+    const TODAY: f64 = 46309.0;
+
+    fn session() -> WorkbookSession {
+        let mut s = WorkbookSession::blank();
+        s.workbook_mut()
+            .sheets
+            .push(Sheet::new(SheetId(Id::from_parts(9, 1)), "Sheet1"));
+        s.set_environment(Environment {
+            now: TODAY,
+            seed: 0,
+        });
+        s
+    }
+
+    fn format_of(s: &WorkbookSession, at: CellRef) -> Option<String> {
+        let wb = s.workbook();
+        let id = wb.sheets[0].cells.get(at)?.style?;
+        wb.styles.get(id)?.number_format.clone()
+    }
+
+    fn read(s: &WorkbookSession, at: CellRef) -> (CellValue, Option<String>) {
+        let value = s.workbook().sheets[0]
+            .cells
+            .get(at)
+            .map(|c| c.value.clone())
+            .unwrap_or(CellValue::Empty);
+        (value, format_of(s, at))
+    }
+
+    fn text_of(s: &WorkbookSession, v: &CellValue) -> Option<String> {
+        match v {
+            CellValue::SharedString(id) | CellValue::InlineString(id) => {
+                s.workbook().strings.get(*id).map(str::to_owned)
+            }
+            _ => None,
+        }
+    }
+
+    fn type_into(s: &mut WorkbookSession, at: CellRef, input: &str) {
+        let op = s.input_edit(0, at, input);
+        s.edit(op).unwrap();
+    }
+
+    /// Type into a fresh General cell and return what was stored.
+    fn typed(input: &str) -> (CellValue, Option<String>) {
+        let mut s = session();
+        type_into(&mut s, CellRef::new(0, 0), input);
+        read(&s, CellRef::new(0, 0))
+    }
+
+    #[track_caller]
+    fn number(input: &str, expected: f64, format: Option<&str>) {
+        let (value, code) = typed(input);
+        match value {
+            CellValue::Number(n) => assert!(
+                (n - expected).abs() < 1e-9,
+                "{input:?}: stored {n}, expected {expected}"
+            ),
+            other => panic!("{input:?}: expected the number {expected}, stored {other:?}"),
+        }
+        assert_eq!(code.as_deref(), format, "{input:?}: number format");
+    }
+
+    #[track_caller]
+    fn text(input: &str) {
+        let mut s = session();
+        type_into(&mut s, CellRef::new(0, 0), input);
+        let (value, _) = read(&s, CellRef::new(0, 0));
+        assert_eq!(
+            text_of(&s, &value).as_deref(),
+            Some(input.trim()),
+            "{input:?} should have stayed text, stored {value:?}"
+        );
+    }
+
+    #[test]
+    fn booleans() {
+        for (input, b) in [
+            ("TRUE", true),
+            ("false", false),
+            ("True", true),
+            ("FALSE", false),
+        ] {
+            let (value, code) = typed(input);
+            assert_eq!(value, CellValue::Bool(b), "{input:?}");
+            assert_eq!(code, None, "{input:?}");
+        }
+    }
+
+    #[test]
+    fn thousands_separators() {
+        number("1,234.5", 1234.5, Some("#,##0.00"));
+        number("-1,234", -1234.0, Some("#,##0"));
+        number("12,345,678", 12_345_678.0, Some("#,##0"));
+        number("+1,000", 1000.0, Some("#,##0"));
+        text("1,23");
+        text("1,2345");
+        text(",123");
+        text("1,,234");
+    }
+
+    #[test]
+    fn percentages() {
+        number("50%", 0.5, Some("0%"));
+        number("12.5%", 0.125, Some("0.00%"));
+        number("-5%", -0.05, Some("0%"));
+        number("1,000%", 10.0, Some("0%"));
+        text("%");
+        text("5%%");
+    }
+
+    #[test]
+    fn currency() {
+        number("$5", 5.0, Some("\"$\"#,##0"));
+        number("$5.00", 5.0, Some("\"$\"#,##0.00"));
+        number("-$5", -5.0, Some("\"$\"#,##0"));
+        number("$-5", -5.0, Some("\"$\"#,##0"));
+        number("$1,234.56", 1234.56, Some("\"$\"#,##0.00"));
+        // Not an en-US currency: Excel leaves these as text.
+        text("€5");
+        text("£5");
+        text("$");
+        text("5$");
+    }
+
+    #[test]
+    fn accounting_negatives() {
+        number("(5)", -5.0, None);
+        number("(1,234.50)", -1234.5, Some("#,##0.00"));
+        number("($5)", -5.0, Some("\"$\"#,##0"));
+        number("(5%)", -0.05, Some("0%"));
+        text("(-5)");
+        text("(5");
+        text("()");
+    }
+
+    #[test]
+    fn slash_and_dash_dates() {
+        number("12/31/2026", 46387.0, Some("m/d/yyyy"));
+        number("1/2/2026", 46024.0, Some("m/d/yyyy"));
+        number("12/31/26", 46387.0, Some("m/d/yyyy"));
+        // Excel's two-digit-year window: 00-29 is 20xx, 30-99 is 19xx.
+        number("1/1/30", 10959.0, Some("m/d/yyyy"));
+        number("1/1/29", 47119.0, Some("m/d/yyyy"));
+        number("12-31-2026", 46387.0, Some("m/d/yyyy"));
+        number("2026/12/31", 46387.0, Some("m/d/yyyy"));
+        number("2/29/2028", 46812.0, Some("m/d/yyyy"));
+        text("13/40/2026");
+        text("2/29/2026");
+        text("0/1/2026");
+        text("1/2/3/4");
+    }
+
+    #[test]
+    fn named_month_dates() {
+        number("31-Dec-2026", 46387.0, Some("d-mmm-yy"));
+        number("31 Dec 2026", 46387.0, Some("d-mmm-yy"));
+        number("Dec 31, 2026", 46387.0, Some("d-mmm-yy"));
+        number("December 31, 2026", 46387.0, Some("d-mmm-yy"));
+        number("dec 31 2026", 46387.0, Some("d-mmm-yy"));
+        number("Dec-2026", 46357.0, Some("mmm-yy"));
+        number("Dec-40", 14946.0, Some("mmm-yy"));
+        text("31-Foo-2026");
+        text("32-Dec-2026");
+    }
+
+    #[test]
+    fn year_less_dates_take_the_session_year() {
+        number("1/2", 46024.0, Some("d-mmm"));
+        number("31-Dec", 46387.0, Some("d-mmm"));
+        number("Dec-26", 46382.0, Some("d-mmm"));
+        number("Dec 31", 46387.0, Some("d-mmm"));
+    }
+
+    #[test]
+    fn year_less_dates_without_a_clock_stay_text() {
+        // No clock means no "this year" to put the date in. Guessing 1900 would
+        // be a silent wrong date; text is what was typed.
+        let mut s = WorkbookSession::blank();
+        s.workbook_mut()
+            .sheets
+            .push(Sheet::new(SheetId(Id::from_parts(9, 1)), "Sheet1"));
+        for input in ["1/2", "31-Dec"] {
+            type_into(&mut s, CellRef::new(0, 0), input);
+            let (value, _) = read(&s, CellRef::new(0, 0));
+            assert_eq!(text_of(&s, &value).as_deref(), Some(input), "{input:?}");
+        }
+    }
+
+    #[test]
+    fn times() {
+        number("1:30 PM", 13.5 / 24.0, Some("h:mm AM/PM"));
+        number("1:30 pm", 13.5 / 24.0, Some("h:mm AM/PM"));
+        number("12:00 AM", 0.0, Some("h:mm AM/PM"));
+        number("12:30 PM", 12.5 / 24.0, Some("h:mm AM/PM"));
+        number(
+            "1:30:15 AM",
+            (3600.0 + 1800.0 + 15.0) / 86400.0,
+            Some("h:mm:ss AM/PM"),
+        );
+        number("13:45", 13.75 / 24.0, Some("h:mm"));
+        number(
+            "13:45:10",
+            (13.0 * 3600.0 + 45.0 * 60.0 + 10.0) / 86400.0,
+            Some("h:mm:ss"),
+        );
+        number(
+            "12/31/2026 13:45",
+            46387.0 + 13.75 / 24.0,
+            Some("m/d/yyyy h:mm"),
+        );
+        number(
+            "12/31/2026 1:45 PM",
+            46387.0 + 13.75 / 24.0,
+            Some("m/d/yyyy h:mm AM/PM"),
+        );
+        text("13:30 PM");
+        text("1:60");
+        text("1:30 XM");
+    }
+
+    #[test]
+    fn fractions_and_the_date_they_are_not() {
+        // `1/2` alone is 2-Jan in Excel en-US, covered above; with a whole part
+        // it is a fraction.
+        //
+        // Excel would also apply `# ?/?`; the renderer cannot draw fraction
+        // codes yet (it shows 0.5 as `1  /`), so the value lands in General
+        // until it can — see `entry::fraction`.
+        number("0 1/2", 0.5, None);
+        number("1 3/4", 1.75, None);
+        number("-1 1/2", -1.5, None);
+        number("2 1/16", 2.0625, None);
+        text("1 1/0");
+        text("1 1/2/3");
+    }
+
+    #[test]
+    fn scientific_and_plain_numbers() {
+        number("1e3", 1000.0, Some("0.00E+00"));
+        number("1.5E-2", 0.015, Some("0.00E+00"));
+        number("42", 42.0, None);
+        number("-0.5", -0.5, None);
+        text("007");
+    }
+
+    #[test]
+    fn apostrophe_still_forces_text() {
+        for input in ["'TRUE", "'50%", "'12/31/2026", "'$5"] {
+            let mut s = session();
+            type_into(&mut s, CellRef::new(0, 0), input);
+            let (value, _) = read(&s, CellRef::new(0, 0));
+            assert_eq!(
+                text_of(&s, &value).as_deref(),
+                Some(&input[1..]),
+                "{input:?}"
+            );
+        }
+    }
+
+    fn session_with_format(code: &str) -> WorkbookSession {
+        let mut s = session();
+        let style = s.workbook_mut().intern_style(Style {
+            number_format: Some(code.to_owned()),
+            ..Style::default()
+        });
+        let mut cell = Cell::value(CellValue::Empty);
+        cell.style = Some(style);
+        s.workbook_mut().sheets[0]
+            .cells
+            .set(CellRef::new(0, 0), cell);
+        s
+    }
+
+    #[test]
+    fn a_text_formatted_cell_keeps_every_entry_as_text() {
+        for input in [
+            "TRUE",
+            "50%",
+            "$5.00",
+            "1,234.5",
+            "(5)",
+            "12/31/2026",
+            "1:30 PM",
+            "0 1/2",
+        ] {
+            let mut s = session_with_format("@");
+            type_into(&mut s, CellRef::new(0, 0), input);
+            let (value, code) = read(&s, CellRef::new(0, 0));
+            assert_eq!(text_of(&s, &value).as_deref(), Some(input), "{input:?}");
+            assert_eq!(code.as_deref(), Some("@"), "{input:?}");
+        }
+    }
+
+    #[test]
+    fn an_explicit_format_of_the_same_kind_is_kept() {
+        for (existing, input) in [
+            ("0.000", "1,234"),
+            ("0.000", "(5)"),
+            ("dd/mm/yyyy", "12/31/2026"),
+            ("0.00%", "50%"),
+            ("\"$\"#,##0.000", "$5"),
+            ("hh:mm:ss", "1:30 PM"),
+        ] {
+            let mut s = session_with_format(existing);
+            type_into(&mut s, CellRef::new(0, 0), input);
+            let (value, code) = read(&s, CellRef::new(0, 0));
+            assert!(
+                matches!(value, CellValue::Number(_)),
+                "{input:?} into {existing:?}"
+            );
+            assert_eq!(
+                code.as_deref(),
+                Some(existing),
+                "{input:?} into {existing:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_explicit_format_of_another_kind_gives_way() {
+        for (existing, input, expected) in [
+            ("0.00", "50%", "0%"),
+            ("0.00", "12/31/2026", "m/d/yyyy"),
+            ("0.00", "$5", "\"$\"#,##0"),
+        ] {
+            let mut s = session_with_format(existing);
+            type_into(&mut s, CellRef::new(0, 0), input);
+            let (_, code) = read(&s, CellRef::new(0, 0));
+            assert_eq!(
+                code.as_deref(),
+                Some(expected),
+                "{input:?} into {existing:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn value_and_format_are_one_undo_step() {
+        let mut s = session();
+        type_into(&mut s, CellRef::new(0, 0), "$5.00");
+        assert_eq!(read(&s, CellRef::new(0, 0)).0, CellValue::Number(5.0));
+        s.undo().unwrap();
+        let (value, code) = read(&s, CellRef::new(0, 0));
+        assert_eq!(value, CellValue::Empty);
+        assert_eq!(code, None);
+    }
+
+    #[test]
+    fn every_applied_format_renders_what_was_typed() {
+        for (input, shown) in [
+            ("1,234.5", "1,234.50"),
+            ("50%", "50%"),
+            ("12.5%", "12.50%"),
+            ("$1,234.56", "$1,234.56"),
+            ("-$5", "-$5"),
+            ("12/31/2026", "12/31/2026"),
+            ("31-Dec-2026", "31-Dec-26"),
+            ("Dec-2026", "Dec-26"),
+            ("1/2", "2-Jan"),
+            ("1:30 PM", "1:30 PM"),
+            ("13:45:10", "13:45:10"),
+            ("12/31/2026 13:45", "12/31/2026 13:45"),
+            ("1e3", "1.00E+03"),
+        ] {
+            let (value, code) = typed(input);
+            let CellValue::Number(n) = value else {
+                panic!("{input:?} stored {value:?}");
+            };
+            let code = code.unwrap_or_else(|| panic!("{input:?} has no format"));
+            assert_eq!(
+                casual_calc_layout::format_number(n, &code).trim(),
+                shown,
+                "{input:?} as {code:?}"
+            );
+        }
+    }
+}

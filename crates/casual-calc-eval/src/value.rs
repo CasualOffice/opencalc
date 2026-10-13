@@ -136,6 +136,50 @@ impl Value {
     }
 }
 
+impl Value {
+    /// `(rows, cols)`: an array's dimensions, `(1, 1)` for anything else.
+    pub(crate) fn shape(&self) -> (usize, usize) {
+        match self {
+            Value::Array { rows, cols, .. } => (*rows, *cols),
+            _ => (1, 1),
+        }
+    }
+
+    /// The element at `(r, c)` of a broadcast: a scalar (or a single-element
+    /// array) pairs with every position.
+    pub(crate) fn broadcast_at(&self, r: usize, c: usize) -> Value {
+        match self {
+            Value::Array { rows, cols, cells } => cells
+                .get((r % *rows) * *cols + (c % *cols))
+                .cloned()
+                .unwrap_or(Value::Empty),
+            other => other.clone(),
+        }
+    }
+}
+
+/// The shape an element-wise operation over `values` produces, or `None` when
+/// two of them are arrays of different shapes.
+///
+/// One rule for every lifted operation — binary operators and `IF` alike — so
+/// they cannot disagree about what lines up with what. A single value pairs
+/// with every element; two blocks pair positionally and must agree, because
+/// guessing how to line up a 3×1 against a 1×4 produces a plausible answer to
+/// a question nobody asked.
+pub(crate) fn broadcast_shape(values: &[&Value]) -> Option<(usize, usize)> {
+    let mut block: Option<(usize, usize)> = None;
+    for v in values {
+        let (r, c) = v.shape();
+        if r * c > 1 {
+            match block {
+                Some(b) if b != (r, c) => return None,
+                _ => block = Some((r, c)),
+            }
+        }
+    }
+    Some(block.unwrap_or((1, 1)))
+}
+
 /// Read a stored cell value into a runtime [`Value`], resolving interned strings.
 pub fn value_from_cell(value: &CellValue, strings: &StringTable) -> Value {
     match value {
