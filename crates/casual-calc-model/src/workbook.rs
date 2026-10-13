@@ -497,6 +497,17 @@ fn rel_local_name(rel_type: &str) -> &str {
     rel_type.rsplit('/').next().unwrap_or(rel_type)
 }
 
+/// A relationship of the package digital-signature family
+/// (`…/package/2006/relationships/digital-signature/origin`, `…/signature`,
+/// `…/certificate`). Matched on the `digital-signature` segment rather than
+/// the whole URI, on the same reasoning as [`rel_local_name`].
+fn is_signature_rel(rel: &RetainedRel) -> bool {
+    rel.rel_type
+        .rsplit('/')
+        .nth(1)
+        .is_some_and(|segment| segment == "digital-signature")
+}
+
 /// The package path a relationship target names, resolved against the part that
 /// declares it.
 ///
@@ -643,6 +654,49 @@ impl Workbook {
                 kept.push(part);
             }
         }
+        self.retained_parts = kept;
+        taken
+    }
+
+    /// Whether this package carries an OOXML digital signature — the
+    /// `_xmlsignatures/` family reached from the package root by a
+    /// `digital-signature/origin` relationship (`XL-FEAT-010`).
+    ///
+    /// Like a macro project, the signature is a retained part nothing here
+    /// parses or verifies. This exists for the two decisions that turn on its
+    /// presence: an editor warning before the first edit, and a save naming
+    /// the signature it had to remove.
+    #[must_use]
+    pub fn is_signed(&self) -> bool {
+        self.retained_rels.iter().any(is_signature_rel)
+    }
+
+    /// Remove the digital signature: every part a `digital-signature/*`
+    /// relationship reaches (the origin, each signature, any certificate),
+    /// every relationship naming one, and every relationship one declares.
+    /// Returns the parts taken away.
+    ///
+    /// Called by the semantic writer, because a signature covers the bytes it
+    /// was made over and the writer never reproduces those: carried across, it
+    /// would sign content that has changed, which a recipient reads as
+    /// tampering. Excel removes it on an edited save for the same reason. The
+    /// part's content type travels on the [`RetainedPart`], so it leaves with
+    /// it. The caller names the removal in its compatibility report.
+    pub fn remove_signature(&mut self) -> Vec<RetainedPart> {
+        let doomed: BTreeSet<String> = self
+            .retained_rels
+            .iter()
+            .filter(|rel| !rel.external && is_signature_rel(rel))
+            .map(|rel| resolve_part_path(&rel.source, &rel.target))
+            .collect();
+        self.retained_rels.retain(|rel| {
+            !is_signature_rel(rel)
+                && !doomed.contains(&rel.source)
+                && (rel.external || !doomed.contains(&resolve_part_path(&rel.source, &rel.target)))
+        });
+        let (taken, kept) = std::mem::take(&mut self.retained_parts)
+            .into_iter()
+            .partition(|part| doomed.contains(&part.path));
         self.retained_parts = kept;
         taken
     }

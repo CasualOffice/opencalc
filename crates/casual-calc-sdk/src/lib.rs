@@ -51,6 +51,14 @@ pub use casual_calc_transaction::version::{
 
 pub use casual_calc_ooxml::OoxmlLimits;
 
+/// The save-loss feature naming a digital signature an edited save removed
+/// (`XL-FEAT-010`); [`SIGNATURE_REMOVED_MESSAGE`] is the sentence for it.
+pub const SIGNATURE_REMOVED: &str = "signature/removed";
+
+/// What to tell the person when [`SIGNATURE_REMOVED`] is in a save-loss report.
+pub const SIGNATURE_REMOVED_MESSAGE: &str =
+    "The digital signature was removed because the workbook changed; re-sign it in Excel.";
+
 const SESSION_NAMESPACE: u64 = 0x5345_5300_0000_0000; // "SES"
 
 /// The sheet a delimited save writes.
@@ -2061,6 +2069,18 @@ impl WorkbookSession {
         // Not reported when the save hands back the opened file untouched:
         // those bytes still contain the project, so claiming a loss would be
         // as wrong in the other direction.
+        // **A digital signature** (`XL-FEAT-010`). It covers the bytes it was
+        // made over, which only an unedited save hands back; every writer
+        // leaves it behind — the OOXML one deliberately, since a carried
+        // signature would vouch for changed content. Named so the person knows
+        // to re-sign.
+        if !self.writes_source_verbatim(format) && self.workbook.is_signed() {
+            report.record(
+                SIGNATURE_REMOVED,
+                ModelOutcome::Omitted,
+                RetentionOutcome::NotRetained,
+            );
+        }
         if format != SessionFormat::Xlsm
             && !self.writes_source_verbatim(format)
             && self.workbook.macro_project().is_some()
@@ -2204,6 +2224,17 @@ impl WorkbookSession {
     #[must_use]
     pub fn is_unmodified(&self) -> bool {
         self.source.is_some()
+    }
+
+    /// Whether the opened file carries a digital signature (`XL-FEAT-010`).
+    ///
+    /// Asked before the first edit, so the editor can warn that saving an
+    /// edited copy removes it — an edited save does, and
+    /// [`format_loss`](Self::format_loss) names that under
+    /// [`SIGNATURE_REMOVED`]. An unedited save keeps it, byte for byte.
+    #[must_use]
+    pub fn is_signed(&self) -> bool {
+        self.workbook.is_signed()
     }
 }
 

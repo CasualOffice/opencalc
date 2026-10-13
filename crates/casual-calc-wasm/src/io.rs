@@ -411,7 +411,14 @@ fn describe_loss(loss: &casual_calc_sdk::CompatibilityReport) -> String {
     }
     let mut dropped: Vec<String> = Vec::new();
     let mut degraded: Vec<String> = Vec::new();
+    let mut notes: Vec<&str> = Vec::new();
     for e in loss.entries() {
+        // A removal with its own sentence, because what the person does about
+        // it — re-sign — is not something a feature name says (`XL-FEAT-010`).
+        if e.feature == casual_calc_sdk::SIGNATURE_REMOVED {
+            notes.push(casual_calc_sdk::SIGNATURE_REMOVED_MESSAGE);
+            continue;
+        }
         match e.model {
             casual_calc_sdk::ModelOutcome::Omitted => dropped.push(e.feature),
             casual_calc_sdk::ModelOutcome::Degraded => degraded.push(e.feature),
@@ -427,7 +434,14 @@ fn describe_loss(loss: &casual_calc_sdk::CompatibilityReport) -> String {
     if !degraded.is_empty() {
         parts.push(format!("written as values: {}", degraded.join(", ")));
     }
-    parts.join("; ")
+    let mut sentence = parts.join("; ");
+    for note in notes {
+        if !sentence.is_empty() {
+            sentence.push_str(". ");
+        }
+        sentence.push_str(note);
+    }
+    sentence
 }
 
 /// Serialize a sheet to delimited text (CSV/TSV/PSV) using the cached values.
@@ -739,6 +753,35 @@ mod save_as_tests {
             !ods.contains("other sheets"),
             "and unlike a `.csv` it carries the second sheet, so it must not \
              claim otherwise: {ods:?}"
+        );
+    }
+
+    /// `XL-FEAT-010`: a removed signature reads as what to do about it, not as
+    /// a feature id under "not written".
+    #[test]
+    fn a_removed_signature_is_told_as_a_sentence() {
+        use casual_calc_sdk::{CompatibilityReport, ModelOutcome, RetentionOutcome};
+        let mut loss = CompatibilityReport::default();
+        loss.record(
+            casual_calc_sdk::SIGNATURE_REMOVED,
+            ModelOutcome::Omitted,
+            RetentionOutcome::NotRetained,
+        );
+        assert_eq!(
+            super::describe_loss(&loss),
+            casual_calc_sdk::SIGNATURE_REMOVED_MESSAGE
+        );
+        loss.record(
+            "charts",
+            ModelOutcome::Omitted,
+            RetentionOutcome::NotRetained,
+        );
+        assert_eq!(
+            super::describe_loss(&loss),
+            format!(
+                "not written: charts. {}",
+                casual_calc_sdk::SIGNATURE_REMOVED_MESSAGE
+            )
         );
     }
 }

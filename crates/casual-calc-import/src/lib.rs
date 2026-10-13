@@ -1698,6 +1698,16 @@ pub fn import_package_cancellable(
     // nothing about the feature.
     let sheet_parts: Vec<String> = package.sheets().iter().map(|s| s.part.clone()).collect();
     retain_unmodelled(&mut package, &mut workbook, &sheet_parts, &mut report)?;
+    // `XL-FEAT-010`: a signed package. Kept as it came, and valid only for as
+    // long as the bytes are the ones it signed — so it is recorded, for an
+    // editor to warn before the first edit and for a save to name its removal.
+    if workbook.is_signed() {
+        report.record(
+            "signature",
+            ModelOutcome::Omitted,
+            RetentionOutcome::Preserved,
+        );
+    }
 
     // Defined names, resolved against the sheet ids assigned above.
     let workbook_part = package.workbook_part().to_owned();
