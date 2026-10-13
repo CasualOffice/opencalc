@@ -38,7 +38,7 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 WEBAPP = ROOT / "webapp"
 
 # Stylesheets that draw chrome, and everything that may define a token for them.
-CHROME_SHEETS = ["ribbon.css", "sheets.css"]
+CHROME_SHEETS = ["ribbon.css"]
 DEFINING_SHEETS = ["editor.css", "ribbon.tokens.css", "style.css"]
 
 # A chrome selector: the ribbon, the Compact bar, or a chrome-scoped body class.

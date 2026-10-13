@@ -141,7 +141,7 @@ export function manageCfRules() {
 export function formatCellsDialog() {
   const modal = byId("oc-modal");
   const body = byId("oc-modal-body");
-  byId("oc-modal-title").textContent = "Format cells";
+  byId("oc-modal-title").textContent = "Format Cells";
   body.textContent = "";
 
   let cur = {};
@@ -171,30 +171,172 @@ export function formatCellsDialog() {
   // dialog is one visible change rather than a dozen.
   const pending = [];
 
+  // Number: Excel's category list, options per category, and a sample drawn
+  // from the selected cell's own value (UX-SHELL-13). Every choice is turned
+  // into a format code; Custom shows that code and lets it be edited directly.
   addTab("Number", (page) => {
-    page.append(el("p", "oc-confirm-text", "Format code"));
-    const inp = el("input", "cf-code");
-    inp.value = cur.nf || "";
-    inp.placeholder = "General";
-    inp.spellcheck = false;
-    const preview = el("div", "cf-preview");
-    const render = () => {
-      try { preview.textContent = inp.value.trim() ? wasm.format_preview(1234.567, inp.value.trim()) : "1234.567"; }
-      catch { preview.textContent = "—"; }
+    // The sample is the selected cell's own value. A typed constant is read
+    // as typed; a formula's value is read from what the grid displays, with
+    // its current formatting stripped, since no call returns the raw number.
+    let raw = null;
+    let num = null;
+    try {
+      const input = wasm.session_cell_input(state.sheet, state.sel.row, state.sel.col);
+      const shown = JSON.parse(wasm.session_cells(state.sheet, state.sel.row, state.sel.col, state.sel.row, state.sel.col))[0];
+      if (input && !input.startsWith("=")) raw = input;
+      else if (shown) raw = shown.t ?? "";
+      if (shown && shown.n) {
+        let t = String(shown.t ?? "").replace(/[$€£¥₹,\s]/g, "");
+        const neg = /^\(.*\)$/.test(t);
+        t = t.replace(/[()]/g, "");
+        const pct = t.endsWith("%");
+        const v = Number(pct ? t.slice(0, -1) : t);
+        if (Number.isFinite(v)) num = (neg ? -v : v) / (pct ? 100 : 1);
+      } else if (raw !== null && raw !== "" && Number.isFinite(Number(raw))) num = Number(raw);
+    } catch {}
+    const SYMBOLS = [["$", "$"], ["€", "€"], ["£", "£"], ["¥", "¥"], ["₹", "₹"], ["None", ""]];
+    const DATES = ["m/d/yyyy", "d-mmm-yy", "yyyy-mm-dd", "dddd, mmmm d, yyyy", "mmm-yy", "d-mmm"];
+    const TIMES = ["h:mm AM/PM", "h:mm:ss AM/PM", "h:mm", "h:mm:ss", "[h]:mm:ss"];
+    const FRACTIONS = ["# ?/?", "# ??/??", "# ?/2", "# ?/4", "# ?/8", "# ??/100"];
+    const zeros = (n) => (n > 0 ? "." + "0".repeat(n) : "");
+    const opt = { dp: 2, sep: true, neg: "minus", sym: "$", date: DATES[0], time: TIMES[0], frac: FRACTIONS[0] };
+    const code = (cat) => {
+      const base = (opt.sep ? "#,##0" : "0") + zeros(opt.dp);
+      const negs = (b) => (opt.neg === "paren" ? `${b};(${b})` : opt.neg === "red" ? `${b};[Red]-${b}` : b);
+      switch (cat) {
+        case "General": return "";
+        case "Number": return negs(base);
+        case "Currency": return negs(`${opt.sym}#,##0${zeros(opt.dp)}`);
+        case "Accounting": {
+          const n = `#,##0${zeros(opt.dp)}`;
+          const sym = opt.sym ? `${opt.sym}* ` : "* ";
+          return `_(${sym}${n}_);_(${sym}(${n});_(${sym}"-"??_);_(@_)`;
+        }
+        case "Date": return opt.date;
+        case "Time": return opt.time;
+        case "Percentage": return `0${zeros(opt.dp)}%`;
+        case "Fraction": return opt.frac;
+        case "Scientific": return `0${zeros(opt.dp)}E+00`;
+        case "Text": return "@";
+        default: return custom.value.trim();
+      }
     };
-    inp.addEventListener("input", render);
-    render();
-    const presets = el("div", "cf-presets");
-    for (const [label, code] of [
-      ["General", ""], ["0.00", "0.00"], ["#,##0", "#,##0"], ["0%", "0%"],
-      ["$#,##0.00", "$#,##0.00"], ["yyyy-mm-dd", "yyyy-mm-dd"], ["Text", "@"],
-    ]) {
-      const b = el("button", "cf-preset", label);
-      b.addEventListener("click", () => { inp.value = code; render(); });
-      presets.appendChild(b);
+    const nf = cur.nf || "";
+    const guess = () => {
+      if (!nf) return "General";
+      if (nf === "@") return "Text";
+      if (/^_\(/.test(nf)) return "Accounting";
+      if (/E\+/.test(nf)) return "Scientific";
+      if (/%$/.test(nf)) return "Percentage";
+      if (/\?\//.test(nf)) return "Fraction";
+      if (/[hs]/.test(nf.replace(/"[^"]*"/g, "")) && !/[dy]/.test(nf)) return "Time";
+      if (/[dmy]/.test(nf.replace(/"[^"]*"/g, ""))) return "Date";
+      if (/^[$€£¥₹]/.test(nf)) return "Currency";
+      if (/^[#0,.;()\[\]Red-]+$/.test(nf)) return "Number";
+      return "Custom";
+    };
+    let cat = guess();
+    const dpMatch = nf.match(/\.(0+)/);
+    if (dpMatch) opt.dp = dpMatch[1].length; else if (nf) opt.dp = 0;
+    opt.sep = !nf || nf.includes(",");
+    if (DATES.includes(nf)) opt.date = nf;
+    if (TIMES.includes(nf)) opt.time = nf;
+    if (FRACTIONS.includes(nf)) opt.frac = nf;
+    const symHit = nf.match(/[$€£¥₹]/);
+    if (symHit) opt.sym = symHit[0];
+
+    const wrap = el("div", "fc-num");
+    const list = el("div", "fc-cats");
+    list.setAttribute("role", "listbox");
+    list.setAttribute("aria-label", "Category");
+    const right = el("div", "fc-num-right");
+    const sample = el("div", "fc-sample");
+    const opts = el("div", "fc-num-opts");
+    const custom = el("input", "cf-code");
+    custom.value = nf;
+    custom.spellcheck = false;
+    custom.setAttribute("aria-label", "Type");
+    right.append(el("div", "fc-label", "Sample"), sample, opts);
+    wrap.append(list, right);
+    page.appendChild(wrap);
+
+    const render = () => {
+      const c = code(cat);
+      try {
+        sample.textContent = num !== null
+          ? (c ? wasm.format_preview(num, c) : String(num))
+          : (raw !== null && raw !== "" ? (c ? wasm.format_preview_text(String(raw), c) : String(raw)) : "\u00a0");
+      } catch { sample.textContent = "—"; }
+      if (cat !== "Custom") custom.value = c;
+    };
+    const field = (label, control) => {
+      const row = el("label", "fc-row");
+      row.append(el("span", "fc-label", label), control);
+      opts.appendChild(row);
+      return control;
+    };
+    const select = (items, value, onChange) => {
+      const sel = document.createElement("select");
+      for (const [label, v] of items) {
+        const o = document.createElement("option");
+        o.textContent = label; o.value = v;
+        if (v === value) o.selected = true;
+        sel.appendChild(o);
+      }
+      sel.addEventListener("change", () => { onChange(sel.value); render(); });
+      return sel;
+    };
+    const decimals = () => {
+      const n = document.createElement("input");
+      n.type = "number"; n.min = "0"; n.max = "30"; n.value = String(opt.dp);
+      n.addEventListener("input", () => { opt.dp = Math.max(0, Math.min(30, parseInt(n.value || "0", 10) || 0)); render(); });
+      return field("Decimal places", n);
+    };
+    const negatives = () => field("Negative numbers", select(
+      [["-1,234.10", "minus"], ["(1,234.10)", "paren"], ["-1,234.10 in red", "red"]], opt.neg, (v) => { opt.neg = v; }));
+    const symbol = () => field("Symbol", select(SYMBOLS.map(([l, v]) => [l, v]), opt.sym, (v) => { opt.sym = v; }));
+    const NOTES = {
+      General: "General format cells have no specific number format.",
+      Text: "Text format cells are treated as text even when a number is in the cell.",
+    };
+    const showOpts = () => {
+      opts.textContent = "";
+      if (cat === "Number") {
+        decimals();
+        const box = document.createElement("input");
+        box.type = "checkbox"; box.checked = opt.sep;
+        box.addEventListener("change", () => { opt.sep = box.checked; render(); });
+        const r = el("label", "fc-check"); r.append(box, el("span", null, "Use 1000 Separator (,)"));
+        opts.appendChild(r);
+        negatives();
+      } else if (cat === "Currency") { decimals(); symbol(); negatives(); }
+      else if (cat === "Accounting") { decimals(); symbol(); }
+      else if (cat === "Percentage" || cat === "Scientific") decimals();
+      else if (cat === "Date") field("Type", select(DATES.map((d) => [d, d]), opt.date, (v) => { opt.date = v; }));
+      else if (cat === "Time") field("Type", select(TIMES.map((d) => [d, d]), opt.time, (v) => { opt.time = v; }));
+      else if (cat === "Fraction") field("Type", select(FRACTIONS.map((d) => [d, d]), opt.frac, (v) => { opt.frac = v; }));
+      else if (cat === "Custom") {
+        field("Type", custom);
+        custom.oninput = render;
+      }
+      if (NOTES[cat]) opts.appendChild(el("p", "fc-note", NOTES[cat]));
+    };
+    for (const name of ["General", "Number", "Currency", "Accounting", "Date", "Time", "Percentage", "Fraction", "Scientific", "Text", "Custom"]) {
+      const b = el("button", "fc-cat", name);
+      b.type = "button";
+      b.setAttribute("role", "option");
+      b.dataset.cat = name;
+      b.addEventListener("click", () => {
+        cat = name;
+        for (const x of list.children) x.setAttribute("aria-selected", x === b ? "true" : "false");
+        showOpts(); render();
+      });
+      b.setAttribute("aria-selected", name === cat ? "true" : "false");
+      list.appendChild(b);
     }
-    page.append(inp, preview, presets);
-    pending.push((s) => wasm.session_set_number_format(state.sheet, s.r0, s.c0, s.r1, s.c1, inp.value.trim()));
+    showOpts();
+    render();
+    pending.push((sel) => wasm.session_set_number_format(state.sheet, sel.r0, sel.c0, sel.r1, sel.c1, code(cat)));
   });
 
   addTab("Font", (page) => {
@@ -297,7 +439,7 @@ export function formatCellsDialog() {
   const actions = el("div", "oc-confirm-actions");
   const cancel = el("button", "oc-btn", "Cancel");
   const ok = el("button", "oc-btn primary", "Apply");
-  actions.append(cancel, ok);
+  actions.append(ok, cancel);
   body.append(tabs, pages, actions);
   modal.hidden = false;
 
@@ -571,7 +713,7 @@ export function customFormatDialog() {
   const actions = el("div", "oc-confirm-actions");
   const cancel = el("button", "oc-btn", "Cancel");
   const ok = el("button", "oc-btn primary", "Apply");
-  actions.append(cancel, ok);
+  actions.append(ok, cancel);
   body.append(el("p", "oc-confirm-text", "Format code"), input, preview,
               el("p", "oc-confirm-text", "Currency"), curWrap, presets, hint, actions);
   modal.hidden = false;
@@ -650,7 +792,7 @@ export function sortDialog() {
   const actions = el("div", "oc-confirm-actions");
   const cancel = el("button", "oc-btn", "Cancel");
   const ok = el("button", "oc-btn primary", "Sort");
-  actions.append(cancel, ok);
+  actions.append(ok, cancel);
   body.append(where, headerRow, keysWrap, actions);
   modal.hidden = false;
 
@@ -987,7 +1129,7 @@ export function conditionDialog(col) {
   const actions = el("div", "oc-confirm-actions");
   const cancel = el("button", "oc-btn", "Cancel");
   const ok = el("button", "oc-btn primary", "Apply");
-  actions.append(cancel, ok);
+  actions.append(ok, cancel);
   body.append(where, one.row, join, two.row, hint, actions);
   modal.hidden = false;
 
@@ -1047,12 +1189,13 @@ export function panelRangeReadout(body) {
 
 export function panelActions(body, primaryText, onPrimary, ghostText, onGhost) {
   const row = el("div", "panel-actions");
-  const ghost = el("button", "panel-btn-ghost", ghostText);
+  const ghost = el("button", "oc-btn", ghostText);
   ghost.addEventListener("click", onGhost);
-  const primary = el("button", "panel-btn-primary", primaryText);
+  const primary = el("button", "oc-btn primary", primaryText);
   primary.addEventListener("click", onPrimary);
-  row.appendChild(ghost);
+  // Excel's order, as in every dialog: the action first, then the way out.
   row.appendChild(primary);
+  row.appendChild(ghost);
   body.appendChild(row);
   return primary;
 }
@@ -1166,7 +1309,7 @@ export function buildTablePanel(body) {
   }
 
   const row = el("div", "panel-actions");
-  const rm = el("button", "panel-btn-ghost", "Convert to range");
+  const rm = el("button", "oc-btn", "Convert to range");
   rm.addEventListener("click", async () => {
     const cur = currentTable();
     if (!cur) return;
@@ -1286,10 +1429,10 @@ export function buildPagePanel(body) {
   try { scope = JSON.parse(wasm.session_print_scope(state.sheet)); } catch {}
   const scopeRow = (label, current, onSet, onClear) => {
     body.appendChild(el("div", "panel-range", current || "(all of it)"));
-    const row = el("div", "panel-actions");
-    const clear = el("button", "panel-btn-ghost", "Clear");
+    const row = el("div", "panel-inline-actions");
+    const clear = el("button", "oc-btn", "Clear");
     clear.addEventListener("click", () => { onClear(); openPanel("page"); });
-    const set = el("button", "panel-btn-ghost", label);
+    const set = el("button", "oc-btn", label);
     set.addEventListener("click", () => { onSet(); openPanel("page"); });
     row.append(clear, set);
     body.appendChild(row);
@@ -1792,7 +1935,7 @@ export function hyperlinkDialog() {
   const modal = byId("oc-modal");
   const body = byId("oc-modal-body");
   byId("oc-modal-title").textContent =
-    existing ? `Edit link on ${A1(row, col)}` : `Insert link on ${A1(row, col)}`;
+    existing ? "Edit Hyperlink" : "Insert Hyperlink";
   body.textContent = "";
 
   const field = (label, value, placeholder) => {
@@ -1825,16 +1968,16 @@ export function hyperlinkDialog() {
     draw();
   };
   if (existing) {
-    const remove = el("button", "danger", "Remove link");
+    const remove = el("button", "oc-btn danger", "Remove Link");
     remove.addEventListener("click", () => commit(true));
     row2.appendChild(remove);
   }
-  const cancel = el("button", null, "Cancel");
+  const cancel = el("button", "oc-btn", "Cancel");
   cancel.addEventListener("click", () => { modal.hidden = true; });
-  const ok = el("button", "primary", existing ? "Update" : "Insert");
+  const ok = el("button", "oc-btn primary", existing ? "OK" : "Insert");
   ok.addEventListener("click", () => commit(false));
-  row2.appendChild(cancel);
   row2.appendChild(ok);
+  row2.appendChild(cancel);
   body.appendChild(row2);
   modal.hidden = false;
   setTimeout(() => target.focus(), 0);
@@ -1956,7 +2099,7 @@ export function tableDialog() {
   const actions = el("div", "oc-confirm-actions");
   const cancel = el("button", "oc-btn", "Cancel");
   const ok = el("button", "oc-btn primary", "Create");
-  actions.append(cancel, ok);
+  actions.append(ok, cancel);
   body.append(form, actions);
   modal.hidden = false;
 
@@ -2042,7 +2185,7 @@ export function confirmModal(title, message, confirmLabel = "OK") {
     const ok = document.createElement("button");
     ok.className = "oc-btn primary";
     ok.textContent = confirmLabel;
-    row.append(cancel, ok);
+    row.append(ok, cancel);
     body.append(p, row);
     modal.hidden = false;
     // The modal's own ✕ / backdrop wiring just hides it, which would leave this
@@ -2139,7 +2282,7 @@ export function pasteSpecialDialog() {
   const actions = el("div", "oc-confirm-actions");
   const cancel = el("button", "oc-btn", "Cancel");
   const ok = el("button", "oc-btn primary", "Paste");
-  actions.append(cancel, ok);
+  actions.append(ok, cancel);
   body.appendChild(actions);
   modal.hidden = false;
 
@@ -2190,7 +2333,7 @@ export function textToColumnsDialog() {
   const actions = el("div", "oc-confirm-actions");
   const cancel = el("button", "oc-btn", "Cancel");
   const ok = el("button", "oc-btn primary", "Split");
-  actions.append(cancel, ok);
+  actions.append(ok, cancel);
   body.appendChild(actions);
   modal.hidden = false;
 
@@ -2655,8 +2798,12 @@ export function sizeDialog(axis, index) {
 
   const modal = byId("oc-modal");
   const body = byId("oc-modal-body");
-  byId("oc-modal-title").textContent = `Resize ${span}`;
+  // Excel's title; the lines it applies to are stated in the body when there
+  // is more than one, since the count is the only warning that OK will touch
+  // more than the line that was clicked.
+  byId("oc-modal-title").textContent = isCol ? "Column Width" : "Row Height";
   body.textContent = "";
+  if (n > 1) body.appendChild(el("p", "oc-confirm-text", `Applies to ${span}.`));
 
   const form = el("div", "oc-size-form");
   const label = el("label", "oc-form-label", isCol ? "Width" : "Height");
@@ -2686,7 +2833,7 @@ export function sizeDialog(axis, index) {
   const actions = el("div", "oc-confirm-actions");
   const cancel = el("button", "oc-btn", "Cancel");
   const ok = el("button", "oc-btn primary", "OK");
-  actions.append(cancel, ok);
+  actions.append(ok, cancel);
   body.append(form, actions);
   modal.hidden = false;
 
@@ -2930,7 +3077,7 @@ export function documentPropertiesDialog() {
   const actions = el("div", "oc-confirm-actions");
   const cancel = el("button", "oc-btn", "Cancel");
   const save = el("button", "oc-btn primary", "Save");
-  actions.append(cancel, save);
+  actions.append(save, cancel);
   body.append(form, facts, actions);
   modal.hidden = false;
 

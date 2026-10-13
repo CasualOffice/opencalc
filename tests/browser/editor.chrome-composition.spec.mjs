@@ -24,7 +24,7 @@ import { expect, test } from "@playwright/test";
 
 async function boot(page, query = "") {
   await page.goto(`/editor.html${query}`);
-  await expect(page.locator("#tb-status")).toHaveText(/^engine v\d/, { timeout: 30_000 });
+  await expect(page.locator("#tb-status")).toHaveAttribute("data-engine", /^\d/, { timeout: 30_000 });
 }
 
 /// A desktop shell as far as the page can tell — the same bridge
@@ -118,6 +118,9 @@ for (const [name, how] of [
     await how(page);
     const where = await page.evaluate(() => {
       const el = document.getElementById("tb-status");
+      // Empty at rest since UX-SHELL-05 moved the version to `data-engine`;
+      // what must stay readable is the progress line and the errors it carries.
+      el.textContent = "opened figures.xlsx";
       const r = el.getBoundingClientRect();
       const s = getComputedStyle(el);
       return {

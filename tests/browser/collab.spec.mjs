@@ -62,8 +62,8 @@ const freshDocument = () => `browser-test-${process.pid}-${++counter}`;
 /// `#tb-status` is the editor's own readiness signal, and is what the rest of
 /// the browser suite waits on.
 async function boot(page) {
-  await page.goto("/editor.html");
-  await expect(page.locator("#tb-status")).toHaveText(/^engine v\d/, { timeout: 30_000 });
+  await page.goto("/editor.html?sample=demo");
+  await expect(page.locator("#tb-status")).toHaveAttribute("data-engine", /^\d/, { timeout: 30_000 });
   // The specifier the page itself used, not one written down here. It carries a
   // cache-busting version that gets bumped, and a copy in a test is a copy that
   // goes stale silently — importing the stale one builds a *second* editor with

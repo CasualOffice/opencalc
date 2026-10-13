@@ -131,8 +131,8 @@ test("the editor the browser loaded came from this working tree", async ({ page 
   expect(Object.keys(local).length, "the working tree has modules to check").toBeGreaterThan(10);
   expect(local["collab.js"], "collab.js is one of them").toBeTruthy();
 
-  await page.goto("/editor.html");
-  await expect(page.locator("#tb-status")).toHaveText(/^engine v\d/, { timeout: 30_000 });
+  await page.goto("/editor.html?sample=demo");
+  await expect(page.locator("#tb-status")).toHaveAttribute("data-engine", /^\d/, { timeout: 30_000 });
 
   const url = new URL(page.url());
   const served = await identity(Number(url.port));
@@ -196,8 +196,8 @@ test("the editor the browser loaded came from this working tree", async ({ page 
 });
 
 test("every module the editor imports carries the tree's stamp", async ({ page }) => {
-  await page.goto("/editor.html");
-  await expect(page.locator("#tb-status")).toHaveText(/^engine v\d/, { timeout: 30_000 });
+  await page.goto("/editor.html?sample=demo");
+  await expect(page.locator("#tb-status")).toHaveAttribute("data-engine", /^\d/, { timeout: 30_000 });
 
   const url = new URL(page.url());
   const { stamp } = await identity(Number(url.port));

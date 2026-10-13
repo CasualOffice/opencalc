@@ -640,7 +640,7 @@ function shareLive(close) {
   return box;
 }
 
-/// The dialog for starting one, and the `COL-46` warning that gates it.
+/// The dialog for starting one, and the `COL-50` warning that gates it.
 function shareStart(close) {
   const box = el("div", "share-body");
 
@@ -649,12 +649,18 @@ function shareStart(close) {
   // a different formula on someone else's screen is not.
   const warn = el("div", "share-warning");
   warn.id = "share-warning";
-  warn.appendChild(el("strong", "", "Known defect: COL-46 (open, P0)"));
+  // The open limitation, in the user's words; its tracker id rides on the
+  // element for the gate, not in the text (docs/95 rule 7). It was COL-46's
+  // text long after COL-46 closed, while COL-50 — the one still open — went
+  // unnamed, which is the drift `DOC-046` describes.
+  warn.dataset.defect = "COL-50";
+  warn.appendChild(el("strong", "", "Check range formulas after editing rows together"));
   warn.appendChild(
     el("p", "",
-      "A formula with a $-anchored reference, rebased across an insert somebody else makes at "
-      + "the same moment, can end up different on the two screens — $E$1 here, $D$1 there — with "
-      + "no error shown to either of you. Check anchored formulas by hand after concurrent edits."),
+      "If one person inserts rows or columns while another deletes them at the same moment, a "
+      + "formula that refers to a range across them, such as =SUM(A1:A10), can end up different "
+      + "on each screen, with no error shown. Check range formulas after editing the sheet's "
+      + "structure together."),
   );
   box.appendChild(warn);
 
@@ -681,7 +687,7 @@ function shareStart(close) {
   check.type = "checkbox";
   check.id = "share-ack";
   ack.appendChild(check);
-  ack.appendChild(el("span", "", "I have read COL-46 and will check anchored formulas."));
+  ack.appendChild(el("span", "", "I understand, and will check range formulas."));
   box.appendChild(ack);
 
   const row = el("div", "oc-confirm-actions");
@@ -724,7 +730,7 @@ function shareStart(close) {
       statusError(`could not start sharing: ${failed.textContent}`);
     }
   });
-  row.append(cancel, start);
+  row.append(start, cancel);
   box.appendChild(row);
   return box;
 }

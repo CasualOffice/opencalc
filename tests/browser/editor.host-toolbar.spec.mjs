@@ -7,8 +7,8 @@
 import { expect, test } from "@playwright/test";
 
 async function boot(page) {
-  await page.goto("/editor.html");
-  await expect(page.locator("#tb-status")).toHaveText(/^engine v\d/, { timeout: 30_000 });
+  await page.goto("/editor.html?sample=demo");
+  await expect(page.locator("#tb-status")).toHaveAttribute("data-engine", /^\d/, { timeout: 30_000 });
 }
 
 /// **A command can be run by id, and it does what the control does.**
@@ -59,9 +59,10 @@ test("every listed command is runnable", async ({ page }) => {
   await boot(page);
   const unrunnable = await page.evaluate(() => {
     const bad = [];
+    // A command is runnable through a menu/toolbar node or, since UX-SHELL-06,
+    // as a registered command with no node (Format Cells, Paste Special…).
     for (const id of window.opencalcEditor.listCommands()) {
-      const node = document.querySelector(`[data-oc-command="${CSS.escape(id)}"]`);
-      if (!node) bad.push(id);
+      if (!window.opencalcEditor.commandIsRunnable(id)) bad.push(id);
     }
     return bad;
   });

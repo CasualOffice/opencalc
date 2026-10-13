@@ -18,7 +18,7 @@ const decide = (page, current, elsewhere) =>
   );
 
 test.beforeEach(async ({ page }) => {
-  await page.goto("/editor.html");
+  await page.goto("/editor.html?sample=demo");
 });
 
 test("a websocket url on the same scheme is followed", async ({ page }) => {

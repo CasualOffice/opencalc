@@ -22,8 +22,8 @@
 import { expect, test } from "@playwright/test";
 
 async function boot(page) {
-  await page.goto("/editor.html");
-  await expect(page.locator("#tb-status")).toHaveText(/^engine v\d/, { timeout: 30_000 });
+  await page.goto("/editor.html?sample=demo");
+  await expect(page.locator("#tb-status")).toHaveAttribute("data-engine", /^\d/, { timeout: 30_000 });
   await page.evaluate(() => window.opencalcEditor.wasmApi().session_new());
 }
 
@@ -73,16 +73,20 @@ test("a host that accepts the risk gets the command", async ({ page }) => {
   expect(await commands(page)).toContain("file.share");
 });
 
-test("the dialog names COL-46 before it will connect anywhere", async ({ page }) => {
+test("the dialog names the open limitation before it will connect anywhere", async ({ page }) => {
   await boot(page);
   await allowSharing(page);
   await page.evaluate(() => window.opencalcEditor.runCommand("file.share"));
 
   await expect(page.locator("#oc-modal")).toBeVisible();
-  await expect(page.locator("#share-warning")).toContainText("COL-46");
+  // The defect still open is COL-50 (COL-46 is Done). Its id rides on the
+  // element; the text is in the user's words, with no tracker ids in it.
+  await expect(page.locator("#share-warning")).toHaveAttribute("data-defect", "COL-50");
+  await expect(page.locator("#share-warning")).not.toContainText(/COL-\d/);
   // Specific, not "collaboration is experimental". A user has to be able to
   // tell which of their formulas this is about.
-  await expect(page.locator("#share-warning")).toContainText("$E$1");
+  await expect(page.locator("#share-warning")).toContainText("range");
+  await expect(page.locator("#share-warning")).toContainText("=SUM(A1:A10)");
 
   // Disabled until acknowledged: a button that can be pressed and then
   // complains has already taught the user to press first and read after.
@@ -95,12 +99,12 @@ test("?collab= and ?doc= prefill the dialog and never connect on their own", asy
   const messages = [];
   page.on("console", (m) => messages.push(m.text()));
   await page.goto("/editor.html?collab=ws%3A%2F%2F127.0.0.1%3A9%2Fcollab&doc=prefilled-key");
-  await expect(page.locator("#tb-status")).toHaveText(/^engine v\d/, { timeout: 30_000 });
+  await expect(page.locator("#tb-status")).toHaveAttribute("data-engine", /^\d/, { timeout: 30_000 });
 
   // The editor must not have opened a socket to a URL somebody put in a link.
   // Port 9 (discard) is unreachable, so an auto-connect shows up as a failed
   // WebSocket in the console and as a status that is not the ready one.
-  await expect(page.locator("#tb-status")).toHaveText(/^engine v\d/);
+  await expect(page.locator("#tb-status")).toHaveAttribute("data-engine", /^\d/);
   expect(messages.filter((m) => /WebSocket/i.test(m))).toEqual([]);
 
   await allowSharing(page);

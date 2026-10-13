@@ -15,10 +15,10 @@ const handles = (page) =>
   page.evaluate(() => window.opencalcEditor.gridHandlesForTest());
 
 async function boot(page) {
-  await page.goto("/editor.html");
+  await page.goto("/editor.html?sample=demo");
   // The signal the smoke suite uses: the engine writes its version here once
   // the WebAssembly module is live.
-  await expect(page.locator("#tb-status")).toHaveText(/^engine v\d/, { timeout: 30_000 });
+  await expect(page.locator("#tb-status")).toHaveAttribute("data-engine", /^\d/, { timeout: 30_000 });
 }
 
 /// Canvas-relative pixels to page coordinates, honouring zoom.

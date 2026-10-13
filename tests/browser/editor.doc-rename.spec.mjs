@@ -20,7 +20,7 @@ import { expect, test } from "@playwright/test";
 async function boot(page, query = "") {
   await page.setViewportSize({ width: 1280, height: 900 });
   await page.goto(`/editor.html${query}`);
-  await expect(page.locator("#tb-status")).toHaveText(/^engine v\d/, { timeout: 30_000 });
+  await expect(page.locator("#tb-status")).toHaveAttribute("data-engine", /^\d/, { timeout: 30_000 });
   await page.evaluate(() => window.opencalcEditor.wasmApi().session_new());
   await page.waitForTimeout(250);
 }

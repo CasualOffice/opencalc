@@ -31,8 +31,8 @@
 import { expect, test } from "@playwright/test";
 
 async function boot(page) {
-  await page.goto("/editor.html");
-  await expect(page.locator("#tb-status")).toHaveText(/^engine v\d/, { timeout: 30_000 });
+  await page.goto("/editor.html?sample=demo");
+  await expect(page.locator("#tb-status")).toHaveAttribute("data-engine", /^\d/, { timeout: 30_000 });
   await page.evaluate(() => {
     const line = Array.from({ length: 30 }, (_, c) => (c % 3 ? "12345" : "Item text")).join("\t");
     const tsv = Array.from({ length: 600 }, () => line).join("\n");

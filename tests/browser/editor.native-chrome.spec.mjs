@@ -17,7 +17,7 @@ import { expect, test } from "@playwright/test";
 
 async function boot(page, query = "") {
   await page.goto(`/editor.html${query}`);
-  await expect(page.locator("#tb-status")).toHaveText(/^engine v\d/, { timeout: 30_000 });
+  await expect(page.locator("#tb-status")).toHaveAttribute("data-engine", /^\d/, { timeout: 30_000 });
 }
 
 /// **A desktop shell, as far as the page can tell** (`UX-CHR-02`).
@@ -135,22 +135,21 @@ test("every command in the model can be dispatched", async ({ page }) => {
 /// height left to reclaim and the measurement is 0 — which is correct
 /// behaviour, not a regression, and asserting it here would be asserting the
 /// ribbon's scaffolding rather than `UX-DESK-01`'s reclaim.
-test("the shell's chrome hides the HTML bar and gives the height to the grid", async ({ page }) => {
-  await pinChrome(page, "toolbar");
+test("the shell's chrome hides the title bar and gives the height to the grid", async ({ page }) => {
+  // One shell (UX-SHELL-08): the menu bar is never drawn in the page, so what a
+  // desktop window reclaims is the title bar — the OS title bar carries the
+  // document name, Save, Undo and Redo are on its own menu and shortcuts.
   await boot(page);
   const webGrid = await page.locator("#grid").boundingBox();
-  const barHeight = await page.evaluate(() => document.getElementById("menubar").getBoundingClientRect().height);
-  expect(barHeight, "there is a bar to reclaim").toBeGreaterThan(20);
+  const header = await page.evaluate(() => document.querySelector(".app-header").getBoundingClientRect().height);
+  expect(header, "there is a title bar to reclaim").toBeGreaterThan(20);
+  const menubarInFlow = await page.evaluate(() => getComputedStyle(document.getElementById("menubar")).position !== "absolute");
+  expect(menubarInFlow, "the menu bar takes no layout room in the one shell").toBe(false);
 
   await bootShell(page);
-  await expect(page.locator("#menubar")).toBeHidden();
+  await expect(page.locator(".app-header")).toBeHidden();
   const nativeGrid = await page.locator("#grid").boundingBox();
-
-  // Not merely hidden — the space it occupied goes to the sheet, which is the
-  // only reason a desktop app hiding its own menu bar is an improvement.
-  // `UX-DESK-01`'s reclaim is not up for reversal by `UX-CHR-02`; what changed
-  // is who is allowed to trigger it.
-  expect(nativeGrid.height, "the grid grows by roughly the bar").toBeGreaterThan(webGrid.height + barHeight - 4);
+  expect(nativeGrid.height, "the grid grows by the title bar").toBeGreaterThan(webGrid.height + header - 4);
 });
 
 test("commands still run when the operating system owns the menu", async ({ page }) => {
@@ -266,6 +265,9 @@ test("in the page, Settings is still a popover under the gear", async ({ page })
 /// the status bar, and none of them puts any of it above the menu bar.
 test("the status line moves into the status bar rather than going with the header", async ({ page }) => {
   await boot(page, "?chrome=native");
+  // Empty at rest since UX-SHELL-05 moved the version to `data-engine`; what
+  // must stay readable is the progress line and errors it carries.
+  await page.evaluate(() => { document.getElementById("tb-status").textContent = "opened figures.xlsx"; });
 
   const status = await seen(page, "#tb-status");
   expect(status.inBottomBar, "the status line is in the status bar").toBe(true);
@@ -352,7 +354,6 @@ test("the desktop and the page share one metric set, and the sheet gets the regi
   // Wide enough that no toolbar group has collapsed into a flyout, or half
   // these controls measure 0x0 because they are not on the bar at all.
   await page.setViewportSize({ width: 1600, height: 900 });
-  await pinChrome(page, "toolbar");
 
   const metrics = () =>
     page.evaluate(({ bands, controls, text }) => {
@@ -375,6 +376,7 @@ test("the desktop and the page share one metric set, and the sheet gets the regi
         // evaluate afterwards: read after the shell has booted, both are 0 and
         // the assertion below compares 84 against nothing.
         region: { header: h(".app-header"), menubar: h("#menubar") },
+        menubarInFlow: getComputedStyle(document.getElementById("menubar")).position !== "absolute",
         grid: h("#grid"),
         box,
         type,
@@ -408,14 +410,16 @@ test("the desktop and the page share one metric set, and the sheet gets the regi
   // a loose floor, because "the difference is the regions we dropped" is the
   // claim — a grid that gained more than that has taken it from somewhere
   // unaccounted for.
-  const dropped = web.region.header + web.region.menubar;
+  // The menu bar is parked out of the flow in the one shell (UX-SHELL-08), so
+  // it never held layout height; only a bar in the flow is a region dropped.
+  const dropped = web.region.header + (web.menubarInFlow ? web.region.menubar : 0);
   expect(native.grid - web.grid, `the sheet gained ${native.grid - web.grid}px where the strip ` +
     `(${web.region.header}px) and the menu bar (${web.region.menubar}px) are what desktop chrome drops`)
     .toBeCloseTo(dropped, 0);
   // And they are gone rather than merely shorter, which is the other way the
   // arithmetic above could come out right.
-  expect(native.region, "a region desktop chrome does not draw is still taking height")
-    .toEqual({ header: 0, menubar: 0 });
+  expect(native.region.header, "the title bar desktop chrome does not draw is still taking height").toBe(0);
+  expect(native.menubarInFlow, "nor is the menu bar in the flow").toBe(false);
 
   // **No pointer target is under 28px, in either chrome.**
   //
@@ -485,6 +489,7 @@ test("leaving desktop chrome puts the moved node back", async ({ page }) => {
   // at the moment a mode is turned off, because "the node stayed where it
   // belongs" and "the relocation quietly stopped working" look identical from
   // the desktop side alone.
+  await page.evaluate(() => { document.getElementById("tb-status").textContent = "opened figures.xlsx"; });
   const status = await seen(page, "#tb-status");
   expect(status.inBottomBar, "the status line moved out of the status bar").toBe(true);
   expect(status.painted, "and it cannot be read").toBe(true);
@@ -809,26 +814,19 @@ test("chrome=native in a browser keeps a navigation axis, whichever chrome draws
 ///
 /// The other half of the same claim: the fix must not be "never hide the menu
 /// bar", which would undo `UX-DESK-01` rather than correct it.
-test("the shell's bridge is the evidence that hides the bar", async ({ page }) => {
-  // Pinned to the classic chrome (`UX-RIB-17`): the reclaim this asserts is the
-  // menu bar's height, which only exists where the menu bar is the axis.
-  await pinChrome(page, "toolbar");
+test("the shell's bridge is the evidence that the OS draws the menu", async ({ page }) => {
+  // `?chrome=native` in a browser is not a desktop window: only the shell's
+  // bridge is. In the one shell (UX-SHELL-08) the HTML menu bar is never drawn,
+  // so what the bridge decides is whether the menu is handed to the OS.
   await boot(page, "?chrome=native");
-  const withoutShell = await page.evaluate(() => ({
-    barSeen: document.getElementById("menubar").getBoundingClientRect().height > 0,
-    grid: document.querySelector("#grid").getBoundingClientRect().height,
-  }));
+  expect(await page.evaluate(() => !!window.__opencalcNative), "a browser has no bridge").toBe(false);
+  await expect(page.locator(".rb-file"), "and keeps its own navigation axis").toBeVisible();
 
   await bootShell(page);
-  const withShell = await page.evaluate(() => ({
-    barSeen: document.getElementById("menubar").getBoundingClientRect().height > 0,
-    grid: document.querySelector("#grid").getBoundingClientRect().height,
-  }));
-
-  expect(withoutShell.barSeen, "a browser keeps the bar").toBe(true);
-  expect(withShell.barSeen, "the shell does not").toBe(false);
-  expect(withShell.grid - withoutShell.grid, "and the bar's height goes to the sheet")
-    .toBeGreaterThan(20);
+  await expect
+    .poll(() => page.evaluate(() => (window.__opencalcNativeCalls || []).some((c) => c.fn === "publishMenu")),
+      { message: "the shell was never given the menu to draw" })
+    .toBe(true);
 });
 
 /// **The theme is reachable on screen in every chrome.**

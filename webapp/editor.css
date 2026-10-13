@@ -2393,3 +2393,110 @@ html, .editor-body { overscroll-behavior: none; }
   .bottom-bar .bottom-status { font-size: 11px; }
   .bottom-bar { gap: 6px; }
 }
+
+/* ── One design for dialogs, side panels and property sheets (UX-SHELL-18) ──
+   Owner, 2026-10-14: "not just toolbar but also make sure dialog, sidepanel,
+   properties all are consistant". Every surface below was styled when it was
+   built, so the editor carried four button styles, eight dialog widths from
+   209 to 510px and a text "×" for close. This block is the single source, last
+   in the file so it wins, and it uses the shell's own numbers (docs/95): 8px
+   card radius, 32px controls, 6px control radius, Fluent icons. */
+
+.oc-modal { background: rgba(15, 18, 22, .32); }
+.oc-modal-box {
+  border-radius: 8px; padding: 20px 24px;
+  min-width: min(360px, 92vw); max-width: min(92vw, 560px); box-sizing: border-box;
+}
+.oc-modal-title { margin: 0 0 14px; padding-right: 32px; font-size: 15px; font-weight: 600; line-height: 1.35; }
+.oc-modal-x, .settings-close, .side-panel-close {
+  width: 28px; height: 28px; padding: 0; display: inline-flex; align-items: center; justify-content: center;
+  border: 0; border-radius: 6px; background: transparent; color: var(--oc-muted-text-color);
+  font-size: 0; line-height: 0; cursor: pointer;
+}
+.oc-modal-x { position: absolute; top: 12px; right: 12px; }
+.oc-modal-x:hover, .settings-close:hover, .side-panel-close:hover { background: var(--oc-surface-color); color: var(--oc-text-color); }
+.oc-modal-x:focus-visible, .settings-close:focus-visible, .side-panel-close:focus-visible { outline: 2px solid var(--oc-accent-color); outline-offset: 1px; }
+
+/* Buttons: one component. The action first, then the way out (Excel). */
+.oc-confirm-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 18px; flex-wrap: wrap; }
+.oc-btn {
+  display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+  height: 32px; min-width: 80px; padding: 0 16px; box-sizing: border-box;
+  border: 1px solid var(--oc-control-border-color); border-radius: 6px;
+  background: var(--oc-background-color); color: var(--oc-text-color);
+  font: inherit; font-size: 13px; font-weight: 500; line-height: 1; white-space: nowrap; cursor: pointer;
+}
+.oc-btn:hover:not(:disabled) { background: var(--oc-surface-color); border-color: var(--oc-border-hover-color); }
+.oc-btn:focus-visible { outline: 2px solid var(--oc-accent-color); outline-offset: 2px; }
+.oc-btn:disabled { opacity: .45; cursor: default; }
+.oc-btn.primary:hover:not(:disabled) { filter: brightness(1.08); }
+.oc-btn.danger { color: var(--oc-danger-color); border-color: color-mix(in srgb, var(--oc-danger-color) 45%, var(--oc-control-border-color)); }
+.oc-btn.danger:hover:not(:disabled) { background: color-mix(in srgb, var(--oc-danger-color) 8%, var(--oc-background-color)); }
+
+/* Fields: one height, one radius, one focus ring — in dialogs and panels. */
+.oc-modal-box input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="color"]),
+.oc-modal-box select,
+.side-panel-body input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="color"]),
+.side-panel-body select,
+.panel-field, .panel-select {
+  min-height: 32px; box-sizing: border-box; padding: 0 10px;
+  border: 1px solid var(--oc-control-border-color); border-radius: 6px;
+  background: var(--oc-background-color); color: var(--oc-text-color); font: inherit; font-size: 13px;
+}
+.oc-modal-box textarea, .side-panel-body textarea, textarea.panel-field {
+  box-sizing: border-box; padding: 8px 10px; border: 1px solid var(--oc-control-border-color);
+  border-radius: 6px; background: var(--oc-background-color); color: var(--oc-text-color); font: inherit; font-size: 13px;
+}
+.oc-modal-box input:focus-visible, .oc-modal-box select:focus-visible, .oc-modal-box textarea:focus-visible,
+.side-panel-body input:focus-visible, .side-panel-body select:focus-visible, .side-panel-body textarea:focus-visible,
+.panel-field:focus, .panel-select:focus {
+  outline: none; border-color: var(--oc-accent-color); box-shadow: 0 0 0 2px var(--oc-accent-ring);
+}
+
+/* Side panels: Excel's task pane. A fixed header, a scrolling body, and the
+   actions held at the bottom so a long form never pushes them out of reach
+   (Data validation's Apply sat below the fold). */
+.side-panel { flex-basis: 320px; }
+.side-panel-head { height: 44px; padding: 0 8px 0 16px; }
+.side-panel-title { font-size: 14px; font-weight: 600; }
+.side-panel-body { padding: 16px; gap: 12px; }
+.panel-section-label { font-size: 12px; font-weight: 600; letter-spacing: 0; text-transform: none; color: var(--oc-text-color); }
+.panel-actions {
+  position: sticky; bottom: -16px; margin: 4px -16px -16px; padding: 12px 16px 16px;
+  display: flex; justify-content: flex-end; gap: 8px;
+  background: var(--oc-popover-background-color); border-top: 1px solid var(--oc-border-color);
+}
+.panel-actions button, .panel-actions .oc-btn { flex: 0 0 auto; height: 32px; font-weight: 500; }
+
+/* The settings popover and every menu share the card radius. */
+.settings-panel { border-radius: 8px; }
+.popmenu { border-radius: 8px; }
+
+/* Format Cells ▸ Number: Excel's category list beside its options (UX-SHELL-13). */
+.fc-num { display: grid; grid-template-columns: 150px minmax(0, 1fr); gap: 16px; min-height: 240px; }
+.fc-cats {
+  display: flex; flex-direction: column; padding: 4px; overflow-y: auto; max-height: 280px;
+  border: 1px solid var(--oc-control-border-color); border-radius: 6px; background: var(--oc-background-color);
+}
+.fc-cat {
+  text-align: left; padding: 5px 8px; border: 0; border-radius: 4px; background: transparent;
+  color: var(--oc-text-color); font: inherit; font-size: 13px; cursor: pointer;
+}
+.fc-cat:hover { background: var(--oc-surface-color); }
+.fc-cat[aria-selected="true"] { background: var(--oc-accent-soft); color: var(--oc-accent-color); font-weight: 600; }
+.fc-num-right { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.fc-label { font-size: 12px; font-weight: 600; color: var(--oc-text-color); }
+.fc-sample {
+  min-height: 32px; display: flex; align-items: center; padding: 0 10px; box-sizing: border-box;
+  border: 1px solid var(--oc-border-color); border-radius: 6px; background: var(--oc-surface-color);
+  font-variant-numeric: tabular-nums; overflow: hidden; white-space: nowrap;
+}
+.fc-num-opts { display: flex; flex-direction: column; gap: 10px; margin-top: 8px; }
+.fc-row { display: grid; grid-template-columns: 130px minmax(0, 1fr); align-items: center; gap: 8px; }
+.fc-check { display: flex; align-items: center; gap: 8px; font-size: 13px; }
+.fc-note { margin: 4px 0 0; font-size: 12px; color: var(--oc-muted-text-color); line-height: 1.45; }
+.oc-modal-box:has(.fc-num) { width: min(92vw, 560px); }
+/* A row of field-level actions inside a panel (Set / Clear beside a range).
+   Not a footer, so it neither sticks nor spans the panel. */
+.panel-inline-actions { display: flex; gap: 8px; }
+.panel-inline-actions .oc-btn { min-width: 0; }

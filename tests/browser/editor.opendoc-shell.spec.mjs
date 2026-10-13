@@ -1,8 +1,8 @@
 import { expect, test } from '@playwright/test';
 
 async function boot(page, query = '') {
-  await page.goto(`/editor.html${query}`);
-  await expect(page.locator('#tb-status')).toHaveText(/^engine v\d/, { timeout: 30_000 });
+  await page.goto(`/editor.html${query}${query ? "&" : "?"}sample=demo`);
+  await expect(page.locator('#tb-status')).toHaveAttribute("data-engine", /^\d/, { timeout: 30_000 });
   await page.evaluate(() => document.fonts.ready);
 }
 
@@ -22,19 +22,29 @@ for (const width of [390, 768, 1440]) {
   test(`shell fits at ${width}px and tab switches leave the grid stable`, async ({ page }) => {
     await page.setViewportSize({ width, height: 900 });
     await boot(page);
+    const phone = width <= 600;
     const before = await page.locator('#grid-wrap').boundingBox();
     for (const id of ['insert', 'data', 'home']) {
-      const tab = page.locator(`#rb-tab-${id}`);
-      await tab.scrollIntoViewIfNeeded();
-      await tab.click();
-      await expect(tab).toHaveAttribute('aria-selected', 'true');
+      if (phone) {
+        // Phones use Excel mobile's bottom bar: the picker opens the tab chips.
+        await page.locator('.rb-mpick').click();
+        const chip = page.locator('.rb-mchip', { hasText: new RegExp(`^${id[0].toUpperCase()}${id.slice(1)}$`) });
+        await chip.click();
+        await expect(chip).toHaveAttribute('aria-pressed', 'true');
+        await page.locator('.rb-mpick').click();
+      } else {
+        const tab = page.locator(`#rb-tab-${id}`);
+        await tab.scrollIntoViewIfNeeded();
+        await tab.click();
+        await expect(tab).toHaveAttribute('aria-selected', 'true');
+      }
       const after = await page.locator('#grid-wrap').boundingBox();
       expect(after.y).toBe(before.y);
     }
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
-    const file = await page.locator('.rb-file').boundingBox();
-    expect(file.x).toBeGreaterThanOrEqual(0);
-    expect(file.x + file.width).toBeLessThanOrEqual(width);
+    const nav = await page.locator(phone ? '.rb-mpick' : '.rb-file').boundingBox();
+    expect(nav.x).toBeGreaterThanOrEqual(0);
+    expect(nav.x + nav.width).toBeLessThanOrEqual(width);
   });
 }
 
@@ -48,14 +58,15 @@ test('skip link focuses the actual spreadsheet', async ({ page }) => {
   await expect(page.locator('#grid')).toBeFocused();
 });
 
-test('explicit and saved chrome choices take precedence', async ({ page }) => {
+// One shell (UX-SHELL-08, docs/95): the toolbar and Sheets chromes are
+// retired, so neither a URL nor a stored preference can bring them back.
+test('every request draws the one Excel shell', async ({ page }) => {
   await boot(page, '?chrome=toolbar');
-  await expect(page.locator('html')).not.toHaveClass(/oc-chrome-ribbon/);
+  await expect(page.locator('html')).toHaveClass(/oc-chrome-ribbon/);
   await page.evaluate(() => localStorage.setItem('oc.chrome', 'sheets'));
   await boot(page);
-  await expect(page.locator('html')).toHaveClass(/oc-chrome-sheets/);
-  await boot(page, '?chrome=ribbon');
   await expect(page.locator('html')).toHaveClass(/oc-chrome-ribbon/);
+  await expect(page.locator('html')).not.toHaveClass(/oc-chrome-sheets/);
 });
 
 test('hidden header keeps File and navigation accessible', async ({ page }) => {
@@ -70,11 +81,11 @@ test('formatting uses the existing command and undo updates the ribbon', async (
   await boot(page);
   await page.locator('#cell-ref').fill('B2');
   await page.locator('#cell-ref').press('Enter');
-  const bold = page.locator('#tb-bold');
+  const bold = page.locator('.oc-ribbon [data-oc-proxy="toolbar.bold"]');
   await expect(bold).toHaveAttribute('aria-pressed', 'false');
   await bold.click();
   await expect(bold).toHaveAttribute('aria-pressed', 'true');
-  const undo = page.locator('.rb-quick [data-oc-proxy="toolbar.undo"]');
+  const undo = page.locator('.rb-qat [data-oc-proxy="edit.undo"]');
   await expect(undo).toBeEnabled();
   await undo.click();
   await expect(bold).toHaveAttribute('aria-pressed', 'false');
@@ -84,7 +95,7 @@ test('formatting uses the existing command and undo updates the ribbon', async (
 test('dark ribbon and File page follow the selected theme', async ({ page }) => {
   await page.emulateMedia({ colorScheme: 'dark' });
   await boot(page);
-  const colors = await page.locator('.rb-body').evaluate(el => {
+  const colors = await page.locator('.rb-band').evaluate(el => {
     const root = getComputedStyle(document.documentElement);
     return { background: getComputedStyle(el).backgroundColor, text: root.getPropertyValue('--oc-text-color').trim() };
   });

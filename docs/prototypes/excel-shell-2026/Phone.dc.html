@@ -1,0 +1,157 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>OpenCalc on a phone</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&amp;display=swap" rel="stylesheet">
+<style>
+body{margin:0}
+</style>
+</helmet>
+<div style="width: 390px; height: 844px; position: relative; display: flex; flex-direction: column; overflow: hidden; background: #ffffff; color: #1f1f1f; font-family: Inter, system-ui, sans-serif; font-size: 14px">
+
+<div style="height: 56px; flex: none; display: flex; align-items: center; gap: 4px; padding: 0 4px; background: #eef1f7">
+<button type="button" aria-label="Back to files" style="width: 44px; height: 44px; display: flex; align-items: center; justify-content: center; border: 0; border-radius: 22px; background: transparent; color: #1f1f1f"><dc-import name="Icon" icon="chevron_left" size="22" hint-size="22px,22px"></dc-import></button>
+<div style="flex: 1; min-width: 0; display: flex; flex-direction: column">
+<span style="font-weight: 600; font-size: 15px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">Quarterly sales.xlsx</span>
+<span style="font-size: 12px; color: #5f6368">Saved to this device</span>
+</div>
+<button type="button" aria-label="Undo" style="width: 44px; height: 44px; display: flex; align-items: center; justify-content: center; border: 0; border-radius: 22px; background: transparent; color: #1f1f1f"><dc-import name="Icon" icon="arrow_undo" size="20" hint-size="20px,20px"></dc-import></button>
+<button type="button" aria-label="Share" style="width: 44px; height: 44px; display: flex; align-items: center; justify-content: center; border: 0; border-radius: 22px; background: transparent; color: #3355c4"><dc-import name="Icon" icon="share" size="20" hint-size="20px,20px"></dc-import></button>
+<button type="button" aria-label="More" style="width: 44px; height: 44px; display: flex; align-items: center; justify-content: center; border: 0; border-radius: 22px; background: transparent; color: #1f1f1f"><dc-import name="Icon" icon="more_horizontal" size="20" hint-size="20px,20px"></dc-import></button>
+</div>
+
+<div style="height: 48px; flex: none; display: flex; align-items: center; gap: 8px; padding: 0 8px; border-bottom: 1px solid #e3e8f1">
+<span style="height: 30px; padding: 0 10px; display: flex; align-items: center; border-radius: 6px; background: #eef1f7; font-weight: 600; font-size: 13px">B3</span>
+<span style="color: #5f6368; display: flex"><dc-import name="Icon" icon="math_formula" size="18" hint-size="18px,18px"></dc-import></span>
+<span style="flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">12400</span>
+</div>
+
+<div style="flex: 1 1 0; min-height: 0; overflow: hidden; font-size: 14px">
+<div style="display: flex; height: 26px; background: #f6f8fb; border-bottom: 1px solid #d5dbe6; color: #5f6368; font-size: 12px">
+<div style="width: 36px; flex: none; border-right: 1px solid #d5dbe6"></div>
+<sc-for list="{{heads}}" as="h" hint-placeholder-count="4">
+<div style="width: {{h.w}}; flex: none; display: flex; align-items: center; justify-content: center; border-right: 1px solid #e3e8f1; background: {{h.bg}}; color: {{h.color}}">{{h.n}}</div>
+</sc-for>
+</div>
+<sc-for list="{{rows}}" as="row" hint-placeholder-count="16">
+<div style="display: flex; height: 32px">
+<div style="width: 36px; flex: none; display: flex; align-items: center; justify-content: center; background: {{row.hbg}}; color: {{row.hcolor}}; font-size: 12px; border-right: 1px solid #d5dbe6; border-bottom: 1px solid #e3e8f1">{{row.n}}</div>
+<sc-for list="{{row.cells}}" as="c" hint-placeholder-count="4">
+<div style="width: {{c.w}}; flex: none; box-sizing: border-box; display: flex; align-items: center; justify-content: {{c.align}}; padding: 0 6px; border-right: 1px solid #e3e8f1; border-bottom: 1px solid #e3e8f1; background: {{c.bg}}; font-weight: {{c.weight}}; box-shadow: {{c.shadow}}; white-space: nowrap">{{c.t}}</div>
+</sc-for>
+</div>
+</sc-for>
+</div>
+
+<div style="height: 44px; flex: none; display: flex; align-items: center; gap: 4px; padding: 0 8px; border-top: 1px solid #e3e8f1; background: #f6f8fb">
+<span style="height: 32px; padding: 0 14px; display: flex; align-items: center; border-radius: 6px; background: #ffffff; color: #3355c4; font-weight: 600; font-size: 13px; box-shadow: inset 0 -2px 0 #3355c4">Sales</span>
+<span style="height: 32px; padding: 0 14px; display: flex; align-items: center; font-size: 13px">Summary</span>
+<button type="button" aria-label="New sheet" style="width: 44px; height: 44px; display: flex; align-items: center; justify-content: center; border: 0; background: transparent; color: #5f6368"><dc-import name="Icon" icon="add" size="18" hint-size="18px,18px"></dc-import></button>
+</div>
+
+<div style="flex: none; background: #ffffff; border-top: 1px solid #cfd6e4; box-shadow: 0 -4px 16px rgba(20,30,60,0.08)">
+<sc-if value="{{open}}" hint-placeholder-val="{{ false }}">
+<div style="display: flex; flex-direction: column; padding: 8px 0 0 0">
+<div style="width: 36px; height: 4px; border-radius: 2px; background: #cfd6e4; align-self: center; margin-bottom: 8px"></div>
+<div style="display: flex; gap: 6px; padding: 0 12px 8px 12px; overflow-x: auto">
+<sc-for list="{{tabs}}" as="t" hint-placeholder-count="6">
+<button type="button" onClick="{{t.pick}}" style="height: 36px; padding: 0 14px; border: 1px solid {{t.border}}; border-radius: 18px; background: {{t.bg}}; color: {{t.color}}; font: inherit; font-size: 13px; font-weight: 600; white-space: nowrap">{{t.name}}</button>
+</sc-for>
+</div>
+<div style="display: flex; flex-direction: column; max-height: 300px; overflow-y: auto">
+<sc-for list="{{list}}" as="it" hint-placeholder-count="6">
+<button type="button" style="height: 48px; display: flex; align-items: center; gap: 14px; padding: 0 18px; border: 0; border-top: 1px solid #eef1f7; background: #ffffff; color: #1f1f1f; font: inherit; font-size: 14px; text-align: left">
+<dc-import name="Icon" icon="{{it.icon}}" size="20" hint-size="20px,20px"></dc-import>
+<span style="flex: 1">{{it.label}}</span>
+<sc-if value="{{it.dd}}" hint-placeholder-val="{{ false }}"><span style="color: #9aa3b2; display: flex"><dc-import name="Icon" icon="chevron_right" size="16" hint-size="16px,16px"></dc-import></span></sc-if>
+</button>
+</sc-for>
+</div>
+</div>
+</sc-if>
+<div style="height: 60px; display: flex; align-items: center; gap: 2px; padding: 0 4px 0 8px">
+<button type="button" onClick="{{toggle}}" aria-label="Choose ribbon tab" style="height: 40px; display: flex; align-items: center; gap: 4px; padding: 0 10px; border: 0; border-radius: 8px; background: #eef1f7; color: #3355c4; font: inherit; font-size: 13px; font-weight: 600; flex: none">{{tab}}<span style="display: flex; transform: rotate({{rot}})"><dc-import name="Icon" icon="chevron_down" size="12" hint-size="12px,12px"></dc-import></span></button>
+<div style="flex: 1; min-width: 0; display: flex; overflow-x: auto">
+<sc-for list="{{bar}}" as="b" hint-placeholder-count="7">
+<button type="button" aria-label="{{b.tip}}" title="{{b.tip}}" style="width: 44px; height: 44px; flex: none; display: flex; align-items: center; justify-content: center; border: 0; border-radius: 8px; background: transparent; color: #1f1f1f"><dc-import name="Icon" icon="{{b.icon}}" size="22" hint-size="22px,22px"></dc-import></button>
+</sc-for>
+</div>
+</div>
+</div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"sheetOpen":{"editor":"boolean","default":false},"$preview":{"width":390,"height":844}}'>
+class Component extends DCLogic {
+constructor(props) {
+super(props);
+this.state = { open: !!props.sheetOpen, tab: 'Home' };
+}
+renderVals() {
+const st = this.state;
+const self = this;
+const data = [
+['Quarterly sales', '', '', ''],
+['Region', 'Q1', 'Q2', 'Q3'],
+['North', 12400, 13150, 14020],
+['South', 9800, 10240, 9950],
+['East', 15200, 14880, 16430],
+['West', 7600, 8120, 8900],
+['Central', 11300, 11900, 12250],
+['Total', 56300, 58290, 61550]
+];
+const widths = [110, 80, 80, 80];
+const ACC = '#3355c4';
+const rows = [];
+for (let r = 0; r < 18; r++) {
+const src = data[r] || ['', '', '', ''];
+const cells = widths.map((w, c) => {
+const v = src[c];
+const active = r === 2 && c === 1;
+return {
+w: w + 'px',
+t: typeof v === 'number' ? v.toLocaleString('en-US') : v,
+align: typeof v === 'number' ? 'flex-end' : 'flex-start',
+weight: r <= 1 || r === 7 ? '600' : '400',
+bg: r === 1 ? '#eef1f7' : '#ffffff',
+shadow: active ? 'inset 0 0 0 2px ' + ACC : 'none'
+};
+});
+rows.push({ n: String(r + 1), cells: cells, hbg: r === 2 ? '#dfe5f6' : '#f6f8fb', hcolor: r === 2 ? '#2945a1' : '#5f6368' });
+}
+const heads = ['A', 'B', 'C', 'D'].map((n, c) => ({ n: n, w: widths[c] + 'px', bg: c === 1 ? '#dfe5f6' : 'transparent', color: c === 1 ? '#2945a1' : '#5f6368' }));
+const bars = {
+'Home': [['text_bold', 'Bold'], ['text_italic', 'Italic'], ['text_underline', 'Underline'], ['paint_bucket', 'Fill Color'], ['text_color', 'Font Color'], ['border_bottom', 'Borders'], ['text_wrap', 'Wrap Text'], ['table_cells_merge', 'Merge'], ['autosum', 'AutoSum']],
+'Insert': [['data_bar_vertical', 'Chart'], ['table', 'Table'], ['image', 'Picture'], ['comment_add', 'Comment'], ['link', 'Link']],
+'Formulas': [['math_formula', 'Insert Function'], ['autosum', 'AutoSum'], ['book_open', 'Function Library'], ['calculator', 'Calculate']],
+'Data': [['arrow_sort_down_lines', 'Sort'], ['filter', 'Filter'], ['table_delete_row', 'Remove Duplicates'], ['checkmark', 'Data Validation']],
+'Review': [['comment_add', 'New Comment'], ['comment', 'Show Comments'], ['lock_closed', 'Protect Sheet']],
+'View': [['table_freeze_column_and_row', 'Freeze Panes'], ['grid', 'Gridlines'], ['search', 'Zoom']]
+};
+const lists = {
+'Home': [['clipboard_paste', 'Paste', true], ['text_color', 'Font', true], ['text_align_left', 'Alignment', true], ['percent', 'Number Format', true], ['data_bar_horizontal', 'Conditional Formatting', true], ['table', 'Format as Table', true], ['table_insert_row', 'Insert and Delete', true], ['arrow_sort_down_lines', 'Sort and Filter', true], ['search', 'Find and Replace', false]]
+};
+const cur = bars[st.tab];
+const list = (lists[st.tab] || cur.map((b) => [b[0], b[1], false])).map((x) => ({ icon: x[0], label: x[1], dd: x[2] }));
+return {
+heads: heads,
+rows: rows,
+open: st.open,
+tab: st.tab,
+rot: st.open ? '180deg' : '0deg',
+toggle: () => self.setState({ open: !st.open }),
+tabs: Object.keys(bars).map((n) => ({ name: n, bg: n === st.tab ? '#3355c4' : '#ffffff', color: n === st.tab ? '#ffffff' : '#1f1f1f', border: n === st.tab ? '#3355c4' : '#cfd6e4', pick: () => self.setState({ tab: n }) })),
+bar: cur.map((b) => ({ icon: b[0], tip: b[1] })),
+list: list
+};
+}
+}
+</script>
+</body>
+</html>

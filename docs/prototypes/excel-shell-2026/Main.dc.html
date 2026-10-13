@@ -1,0 +1,463 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>OpenCalc desktop shell</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&amp;display=swap" rel="stylesheet">
+<style>
+body{margin:0}
+</style>
+</helmet>
+<div style="height: 100vh; min-height: 560px; position: relative; display: flex; flex-direction: column; overflow: hidden; background: #eef1f7; color: #1f1f1f; font-family: Inter, system-ui, sans-serif; font-size: 13px">
+
+<!-- Title bar -->
+<div style="height: 44px; flex: none; display: flex; align-items: center; gap: 4px; padding: 0 12px">
+<div style="width: 26px; height: 26px; border-radius: 6px; background: #3355c4; color: #ffffff; display: flex; align-items: center; justify-content: center; flex: none" aria-hidden="true">
+<dc-import icon="grid" size="16" name="Icon" hint-size="16px,16px"></dc-import>
+</div>
+<div style="display: flex; align-items: center; gap: 2px; margin-left: 8px">
+<button type="button" title="Save (Ctrl+S)" aria-label="Save" style="width: 30px; height: 30px; display: flex; align-items: center; justify-content: center; border: 0; border-radius: 4px; background: transparent; color: #1f1f1f; cursor: pointer"><dc-import name="Icon" icon="save" size="18" hint-size="18px,18px"></dc-import></button>
+<button type="button" title="Undo (Ctrl+Z)" aria-label="Undo" style="width: 30px; height: 30px; display: flex; align-items: center; justify-content: center; border: 0; border-radius: 4px; background: transparent; color: #1f1f1f; cursor: pointer"><dc-import name="Icon" icon="arrow_undo" size="18" hint-size="18px,18px"></dc-import></button>
+<button type="button" title="Redo (Ctrl+Y)" aria-label="Redo" style="width: 30px; height: 30px; display: flex; align-items: center; justify-content: center; border: 0; border-radius: 4px; background: transparent; color: #1f1f1f; cursor: pointer"><dc-import name="Icon" icon="arrow_redo" size="18" hint-size="18px,18px"></dc-import></button>
+<button type="button" title="Customize Quick Access Toolbar" aria-label="Customize Quick Access Toolbar" style="width: 20px; height: 30px; display: flex; align-items: center; justify-content: center; border: 0; border-radius: 4px; background: transparent; color: #5f6368; cursor: pointer"><dc-import name="Icon" icon="chevron_down" size="12" hint-size="12px,12px"></dc-import></button>
+</div>
+<div style="display: flex; align-items: baseline; gap: 8px; margin-left: 12px; min-width: 0">
+<span style="font-weight: 600; font-size: 13px; white-space: nowrap">Quarterly sales.xlsx</span>
+<span style="font-size: 12px; color: #5f6368; white-space: nowrap">Saved to this device</span>
+</div>
+<div style="flex: 1 1 0; display: flex; justify-content: center; min-width: 0; padding: 0 16px">
+<label style="width: 100%; max-width: 420px; height: 30px; display: flex; align-items: center; gap: 8px; padding: 0 10px; box-sizing: border-box; background: #ffffff; border: 1px solid #cfd6e4; border-radius: 6px; color: #5f6368">
+<dc-import name="Icon" icon="search" size="16" hint-size="16px,16px"></dc-import>
+<input type="text" placeholder="Search commands and help (Alt+Q)" aria-label="Search commands" style="flex: 1; min-width: 0; border: 0; outline: none; background: transparent; font: inherit; font-size: 13px; color: #1f1f1f">
+</label>
+</div>
+<button type="button" title="Comments" aria-label="Comments" style="width: 32px; height: 30px; display: flex; align-items: center; justify-content: center; border: 1px solid #cfd6e4; border-radius: 6px; background: #ffffff; color: #1f1f1f; cursor: pointer"><dc-import name="Icon" icon="comment" size="18" hint-size="18px,18px"></dc-import></button>
+<button type="button" style="height: 30px; display: flex; align-items: center; gap: 6px; padding: 0 12px; margin-left: 6px; border: 0; border-radius: 6px; background: #3355c4; color: #ffffff; font: inherit; font-size: 13px; font-weight: 600; cursor: pointer"><dc-import name="Icon" icon="share" size="16" hint-size="16px,16px"></dc-import>Share</button>
+<div style="width: 30px; height: 30px; margin-left: 8px; border-radius: 50%; background: #dfe5f6; color: #2945a1; display: flex; align-items: center; justify-content: center; font-weight: 600; font-size: 12px; flex: none" aria-label="Your account" role="img">U</div>
+</div>
+
+<!-- Tab strip -->
+<div style="height: 34px; flex: none; display: flex; align-items: flex-end; gap: 2px; padding: 0 12px; overflow-x: auto">
+<button type="button" onClick="{{openFile}}" style="height: 30px; padding: 0 12px; border: 0; border-radius: 6px 6px 0 0; background: transparent; color: #3355c4; font: inherit; font-size: 13px; font-weight: 600; cursor: pointer">File</button>
+<sc-for list="{{tabs}}" as="t" hint-placeholder-count="8">
+<button type="button" onClick="{{t.pick}}" aria-pressed="{{t.on}}" style="height: 30px; padding: 0 12px; border: 0; border-bottom: 3px solid {{t.line}}; background: transparent; color: {{t.color}}; font: inherit; font-size: 13px; font-weight: {{t.weight}}; cursor: pointer; white-space: nowrap">{{t.name}}</button>
+</sc-for>
+</div>
+
+<!-- Ribbon -->
+<div style="flex: none; margin: 0 8px; background: #ffffff; border: 1px solid #e3e8f1; border-radius: 8px; position: relative; overflow-x: auto">
+<sc-if value="{{classic}}" hint-placeholder-val="{{ true }}">
+<div style="display: flex; align-items: stretch; padding: 6px 36px 4px 8px; min-height: {{bodyH}}">
+<sc-for list="{{groups}}" as="g" hint-placeholder-count="7">
+<div style="display: flex; flex-direction: column; padding: 0 8px; border-right: 1px solid #e3e8f1; flex: none">
+<div style="display: flex; align-items: center; gap: 4px; flex: 1">
+<sc-for list="{{g.cols}}" as="c" hint-placeholder-count="2">
+<sc-if value="{{c.isLarge}}" hint-placeholder-val="{{ true }}">
+<button type="button" title="{{c.b.tip}}" aria-label="{{c.b.tip}}" onClick="{{c.b.click}}" onMouseEnter="{{c.b.enter}}" onMouseLeave="{{c.b.leave}}" style="display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px; min-width: 40px; max-width: 72px; height: 72px; padding: 4px; box-sizing: border-box; border: 0; border-radius: 4px; background: {{c.b.bg}}; color: #1f1f1f; font: inherit; cursor: pointer">
+<dc-import name="Icon" icon="{{c.b.icon}}" size="24" hint-size="24px,24px"></dc-import>
+<sc-if value="{{c.b.showLabel}}" hint-placeholder-val="{{ false }}"><span style="font-size: 11px; line-height: 13px; text-align: center">{{c.b.label}}</span></sc-if>
+<sc-if value="{{c.b.dd}}" hint-placeholder-val="{{ false }}"><span style="color: #5f6368"><dc-import name="Icon" icon="chevron_down" size="10" hint-size="10px,10px"></dc-import></span></sc-if>
+</button>
+</sc-if>
+<sc-if value="{{c.isRows}}" hint-placeholder-val="{{ false }}">
+<div style="display: flex; flex-direction: column; justify-content: center; gap: {{c.gap}}; height: 72px">
+<sc-for list="{{c.rows}}" as="r" hint-placeholder-count="2">
+<div style="display: flex; align-items: center; gap: 2px">
+<sc-for list="{{r.btns}}" as="b" hint-placeholder-count="4">
+<button type="button" title="{{b.tip}}" aria-label="{{b.tip}}" onClick="{{b.click}}" onMouseEnter="{{b.enter}}" onMouseLeave="{{b.leave}}" style="display: flex; align-items: center; justify-content: {{b.justify}}; gap: 2px; height: 24px; min-width: {{b.minW}}; padding: 0 {{b.padX}}; box-sizing: border-box; border: {{b.border}}; border-radius: 4px; background: {{b.bg}}; color: #1f1f1f; font: inherit; font-size: 12px; cursor: pointer">
+<sc-if value="{{b.isCombo}}" hint-placeholder-val="{{ false }}"><span style="flex: 1; text-align: left; white-space: nowrap; overflow: hidden">{{b.value}}</span></sc-if>
+<sc-if value="{{b.hasIcon}}" hint-placeholder-val="{{ true }}"><dc-import name="Icon" icon="{{b.icon}}" size="16" hint-size="16px,16px"></dc-import></sc-if>
+<sc-if value="{{b.dd}}" hint-placeholder-val="{{ false }}"><span style="color: #5f6368; display: flex"><dc-import name="Icon" icon="chevron_down" size="10" hint-size="10px,10px"></dc-import></span></sc-if>
+</button>
+</sc-for>
+</div>
+</sc-for>
+</div>
+</sc-if>
+</sc-for>
+</div>
+<sc-if value="{{g.showCaption}}" hint-placeholder-val="{{ false }}">
+<div style="height: 18px; display: flex; align-items: center; justify-content: center; gap: 6px; font-size: 11px; color: #5f6368; white-space: nowrap">
+<span>{{g.caption}}</span>
+<sc-if value="{{g.launcher}}" hint-placeholder-val="{{ false }}"><span title="More options" style="display: flex; transform: rotate(-45deg)"><dc-import name="Icon" icon="arrow_down" size="10" hint-size="10px,10px"></dc-import></span></sc-if>
+</div>
+</sc-if>
+</div>
+</sc-for>
+</div>
+</sc-if>
+<sc-if value="{{simplified}}" hint-placeholder-val="{{ false }}">
+<div style="display: flex; align-items: center; padding: 4px 36px 4px 8px; height: 44px; box-sizing: border-box">
+<sc-for list="{{groups}}" as="g" hint-placeholder-count="7">
+<div style="display: flex; align-items: center; gap: 2px; padding: 0 6px; border-right: 1px solid #e3e8f1; flex: none">
+<sc-for list="{{g.flat}}" as="b" hint-placeholder-count="4">
+<button type="button" title="{{b.tip}}" aria-label="{{b.tip}}" onClick="{{b.click}}" onMouseEnter="{{b.enter}}" onMouseLeave="{{b.leave}}" style="display: flex; align-items: center; justify-content: {{b.justify}}; gap: 2px; height: 32px; min-width: {{b.minWS}}; padding: 0 {{b.padX}}; box-sizing: border-box; border: {{b.border}}; border-radius: 4px; background: {{b.bg}}; color: #1f1f1f; font: inherit; font-size: 12px; cursor: pointer">
+<sc-if value="{{b.isCombo}}" hint-placeholder-val="{{ false }}"><span style="flex: 1; text-align: left; white-space: nowrap; overflow: hidden">{{b.value}}</span></sc-if>
+<sc-if value="{{b.hasIcon}}" hint-placeholder-val="{{ true }}"><dc-import name="Icon" icon="{{b.icon}}" size="18" hint-size="18px,18px"></dc-import></sc-if>
+<sc-if value="{{b.dd}}" hint-placeholder-val="{{ false }}"><span style="color: #5f6368; display: flex"><dc-import name="Icon" icon="chevron_down" size="10" hint-size="10px,10px"></dc-import></span></sc-if>
+</button>
+</sc-for>
+</div>
+</sc-for>
+</div>
+</sc-if>
+<button type="button" onClick="{{toggleLayout}}" title="{{layoutTip}}" aria-label="{{layoutTip}}" style="position: absolute; right: 6px; bottom: 6px; width: 24px; height: 24px; display: flex; align-items: center; justify-content: center; border: 0; border-radius: 4px; background: transparent; color: #5f6368; cursor: pointer"><span style="display: flex; transform: rotate({{caretRot}})"><dc-import name="Icon" icon="chevron_down" size="14" hint-size="14px,14px"></dc-import></span></button>
+</div>
+
+<!-- Formula bar -->
+<div style="height: 32px; flex: none; display: flex; align-items: center; gap: 4px; margin: 8px 8px 0 8px; padding: 0 4px; background: #ffffff; border: 1px solid #e3e8f1; border-radius: 6px 6px 0 0">
+<label style="width: 96px; height: 24px; display: flex; align-items: center; padding: 0 6px; box-sizing: border-box; border-radius: 4px; background: #eef1f7; font-size: 12px; font-weight: 500">
+<input type="text" value="{{nameBox}}" aria-label="Name box" readonly style="width: 100%; border: 0; background: transparent; font: inherit; color: #1f1f1f; outline: none">
+<span style="color: #5f6368; display: flex"><dc-import name="Icon" icon="chevron_down" size="10" hint-size="10px,10px"></dc-import></span>
+</label>
+<div style="width: 1px; height: 18px; background: #e3e8f1; margin: 0 4px"></div>
+<button type="button" title="Cancel (Esc)" aria-label="Cancel" style="width: 24px; height: 24px; display: flex; align-items: center; justify-content: center; border: 0; border-radius: 4px; background: transparent; color: #9aa3b2; cursor: pointer"><dc-import name="Icon" icon="dismiss" size="16" hint-size="16px,16px"></dc-import></button>
+<button type="button" title="Enter" aria-label="Enter" style="width: 24px; height: 24px; display: flex; align-items: center; justify-content: center; border: 0; border-radius: 4px; background: transparent; color: #9aa3b2; cursor: pointer"><dc-import name="Icon" icon="checkmark" size="16" hint-size="16px,16px"></dc-import></button>
+<button type="button" title="Insert Function (Shift+F3)" aria-label="Insert Function" style="width: 24px; height: 24px; display: flex; align-items: center; justify-content: center; border: 0; border-radius: 4px; background: transparent; color: #1f1f1f; cursor: pointer"><dc-import name="Icon" icon="math_formula" size="16" hint-size="16px,16px"></dc-import></button>
+<div style="width: 1px; height: 18px; background: #e3e8f1; margin: 0 4px"></div>
+<input type="text" value="{{formula}}" aria-label="Formula bar" readonly style="flex: 1; min-width: 0; border: 0; outline: none; background: transparent; font: inherit; font-size: 13px; color: #1f1f1f">
+<button type="button" title="Expand formula bar (Ctrl+Shift+U)" aria-label="Expand formula bar" style="width: 24px; height: 24px; display: flex; align-items: center; justify-content: center; border: 0; border-radius: 4px; background: transparent; color: #5f6368; cursor: pointer"><dc-import name="Icon" icon="chevron_down" size="12" hint-size="12px,12px"></dc-import></button>
+</div>
+
+<!-- Grid -->
+<div style="flex: 1 1 0; min-height: 0; margin: 0 8px; background: #ffffff; border-left: 1px solid #e3e8f1; border-right: 1px solid #e3e8f1; overflow: hidden; font-size: 13px">
+<div style="display: flex; height: 22px; background: #f6f8fb; border-bottom: 1px solid #d5dbe6">
+<div style="width: 44px; flex: none; border-right: 1px solid #d5dbe6"></div>
+<sc-for list="{{colHeads}}" as="h" hint-placeholder-count="14">
+<div style="width: {{h.w}}; flex: none; display: flex; align-items: center; justify-content: center; border-right: 1px solid #e3e8f1; font-size: 12px; color: {{h.color}}; background: {{h.bg}}; font-weight: {{h.weight}}; box-shadow: {{h.shadow}}">{{h.name}}</div>
+</sc-for>
+</div>
+<sc-for list="{{rows}}" as="row" hint-placeholder-count="20">
+<div style="display: flex; height: 22px">
+<div style="width: 44px; flex: none; display: flex; align-items: center; justify-content: center; background: {{row.bg}}; color: {{row.color}}; font-weight: {{row.weight}}; font-size: 12px; border-right: 1px solid #d5dbe6; border-bottom: 1px solid #e3e8f1; box-shadow: {{row.shadow}}">{{row.n}}</div>
+<sc-for list="{{row.cells}}" as="cell" hint-placeholder-count="14">
+<div onClick="{{cell.pick}}" style="width: {{cell.w}}; flex: none; box-sizing: border-box; display: flex; align-items: center; justify-content: {{cell.align}}; padding: 0 6px; border-right: 1px solid #e3e8f1; border-bottom: {{cell.bottom}}; background: {{cell.bg}}; font-weight: {{cell.weight}}; font-size: {{cell.fs}}; box-shadow: {{cell.shadow}}; white-space: nowrap; overflow: visible; cursor: cell">{{cell.text}}</div>
+</sc-for>
+</div>
+</sc-for>
+</div>
+
+<!-- Sheet tabs -->
+<div style="height: 32px; flex: none; display: flex; align-items: center; gap: 2px; margin: 0 8px; padding: 0 4px; background: #ffffff; border: 1px solid #e3e8f1; border-radius: 0 0 6px 6px">
+<button type="button" title="Previous sheet" aria-label="Previous sheet" style="width: 24px; height: 24px; display: flex; align-items: center; justify-content: center; border: 0; border-radius: 4px; background: transparent; color: #5f6368; cursor: pointer"><dc-import name="Icon" icon="chevron_left" size="14" hint-size="14px,14px"></dc-import></button>
+<button type="button" title="Next sheet" aria-label="Next sheet" style="width: 24px; height: 24px; display: flex; align-items: center; justify-content: center; border: 0; border-radius: 4px; background: transparent; color: #5f6368; cursor: pointer"><dc-import name="Icon" icon="chevron_right" size="14" hint-size="14px,14px"></dc-import></button>
+<button type="button" style="height: 26px; padding: 0 14px; margin-left: 4px; border: 0; border-bottom: 2px solid #3355c4; background: #eef1f7; color: #3355c4; font: inherit; font-size: 12px; font-weight: 600; cursor: pointer">Sales</button>
+<button type="button" style="height: 26px; padding: 0 14px; border: 0; border-bottom: 2px solid transparent; background: transparent; color: #1f1f1f; font: inherit; font-size: 12px; cursor: pointer">Summary</button>
+<button type="button" title="New sheet (Shift+F11)" aria-label="New sheet" style="width: 26px; height: 26px; display: flex; align-items: center; justify-content: center; border: 0; border-radius: 50%; background: transparent; color: #5f6368; cursor: pointer"><dc-import name="Icon" icon="add" size="14" hint-size="14px,14px"></dc-import></button>
+<div style="flex: 1"></div>
+<div style="width: 38%; height: 8px; border-radius: 4px; background: #eef1f7; position: relative" aria-hidden="true"><div style="position: absolute; left: 0; top: 0; width: 30%; height: 8px; border-radius: 4px; background: #cfd6e4"></div></div>
+</div>
+
+<!-- Status bar -->
+<div style="height: 28px; flex: none; display: flex; align-items: center; gap: 16px; padding: 0 14px; font-size: 12px; color: #3c4350">
+<span style="font-weight: 500">Ready</span>
+<span style="display: flex; align-items: center; gap: 6px; color: #1e7e46"><span style="width: 6px; height: 6px; border-radius: 50%; background: #1e7e46"></span>Saved to this device</span>
+<div style="flex: 1"></div>
+<sc-if value="{{hasStats}}" hint-placeholder-val="{{ true }}">
+<span>Average: <b style="font-weight: 600">{{avg}}</b></span>
+<span>Count: <b style="font-weight: 600">{{count}}</b></span>
+<span>Sum: <b style="font-weight: 600">{{sum}}</b></span>
+</sc-if>
+<div style="display: flex; align-items: center; gap: 2px">
+<button type="button" title="Normal" aria-label="Normal view" style="width: 24px; height: 22px; display: flex; align-items: center; justify-content: center; border: 0; border-radius: 4px; background: #dfe5f6; color: #2945a1; cursor: pointer"><dc-import name="Icon" icon="grid" size="14" hint-size="14px,14px"></dc-import></button>
+<button type="button" title="Page Layout" aria-label="Page Layout view" style="width: 24px; height: 22px; display: flex; align-items: center; justify-content: center; border: 0; border-radius: 4px; background: transparent; color: #3c4350; cursor: pointer"><dc-import name="Icon" icon="document_one_page" size="14" hint-size="14px,14px"></dc-import></button>
+<button type="button" title="Page Break Preview" aria-label="Page Break Preview" style="width: 24px; height: 22px; display: flex; align-items: center; justify-content: center; border: 0; border-radius: 4px; background: transparent; color: #3c4350; cursor: pointer"><dc-import name="Icon" icon="document_page_break" size="14" hint-size="14px,14px"></dc-import></button>
+</div>
+<div style="display: flex; align-items: center; gap: 6px">
+<button type="button" title="Zoom out" aria-label="Zoom out" style="width: 22px; height: 22px; display: flex; align-items: center; justify-content: center; border: 0; border-radius: 4px; background: transparent; color: #3c4350; cursor: pointer"><svg width="14" height="14" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true"><path d="M3.5 9.5h13a.5.5 0 0 1 0 1h-13a.5.5 0 0 1 0-1"></path></svg></button>
+<div style="width: 96px; height: 4px; border-radius: 2px; background: #cfd6e4; position: relative" aria-hidden="true"><div style="position: absolute; left: 44px; top: -4px; width: 4px; height: 12px; border-radius: 2px; background: #3c4350"></div></div>
+<button type="button" title="Zoom in" aria-label="Zoom in" style="width: 22px; height: 22px; display: flex; align-items: center; justify-content: center; border: 0; border-radius: 4px; background: transparent; color: #3c4350; cursor: pointer"><dc-import name="Icon" icon="add" size="14" hint-size="14px,14px"></dc-import></button>
+<span style="width: 40px; text-align: right">100%</span>
+</div>
+</div>
+
+<!-- File page (Backstage) -->
+<sc-if value="{{fileOpen}}" hint-placeholder-val="{{ false }}">
+<div style="position: absolute; left: 0; right: 0; top: 0; bottom: 0; display: flex; background: #ffffff; z-index: 4">
+<div style="width: 220px; flex: none; background: #3355c4; color: #ffffff; display: flex; flex-direction: column; padding: 12px 8px; gap: 2px">
+<button type="button" onClick="{{closeFile}}" aria-label="Back to workbook" title="Back (Esc)" style="width: 36px; height: 36px; display: flex; align-items: center; justify-content: center; border: 0; border-radius: 50%; background: rgba(255,255,255,0.14); color: #ffffff; cursor: pointer; margin-bottom: 12px"><dc-import name="Icon" icon="chevron_left" size="18" hint-size="18px,18px"></dc-import></button>
+<sc-for list="{{fileNav}}" as="f" hint-placeholder-count="9">
+<button type="button" onClick="{{f.pick}}" style="height: 36px; display: flex; align-items: center; padding: 0 14px; border: 0; border-radius: 6px; background: {{f.bg}}; color: #ffffff; font: inherit; font-size: 14px; font-weight: {{f.weight}}; text-align: left; cursor: pointer">{{f.name}}</button>
+</sc-for>
+</div>
+<div style="flex: 1; min-width: 0; padding: 32px 48px; overflow: auto">
+<h1 style="margin: 0 0 20px 0; font-size: 26px; font-weight: 600">{{filePage}}</h1>
+<div style="display: flex; flex-wrap: wrap; gap: 16px">
+<sc-for list="{{templates}}" as="tp" hint-placeholder-count="5">
+<div style="width: 168px; display: flex; flex-direction: column; gap: 8px">
+<button type="button" aria-label="{{tp.name}}" style="width: 168px; height: 118px; border: 1px solid #cfd6e4; border-radius: 6px; background: {{tp.bg}}; color: {{tp.fg}}; display: flex; align-items: center; justify-content: center; cursor: pointer"><dc-import name="Icon" icon="{{tp.icon}}" size="40" hint-size="40px,40px"></dc-import></button>
+<span style="font-size: 13px">{{tp.name}}</span>
+</div>
+</sc-for>
+</div>
+<h2 style="margin: 32px 0 12px 0; font-size: 15px; font-weight: 600">Recent</h2>
+<div style="border-top: 1px solid #e3e8f1">
+<sc-for list="{{recent}}" as="rc" hint-placeholder-count="3">
+<div style="height: 44px; display: flex; align-items: center; gap: 12px; border-bottom: 1px solid #e3e8f1; color: #5f6368">
+<span style="color: #3355c4; display: flex"><dc-import name="Icon" icon="table" size="20" hint-size="20px,20px"></dc-import></span>
+<span style="flex: 1">{{rc.name}}</span>
+<span style="font-size: 12px">{{rc.when}}</span>
+</div>
+</sc-for>
+</div>
+</div>
+</div>
+</sc-if>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"layout":{"editor":"enum","options":["classic","simplified"],"default":"classic"},"labels":{"editor":"enum","options":["none","captions","full"],"default":"none"},"collapse":{"editor":"int","default":0,"min":0,"max":5},"startTab":{"editor":"enum","options":["Home","Insert","Page Layout","Formulas","Data","Review","View","Help"],"default":"Home"},"startFile":{"editor":"boolean","default":false},"$preview":{"width":1440,"height":900}}'>
+class Component extends DCLogic {
+constructor(props) {
+super(props);
+this.state = {
+tab: props.startTab || 'Home',
+layout: props.layout || 'classic',
+file: !!props.startFile,
+filePage: 'Home',
+hover: '',
+ar: 2, ac: 1, fr: 6, fc: 4
+};
+}
+B(id, icon, tip, o) {
+const b = Object.assign({ id: id, icon: icon, tip: tip, label: tip.replace(/ \(.*\)$/, ''), dd: false, combo: false, value: '', w: 0 }, o || {});
+return b;
+}
+L(id, icon, tip, o) { return { large: this.B(id, icon, tip, o) }; }
+R(rows, gap) { return { rows: rows, gap: gap || '6px' }; }
+C(id, value, w, tip) { return this.B(id, '', tip, { combo: true, value: value, w: w, dd: true }); }
+ribbon() {
+const B = this.B.bind(this), L = this.L.bind(this), R = this.R.bind(this), C = this.C.bind(this);
+return {
+'Home': [
+{ id: 'clip', caption: 'Clipboard', icon: 'clipboard_paste', launcher: true, cols: [
+L('paste', 'clipboard_paste', 'Paste (Ctrl+V)', { dd: true }),
+R([[B('cut', 'cut', 'Cut (Ctrl+X)')], [B('copy', 'copy', 'Copy (Ctrl+C)', { dd: true })], [B('painter', 'paint_brush', 'Format Painter')]], '0px') ] },
+{ id: 'font', caption: 'Font', icon: 'text_color', launcher: true, cols: [
+R([[C('fontname', 'Carlito', 132, 'Font (Ctrl+Shift+F)'), C('fontsize', '11', 52, 'Font Size'), B('grow', 'font_increase', 'Increase Font Size (Ctrl+Shift+>)'), B('shrink', 'font_decrease', 'Decrease Font Size (Ctrl+Shift+<)')],
+[B('bold', 'text_bold', 'Bold (Ctrl+B)'), B('italic', 'text_italic', 'Italic (Ctrl+I)'), B('underline', 'text_underline', 'Underline (Ctrl+U)', { dd: true }), B('border', 'border_bottom', 'Borders', { dd: true }), B('fill', 'paint_bucket', 'Fill Color', { dd: true }), B('color', 'text_color', 'Font Color', { dd: true })]]) ] },
+{ id: 'align', caption: 'Alignment', icon: 'text_align_left', launcher: true, cols: [
+R([[B('atop', 'align_top', 'Top Align'), B('amid', 'align_center_vertical', 'Middle Align'), B('abot', 'align_bottom', 'Bottom Align'), B('orient', 'text_direction_rotate_270_right', 'Orientation', { dd: true }), B('wrap', 'text_wrap', 'Wrap Text')],
+[B('aleft', 'text_align_left', 'Align Left'), B('acen', 'text_align_center', 'Center'), B('aright', 'text_align_right', 'Align Right'), B('outdent', 'text_indent_decrease', 'Decrease Indent'), B('indent', 'text_indent_increase', 'Increase Indent'), B('merge', 'table_cells_merge', 'Merge & Center', { dd: true })]]) ] },
+{ id: 'number', caption: 'Number', icon: 'percent', launcher: true, cols: [
+R([[C('numfmt', 'General', 150, 'Number Format')],
+[B('acct', 'currency_dollar_euro', 'Accounting Number Format', { dd: true }), B('pct', 'percent', 'Percent Style (Ctrl+Shift+%)'), B('comma', 'comma', 'Comma Style'), B('decup', 'decimal_arrow_right', 'Increase Decimal'), B('decdn', 'decimal_arrow_left', 'Decrease Decimal')]]) ] },
+{ id: 'styles', caption: 'Styles', icon: 'style_guide', cols: [
+L('cf', 'data_bar_horizontal', 'Conditional Formatting', { dd: true }), L('fat', 'table', 'Format as Table', { dd: true }), L('cstyle', 'style_guide', 'Cell Styles', { dd: true }) ] },
+{ id: 'cells', caption: 'Cells', icon: 'table_insert_row', cols: [
+L('ins', 'table_insert_row', 'Insert', { dd: true }), L('del', 'table_delete_row', 'Delete', { dd: true }), L('fmt', 'table_settings', 'Format', { dd: true }) ] },
+{ id: 'editing', caption: 'Editing', icon: 'search', cols: [
+R([[B('sum', 'autosum', 'AutoSum (Alt+=)', { dd: true })], [B('filldn', 'arrow_down', 'Fill', { dd: true })], [B('clear', 'eraser', 'Clear', { dd: true })]], '0px'),
+L('sortf', 'arrow_sort_down_lines', 'Sort & Filter', { dd: true }), L('find', 'search', 'Find & Select (Ctrl+F)', { dd: true }) ] }
+],
+'Insert': [
+{ id: 'tables', caption: 'Tables', cols: [L('pivot', 'table_lightning', 'PivotTable'), L('itable', 'table', 'Table (Ctrl+T)')] },
+{ id: 'illus', caption: 'Illustrations', cols: [L('pic', 'image', 'Pictures', { dd: true }), L('shape', 'shapes', 'Shapes', { dd: true })] },
+{ id: 'charts', caption: 'Charts', launcher: true, cols: [R([[B('ccol', 'data_bar_vertical', 'Column or Bar Chart', { dd: true }), B('cline', 'data_line', 'Line or Area Chart', { dd: true })], [B('cpie', 'data_pie', 'Pie or Doughnut Chart', { dd: true }), B('cscat', 'data_scatter', 'Scatter Chart', { dd: true })]])] },
+{ id: 'links', caption: 'Links', cols: [L('ilink', 'link', 'Link (Ctrl+K)')] },
+{ id: 'comments', caption: 'Comments', cols: [L('icom', 'comment_add', 'Comment')] },
+{ id: 'text', caption: 'Text', cols: [L('tbox', 'textbox', 'Text Box')] }
+],
+'Page Layout': [
+{ id: 'themes', caption: 'Themes', cols: [L('theme', 'style_guide', 'Themes', { dd: true })] },
+{ id: 'setup', caption: 'Page Setup', launcher: true, cols: [L('margins', 'document_one_page', 'Margins', { dd: true }), L('orient2', 'text_direction_rotate_270_right', 'Orientation', { dd: true }), L('breaks', 'document_page_break', 'Breaks', { dd: true }), L('parea', 'table', 'Print Area', { dd: true })] },
+{ id: 'fit', caption: 'Scale to Fit', launcher: true, cols: [R([[C('fitw', 'Width: Automatic', 150, 'Width')], [C('fith', 'Height: Automatic', 150, 'Height')], [C('fits', 'Scale: 100%', 150, 'Scale')]], '0px')] },
+{ id: 'sheetopt', caption: 'Sheet Options', launcher: true, cols: [R([[B('gl', 'grid', 'Gridlines: View'), B('glp', 'document_one_page', 'Gridlines: Print')], [B('hd', 'table', 'Headings: View'), B('hdp', 'document_one_page', 'Headings: Print')]])] }
+],
+'Formulas': [
+{ id: 'flib', caption: 'Function Library', cols: [L('fx', 'math_formula', 'Insert Function (Shift+F3)'), L('fsum', 'autosum', 'AutoSum (Alt+=)', { dd: true }), L('flibrary', 'book_open', 'Function Library', { dd: true })] },
+{ id: 'names', caption: 'Defined Names', cols: [L('nm', 'table_settings', 'Name Manager (Ctrl+F3)'), R([[B('dn', 'add', 'Define Name', { dd: true })], [B('uf', 'math_formula', 'Use in Formula', { dd: true })]])] },
+{ id: 'audit', caption: 'Formula Auditing', cols: [R([[B('showf', 'eye', 'Show Formulas (Ctrl+`)')], [B('errc', 'checkmark', 'Error Checking', { dd: true })]])] },
+{ id: 'calc', caption: 'Calculation', cols: [L('copt', 'calculator', 'Calculation Options', { dd: true }), R([[B('cnow', 'arrow_redo', 'Calculate Now (F9)')]])] }
+],
+'Data': [
+{ id: 'get', caption: 'Get & Transform Data', cols: [L('getd', 'arrow_down', 'Get Data', { dd: true })] },
+{ id: 'queries', caption: 'Queries & Connections', cols: [L('refresh', 'arrow_redo', 'Refresh All (Ctrl+Alt+F5)', { dd: true })] },
+{ id: 'sortfilter', caption: 'Sort & Filter', cols: [L('dsort', 'arrow_sort_down_lines', 'Sort'), L('dfilter', 'filter', 'Filter (Ctrl+Shift+L)')] },
+{ id: 'tools', caption: 'Data Tools', cols: [R([[B('t2c', 'table_insert_column', 'Text to Columns')], [B('dedup', 'table_delete_row', 'Remove Duplicates')], [B('valid', 'checkmark', 'Data Validation', { dd: true })]], '0px')] },
+{ id: 'outline', caption: 'Outline', launcher: true, cols: [L('grp', 'table_cells_merge', 'Group', { dd: true })] }
+],
+'Review': [
+{ id: 'proof', caption: 'Proofing', cols: [L('spell', 'checkmark', 'Spelling (F7)')] },
+{ id: 'rcom', caption: 'Comments', cols: [L('newc', 'comment_add', 'New Comment'), L('showc', 'comment', 'Show Comments')] },
+{ id: 'protect', caption: 'Protect', cols: [L('psheet', 'lock_closed', 'Protect Sheet'), L('pbook', 'lock_closed', 'Protect Workbook')] }
+],
+'View': [
+{ id: 'views', caption: 'Workbook Views', cols: [L('vnorm', 'grid', 'Normal'), L('vpage', 'document_one_page', 'Page Layout'), L('vbreak', 'document_page_break', 'Page Break Preview')] },
+{ id: 'show', caption: 'Show', cols: [R([[B('sgrid', 'grid', 'Gridlines')], [B('shead', 'table', 'Headings')], [B('sfbar', 'math_formula', 'Formula Bar')]], '0px')] },
+{ id: 'zoom', caption: 'Zoom', cols: [L('zoom', 'search', 'Zoom'), L('zsel', 'eye', 'Zoom to Selection')] },
+{ id: 'window', caption: 'Window', cols: [L('freeze', 'table_freeze_column_and_row', 'Freeze Panes', { dd: true })] }
+],
+'Help': [
+{ id: 'help', caption: 'Help', cols: [L('helpc', 'book_open', 'Help (F1)'), L('fb', 'comment', 'Feedback')] }
+]
+};
+}
+fmt(v) { return typeof v === 'number' ? v.toLocaleString('en-US') : (v || ''); }
+sheet() {
+const regions = [['North', 12400, 13150, 14020, 15300], ['South', 9800, 10240, 9950, 11600], ['East', 15200, 14880, 16430, 17050], ['West', 7600, 8120, 8900, 9450], ['Central', 11300, 11900, 12250, 13100]];
+const g = {};
+const put = (r, c, v, f, o) => { g[r + ',' + c] = Object.assign({ v: v, f: f || null }, o || {}); };
+put(0, 0, 'Quarterly sales by region', null, { bold: true, fs: '15px' });
+['Region', 'Q1', 'Q2', 'Q3', 'Q4', 'Total'].forEach((h, c) => put(1, c, h, null, { bold: true, head: true }));
+const L = 'ABCDEF';
+regions.forEach((row, i) => {
+const r = i + 2;
+put(r, 0, row[0]);
+for (let c = 1; c <= 4; c++) put(r, c, row[c]);
+put(r, 5, row[1] + row[2] + row[3] + row[4], '=SUM(B' + (r + 1) + ':E' + (r + 1) + ')');
+});
+put(7, 0, 'Total', null, { bold: true, total: true });
+for (let c = 1; c <= 5; c++) {
+let s = 0; for (let r = 2; r <= 6; r++) s += g[r + ',' + c].v;
+put(7, c, s, '=SUM(' + L[c] + '3:' + L[c] + '7)', { bold: true, total: true });
+}
+return g;
+}
+renderVals() {
+const st = this.state;
+const labels = this.props.labels || 'none';
+const showLabel = labels === 'full';
+const showCaption = labels !== 'none';
+const collapse = this.props.collapse ?? 0;
+const hover = st.hover;
+const self = this;
+const deco = (b) => {
+const bg = hover === b.id ? '#eef1f7' : 'transparent';
+return Object.assign({}, b, {
+bg: b.combo ? '#ffffff' : bg,
+border: b.combo ? '1px solid #cfd6e4' : '0',
+justify: b.combo ? 'space-between' : 'center',
+minW: b.combo ? b.w + 'px' : (b.dd ? '36px' : '28px'),
+minWS: b.combo ? b.w + 'px' : (b.dd ? '40px' : '32px'),
+padX: b.combo ? '8px' : '4px',
+isCombo: b.combo,
+hasIcon: !b.combo && !!b.icon,
+showLabel: showLabel,
+click: () => {},
+enter: () => self.setState({ hover: b.id }),
+leave: () => self.setState({ hover: '' })
+});
+};
+const all = this.ribbon();
+const order = ['styles', 'cells', 'editing', 'number', 'align'];
+const folded = st.tab === 'Home' ? order.slice(0, collapse) : [];
+const groups = (all[st.tab] || []).map((g) => {
+const isFolded = folded.indexOf(g.id) >= 0;
+const cols = isFolded
+? [{ isLarge: true, isRows: false, b: deco(this.B('fold-' + g.id, g.icon, g.caption, { dd: true })) }]
+: g.cols.map((c) => c.large
+? { isLarge: true, isRows: false, b: deco(c.large) }
+: { isLarge: false, isRows: true, gap: c.gap, rows: c.rows.map((r) => ({ btns: r.map(deco) })) });
+const flat = [];
+g.cols.forEach((c) => { if (c.large) flat.push(deco(c.large)); else c.rows.forEach((r) => r.forEach((b) => flat.push(deco(b)))); });
+return { caption: g.caption, launcher: !!g.launcher, showCaption: showCaption, cols: cols, flat: flat };
+});
+const tabNames = ['Home', 'Insert', 'Page Layout', 'Formulas', 'Data', 'Review', 'View', 'Help'];
+const tabs = tabNames.map((n) => ({
+name: n, on: n === st.tab,
+line: n === st.tab ? '#3355c4' : 'transparent',
+color: n === st.tab ? '#3355c4' : '#1f1f1f',
+weight: n === st.tab ? '600' : '400',
+pick: () => self.setState({ tab: n })
+}));
+// grid
+const g = this.sheet();
+const widths = [180, 88, 88, 88, 88, 96, 88, 88, 88, 88, 88, 88, 88, 88, 88, 88];
+const letters = 'ABCDEFGHIJKLMNOP';
+const r0 = Math.min(st.ar, st.fr), r1 = Math.max(st.ar, st.fr), c0 = Math.min(st.ac, st.fc), c1 = Math.max(st.ac, st.fc);
+const ACC = '#3355c4';
+const colHeads = widths.map((w, c) => {
+const on = c >= c0 && c <= c1;
+return { name: letters[c], w: w + 'px', bg: on ? '#dfe5f6' : 'transparent', color: on ? '#2945a1' : '#5f6368', weight: on ? '600' : '400', shadow: on ? 'inset 0 -2px 0 ' + ACC : 'none' };
+});
+const rows = [];
+for (let r = 0; r < 34; r++) {
+const ron = r >= r0 && r <= r1;
+const cells = widths.map((w, c) => {
+const k = g[r + ',' + c];
+const inR = ron && c >= c0 && c <= c1;
+const active = r === st.ar && c === st.ac;
+const sh = [];
+if (active) sh.push('inset 0 0 0 2px ' + ACC);
+else if (inR) {
+if (r === r0) sh.push('inset 0 2px 0 ' + ACC);
+if (r === r1) sh.push('inset 0 -2px 0 ' + ACC);
+if (c === c0) sh.push('inset 2px 0 0 ' + ACC);
+if (c === c1) sh.push('inset -2px 0 0 ' + ACC);
+}
+const isNum = k && typeof k.v === 'number';
+let bg = '#ffffff';
+if (k && k.head) bg = '#eef1f7';
+if (inR && !active) bg = 'rgba(51,85,196,0.10)';
+return {
+w: w + 'px',
+text: k ? this.fmt(k.v) : '',
+align: isNum ? 'flex-end' : 'flex-start',
+weight: k && k.bold ? '600' : '400',
+fs: k && k.fs ? k.fs : '13px',
+bg: bg,
+bottom: k && k.head ? '1px solid #9aa6b4' : '1px solid #e3e8f1',
+shadow: sh.length ? sh.join(', ') : 'none',
+pick: (e) => {
+if (e && e.shiftKey) self.setState({ fr: r, fc: c });
+else self.setState({ ar: r, ac: c, fr: r, fc: c });
+}
+};
+});
+rows.push({ n: String(r + 1), cells: cells, bg: ron ? '#dfe5f6' : '#f6f8fb', color: ron ? '#2945a1' : '#5f6368', weight: ron ? '600' : '400', shadow: ron ? 'inset -2px 0 0 ' + ACC : 'none' });
+}
+const act = g[st.ar + ',' + st.ac];
+let sum = 0, cnt = 0, nums = 0;
+for (let r = r0; r <= r1; r++) for (let c = c0; c <= c1; c++) {
+const k = g[r + ',' + c];
+if (k && k.v !== '' && k.v != null) { cnt++; if (typeof k.v === 'number') { sum += k.v; nums++; } }
+}
+const multi = r0 !== r1 || c0 !== c1;
+const fileNames = ['Home', 'New', 'Open', 'Info', 'Save As', 'Print', 'Share', 'Export', 'Options'];
+const fileNav = fileNames.map((n) => ({ name: n, bg: n === st.filePage ? 'rgba(255,255,255,0.18)' : 'transparent', weight: n === st.filePage ? '600' : '400', pick: () => self.setState({ filePage: n }) }));
+const classic = st.layout === 'classic';
+return {
+tabs: tabs,
+groups: groups,
+classic: classic,
+simplified: !classic,
+bodyH: showCaption ? '96px' : '78px',
+caretRot: classic ? '180deg' : '0deg',
+layoutTip: classic ? 'Switch to Simplified ribbon' : 'Switch to Classic ribbon',
+toggleLayout: () => self.setState({ layout: classic ? 'simplified' : 'classic' }),
+colHeads: colHeads,
+rows: rows,
+nameBox: letters[st.ac] + (st.ar + 1),
+formula: act ? (act.f || this.fmt(act.v)) : '',
+hasStats: multi && nums > 0,
+avg: nums ? Math.round(sum / nums).toLocaleString('en-US') : '',
+count: String(cnt),
+sum: sum.toLocaleString('en-US'),
+fileOpen: st.file,
+openFile: () => self.setState({ file: true }),
+closeFile: () => self.setState({ file: false }),
+fileNav: fileNav,
+filePage: st.filePage === 'Home' ? 'New' : st.filePage,
+templates: [
+{ name: 'Blank workbook', icon: 'grid', bg: '#ffffff', fg: '#3355c4' },
+{ name: 'Monthly budget', icon: 'calculator', bg: '#f6f8fb', fg: '#5f6368' },
+{ name: 'Invoice', icon: 'document_one_page', bg: '#f6f8fb', fg: '#5f6368' },
+{ name: 'Project schedule', icon: 'table', bg: '#f6f8fb', fg: '#5f6368' },
+{ name: 'Sales report', icon: 'data_bar_vertical', bg: '#f6f8fb', fg: '#5f6368' }
+],
+recent: [
+{ name: '[Recent workbooks appear here]', when: '' },
+{ name: '[Pinned and shared files]', when: '' }
+]
+};
+}
+}
+</script>
+</body>
+</html>

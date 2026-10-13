@@ -13,8 +13,8 @@ async function boot(page) {
   const problems = [];
   page.on("console", (m) => { if (m.type() === "error") problems.push(m.text()); });
   page.on("pageerror", (e) => problems.push(e.message));
-  await page.goto("/editor.html");
-  await expect(page.locator("#tb-status")).toHaveText(/^engine v\d/, { timeout: 30_000 });
+  await page.goto("/editor.html?sample=demo");
+  await expect(page.locator("#tb-status")).toHaveAttribute("data-engine", /^\d/, { timeout: 30_000 });
   return problems;
 }
 
@@ -255,7 +255,7 @@ test("the header menu's Column width… reaches the dialog", async ({ page }) =>
 
   await expect(openModal(page)).toBeVisible();
   expect(await nativeDialogs(page), "the menu still opens a native dialog").toEqual([]);
-  await expect(page.locator("#oc-modal-title")).toHaveText(/^Resize column B$/);
+  await expect(page.locator("#oc-modal-title")).toHaveText(/^Column Width$/);
 });
 
 // Enter is the OK button, but only until somebody tabs off it: a dialog that
@@ -268,9 +268,13 @@ test("Enter on a focused Cancel cancels, and changes nothing", async ({ page }) 
   await expect(openModal(page)).toBeVisible();
   await page.locator("#oc-size-px").fill("400");
 
+  // Excel's order: the action first, then Cancel (UX-SHELL-18).
   await page.keyboard.press("Tab");
   expect(await page.evaluate(() => (document.activeElement.textContent || "").trim()),
-    "Tab from the field does not reach Cancel").toBe("Cancel");
+    "Tab from the field does not reach OK").toBe("OK");
+  await page.keyboard.press("Tab");
+  expect(await page.evaluate(() => (document.activeElement.textContent || "").trim()),
+    "the next Tab does not reach Cancel").toBe("Cancel");
   await page.keyboard.press("Enter");
 
   await expect(openModal(page)).toHaveCount(0);

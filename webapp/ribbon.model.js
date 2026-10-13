@@ -1,79 +1,204 @@
-/// The ribbon's tab, group and control assignment — `docs/91` §3, machine-read.
+/// The ribbon, as data — UX-SHELL-07.
 ///
-/// **Generated from the design note rather than transcribed from it.** §3 is
-/// eight tables, and a hand-copy of that is a hundred-odd chances to put Merge
-/// & Center in the wrong group. The note is the source; this is its projection.
-/// When §3 changes, regenerate — do not hand-edit.
+/// Mirrors the owner-approved prototype (`docs/prototypes/excel-shell-2026/
+/// Main.dc.html`, docs/95): Excel's tabs, Excel's groups in Excel's order, and
+/// within a group Excel's arrangement of large buttons and three-row stacks.
 ///
-/// **One control per verb, and each verb in one place.** Two rules the first
-/// generation got wrong, both visible immediately:
+/// Every id names a command the registry (`commands.js`) can run. A verb Excel
+/// has and this build does not — Pictures, Shapes, Text Box — is left out
+/// rather than drawn dead: a disabled button that never enables advertises an
+/// absence on every screen (docs/91 §8).
 ///
-///  - §3.0 R3 lists an *alias* beside the owning id on some rows —
-///    `toolbar.bold (+ format.bold alias)` — meaning one verb reached by two
-///    names. Emitting both drew two Bolds, two Italics and two Underlines side
-///    by side, at different stroke weights, because one was the toolbar's own
-///    artwork and the other the sprite's. A row yields more than one control
-///    only when its *name* says so: "Increase / Decrease Font Size" is a pair,
-///    "Bold" is not.
-///  - A handful of ids appear in two tables. First placement wins, so a command
-///    has exactly one home and `listCommands()` cannot double-count it.
-///
-/// Only rows the note marks `live` are here. A `gap` — Excel has it, this build
-/// does not — is deliberately absent rather than drawn disabled: §8 refuses a
-/// permanently-dead control, because 150 of them advertise absence in 150
-/// places on every screen.
-///
-/// `size` is the note's L/M/S. `ord` is its authored collapse order, lowest
-/// first — §3.0 R6 is explicit that the order is authored and never measured.
+/// Shapes:
+///   L(id, icon, label, {menu?, launcher?})  a large button: 24px icon, 72px column
+///   S(id, icon, label, {menu?})             a small button: 16px icon, 24px row
+///   C(id, width, label)                     a combo (font, size, number format)
+///   R([[S…], [S…], …])                      a column of up to three rows
+/// `menu` is a list of command ids the button drops. A toolbar control that
+/// already owns a popup (borders, colours, merge) is marked `popup: true` and
+/// opens that popup under the ribbon button instead.
+/// `fold` on a group is its collapse rank — lowest folds first (Excel folds
+/// Styles, Cells, Editing before it touches Font or Clipboard).
 
-export const ASSIGN = [
-  { id: "home", label: "Home", groups: [
-    { label: "Clipboard", ord: 6, items: [["edit.paste", "large"], "edit.paste-special", "edit.paste-values", ["edit.cut", "med"], ["edit.copy", "med"], ["toolbar.painter", "med"]] },
-    { label: "Font", ord: 9, items: [["toolbar.font", "med"], ["toolbar.size", "med"], "toolbar.size-up", "toolbar.size-down", "toolbar.bold", "toolbar.italic", "toolbar.underline", "toolbar.strike", "format.superscript", "format.subscript", "toolbar.border", "toolbar.fillcolor", "toolbar.fontcolor", "format.format-cells"] },
-    { label: "Alignment", ord: 8, items: ["format.alignment.top", "format.alignment.justify-vertical", "toolbar.rotate", "toolbar.wrap", "format.alignment.left", "format.alignment.fill-repeat-text", "toolbar.indent-less", "toolbar.indent-more", "toolbar.merge"] },
-    { label: "Number", ord: 7, items: [["toolbar.numfmt", "med"], "toolbar.currency", "toolbar.percent", "toolbar.comma", "toolbar.inc-dec", "toolbar.dec-dec"] },
-    { label: "Styles", ord: 5, items: [["format.conditional-formatting", "large"], "format.conditional-formatting-rules", ["home.styles.format-as-table", "large"], ["format.cell-styles", "large"]] },
-    { label: "Cells", ord: 4, items: [["insert.rows-above", "large"], "insert.cells", "insert.rows-below", "insert.sheet", ["insert.delete-rows", "large"], "insert.delete-cells", "toolbar.delete-sheet", ["home.cells.format", "large"], "format.row-height", "format.column-width", "format.autofit-row", "format.autofit-column", "data.hide-rows", "data.hide-columns", "data.unhide-rows-columns-in-selection", "data.unhide-all-rows-and-columns", "sheet.rename"] },
-    { label: "Editing", ord: 99, items: ["formulas.insert-function", ["edit.fill", "med"], "edit.fill.fill-down", "edit.fill.fill-series", ["edit.clear", "med"], "edit.clear.all", ["data.sort-range", "large"], "toolbar.filter", "data.clear-all-filters", ["edit.find-replace", "large"], "edit.replace", "edit.go-to", "edit.select-all", "edit.select-commented"] },
+const L = (id, icon, label, o = {}) => ({ kind: "large", id, icon, label, ...o });
+const S = (id, icon, label, o = {}) => ({ kind: "small", id, icon, label, ...o });
+const C = (id, width, label) => ({ kind: "combo", id, width, label });
+const R = (rows) => ({ kind: "rows", rows });
+
+const PASTE = ["edit.paste", "edit.paste-values", "edit.paste-formulas", "edit.paste-formats", "edit.paste-transpose", "edit.paste-special"];
+
+export const TABS = [
+  { id: "home", label: "Home", key: "H", groups: [
+    { label: "Clipboard", fold: 6, launcher: "edit.paste-special", icon: "clipboard_paste", items: [
+      L("edit.paste", "clipboard_paste", "Paste (Ctrl+V)", { menu: PASTE }),
+      R([[S("edit.cut", "cut", "Cut (Ctrl+X)")], [S("edit.copy", "copy", "Copy (Ctrl+C)")], [S("toolbar.painter", "paint_brush", "Format Painter")]]),
+    ] },
+    { label: "Font", fold: 9, launcher: "format.format-cells", icon: "text_color", items: [
+      R([
+        [C("toolbar.font", 132, "Font"), C("toolbar.size", 52, "Font Size"), S("toolbar.size-up", "font_increase", "Increase Font Size (Ctrl+Shift+>)"), S("toolbar.size-down", "font_decrease", "Decrease Font Size (Ctrl+Shift+<)")],
+        [S("toolbar.bold", "text_bold", "Bold (Ctrl+B)"), S("toolbar.italic", "text_italic", "Italic (Ctrl+I)"), S("toolbar.underline", "text_underline", "Underline (Ctrl+U)"), S("toolbar.strike", "text_strikethrough", "Strikethrough (Ctrl+5)"),
+         S("toolbar.border", "border_bottom", "Borders", { popup: true }), S("toolbar.fillcolor", "paint_bucket", "Fill Color", { popup: true }), S("toolbar.fontcolor", "text_color", "Font Color", { popup: true })],
+      ]),
+    ] },
+    { label: "Alignment", fold: 8, launcher: "format.format-cells", icon: "text_align_left", items: [
+      R([
+        [S("format.alignment.top", "align_top", "Top Align"), S("format.alignment.middle", "align_center_vertical", "Middle Align"), S("format.alignment.bottom", "align_bottom", "Bottom Align"),
+         S("toolbar.rotate", "text_direction_rotate_270_right", "Orientation", { popup: true }), S("format.text-overflow.wrap", "text_wrap", "Wrap Text")],
+        [S("format.alignment.left", "text_align_left", "Align Left"), S("format.alignment.center", "text_align_center", "Center"), S("format.alignment.right", "text_align_right", "Align Right"),
+         S("toolbar.indent-less", "text_indent_decrease", "Decrease Indent"), S("toolbar.indent-more", "text_indent_increase", "Increase Indent"), S("toolbar.merge", "table_cells_merge", "Merge & Center", { popup: true })],
+      ]),
+    ] },
+    { label: "Number", fold: 7, launcher: "format.format-cells", icon: "percent", items: [
+      R([
+        [C("toolbar.numfmt", 150, "Number Format")],
+        [S("toolbar.currency", "currency_dollar_euro", "Currency Format"), S("toolbar.percent", "percent", "Percent Style (Ctrl+Shift+%)"), S("toolbar.comma", "comma", "Comma Style"),
+         S("toolbar.inc-dec", "decimal_arrow_right", "Increase Decimal"), S("toolbar.dec-dec", "decimal_arrow_left", "Decrease Decimal")],
+      ]),
+    ] },
+    { label: "Styles", fold: 1, icon: "style_guide", items: [
+      L("format.conditional-formatting", "data_bar_horizontal", "Conditional Formatting", { menu: ["format.conditional-formatting", "format.conditional-formatting-rules"] }),
+      L("insert.table", "table", "Format as Table (Ctrl+T)"),
+      L("format.cell-styles", "style_guide", "Cell Styles"),
+    ] },
+    { label: "Cells", fold: 2, icon: "table_insert_row", items: [
+      L("cells.insert", "table_insert_row", "Insert", { menu: ["insert.rows-above", "insert.rows-below", "insert.columns-left", "insert.columns-right", "insert.cells-down", "insert.cells-right", "insert.sheet"] }),
+      L("cells.delete", "table_delete_row", "Delete", { menu: ["insert.delete-rows", "insert.delete-columns", "insert.delete-cells-up", "insert.delete-cells-left", "toolbar.delete-sheet"] }),
+      L("cells.format", "table_settings", "Format", { menu: ["format.row-height", "format.autofit-row", "format.column-width", "format.autofit-column", "data.hide-rows", "data.hide-columns", "data.unhide-rows-columns-in-selection", "sheet.rename", "format.protection.protect-this-sheet", "format.format-cells"] }),
+    ] },
+    { label: "Editing", fold: 3, icon: "search", items: [
+      R([
+        [S("formulas.autosum", "autosum", "AutoSum (Alt+=)", { menu: ["formulas.autosum", "formulas.insert-function"] })],
+        [S("edit.fill", "arrow_down", "Fill", { menu: ["edit.fill.fill-down", "edit.fill.fill-right", "edit.fill.fill-series", "edit.fill.growth-series", "edit.fill.copy-cells", "edit.fill.formatting-only", "edit.fill.without-formatting"] })],
+        [S("edit.clear", "eraser", "Clear", { menu: ["edit.clear.all", "edit.clear.formatting", "edit.clear.values"] })],
+      ]),
+      L("data.sort-range", "arrow_sort_down_lines", "Sort & Filter", { menu: ["data.sort-range.a-z", "data.sort-range.z-a", "data.sort-range.custom-sort", "data.filter", "data.clear-all-filters"] }),
+      L("edit.find-replace", "search", "Find & Select", { menu: ["edit.find-replace", "edit.replace", "edit.go-to", "edit.select-all"] }),
+    ] },
   ] },
-  { id: "insert", label: "Insert", groups: [
-    { label: "Tables", ord: 11, items: [["insert.pivottable", "large"], "data.pivottable-fields", ["insert.table", "large"], "table.convert-to-range"] },
-    { label: "Charts", ord: 99, items: ["insert.chart.column", "insert.chart.bar", "insert.chart.line", "insert.chart.area", "insert.chart.pie", "insert.chart.doughnut", "insert.chart.scatter"] },
-    { label: "Links", ord: 9, items: [["insert.hyperlink", "large"], "insert.hyperlink.edit"] },
-    { label: "Comments", ord: 8, items: [["insert.note", "large"], "insert.note.show"] },
+  { id: "insert", label: "Insert", key: "N", groups: [
+    { label: "Tables", fold: 4, icon: "table", items: [
+      L("insert.pivottable", "table_lightning", "PivotTable"),
+      L("insert.table", "table", "Table (Ctrl+T)"),
+    ] },
+    { label: "Charts", fold: 5, icon: "data_bar_vertical", items: [
+      R([
+        [S("insert.chart.column", "data_bar_vertical", "Column or Bar Chart", { menu: ["insert.chart.column", "insert.chart.bar"] }), S("insert.chart.line", "data_line", "Line or Area Chart", { menu: ["insert.chart.line", "insert.chart.area"] })],
+        [S("insert.chart.pie", "data_pie", "Pie or Doughnut Chart", { menu: ["insert.chart.pie", "insert.chart.doughnut"] }), S("insert.chart.scatter", "data_scatter", "Scatter Chart")],
+      ]),
+    ] },
+    { label: "Links", fold: 3, icon: "link", items: [L("insert.hyperlink", "link", "Link (Ctrl+K)")] },
+    { label: "Comments", fold: 2, icon: "comment_add", items: [L("insert.note", "comment_add", "Note")] },
   ] },
-  { id: "pagelayout", label: "Page Layout", groups: [
-    { label: "Page Setup", ord: 99, items: [["file.page-break-here", "large"], ["file.page-setup", "large"]] },
-    { label: "Sheet Options", ord: 4, items: ["view.gridlines", "view.cell-markings"] },
+  { id: "pagelayout", label: "Page Layout", key: "P", groups: [
+    { label: "Page Setup", fold: 4, icon: "document_one_page", items: [
+      L("file.page-setup", "document_one_page", "Page Setup"),
+      L("file.page-break-here", "document_page_break", "Insert Page Break"),
+      L("file.print", "print", "Print (Ctrl+P)"),
+    ] },
+    { label: "Sheet Options", fold: 3, icon: "grid", items: [
+      R([[S("view.gridlines", "grid", "Gridlines")], [S("view.cell-markings", "table", "Headings")]]),
+    ] },
   ] },
-  { id: "formulas", label: "Formulas", groups: [
-    { label: "Defined Names", ord: 4, items: [["tools.name-manager", "large"], ["formulas.define-name", "med"], ["name-box-list", "med"]] },
-    { label: "Formula Auditing", ord: 5, items: [["format.trace.trace-precedents", "med"], ["view.formulas-instead-of-results", "med"]] },
-    { label: "Calculation", ord: 3, items: [["tools.calculation", "large"], "tools.calculation.automatic", ["tools.calculation.calculate-now", "med"]] },
+  { id: "formulas", label: "Formulas", key: "M", groups: [
+    { label: "Function Library", fold: 5, icon: "math_formula", items: [
+      L("formulas.insert-function", "math_formula", "Insert Function (Shift+F3)"),
+      L("formulas.autosum", "autosum", "AutoSum (Alt+=)"),
+    ] },
+    { label: "Defined Names", fold: 4, icon: "table_settings", items: [
+      L("tools.name-manager", "table_settings", "Name Manager (Ctrl+F3)"),
+      R([[S("formulas.define-name", "add", "Define Name")]]),
+    ] },
+    { label: "Formula Auditing", fold: 3, icon: "eye", items: [
+      R([
+        [S("format.trace.trace-precedents", "arrow_import", "Trace Precedents")],
+        [S("format.trace.trace-dependents", "arrow_export", "Trace Dependents")],
+        [S("format.trace.clear-trace-arrows", "eraser", "Remove Arrows"), S("view.formulas-instead-of-results", "eye", "Show Formulas (Ctrl+`)")],
+      ]),
+    ] },
+    { label: "Calculation", fold: 2, icon: "calculator", items: [
+      L("tools.calculation", "calculator", "Calculation Options", { menu: ["tools.calculation.automatic", "tools.calculation.manual"] }),
+      R([[S("tools.calculation.calculate-now", "arrow_clockwise", "Calculate Now (F9)")]]),
+    ] },
   ] },
-  { id: "data", label: "Data", groups: [
-    { label: "Queries & Connections", ord: 1, items: [["data.refresh-all-pivots", "large"]] },
-    { label: "Sort & Filter", ord: 8, items: ["data.sort-range.a-z", ["data.sort-range.custom-sort", "large"]] },
-    { label: "Data Tools", ord: 7, items: [["data.text-to-columns", "med"], ["data.convert-text-to-numbers", "med"], ["data.remove-duplicates", "med"], ["data.data-validation", "med"]] },
-    { label: "Outline", ord: 6, items: [["data.group.group-rows", "large"], "data.group.group-columns", ["data.group.ungroup-rows", "large"], "data.group.ungroup-columns", "data.group.expand-all", "data.group.show-level-1"] },
-    { label: "Analysis", ord: 5, items: [["data.column-stats", "large"]] },
+  { id: "data", label: "Data", key: "A", groups: [
+    { label: "Queries & Connections", fold: 2, icon: "arrow_clockwise", items: [L("data.refresh-all-pivots", "arrow_clockwise", "Refresh All")] },
+    { label: "Sort & Filter", fold: 6, icon: "filter", items: [
+      R([[S("data.sort-range.a-z", "text_sort_ascending", "Sort A to Z")], [S("data.sort-range.z-a", "text_sort_descending", "Sort Z to A")]]),
+      L("data.sort-range.custom-sort", "arrow_sort_down_lines", "Sort"),
+      L("data.filter", "filter", "Filter (Ctrl+Shift+L)"),
+      R([[S("data.clear-all-filters", "filter_dismiss", "Clear")]]),
+    ] },
+    { label: "Data Tools", fold: 5, icon: "table_insert_column", items: [
+      R([
+        [S("data.text-to-columns", "table_insert_column", "Text to Columns")],
+        [S("data.remove-duplicates", "table_delete_row", "Remove Duplicates")],
+        [S("data.data-validation", "checkmark", "Data Validation"), S("data.convert-text-to-numbers", "number_symbol", "Convert Text to Numbers")],
+      ]),
+    ] },
+    { label: "Outline", fold: 4, icon: "table_cells_merge", items: [
+      L("data.group", "table_cells_merge", "Group", { menu: ["data.group.group-rows", "data.group.group-columns"] }),
+      L("data.ungroup", "table_delete_row", "Ungroup", { menu: ["data.group.ungroup-rows", "data.group.ungroup-columns"] }),
+      R([[S("data.group.expand-all", "add", "Show Detail")], [S("data.group.collapse-all", "subtract", "Hide Detail")]]),
+    ] },
+    { label: "Analysis", fold: 3, icon: "data_bar_vertical", items: [L("data.column-stats", "data_bar_vertical", "Column Statistics")] },
   ] },
-  { id: "review", label: "Review", groups: [
-    { label: "Language", ord: 99, items: [["review.language", "med"]] },
-    { label: "Protect", ord: 7, items: [["format.protection.protect-this-sheet", "large"], ["format.protection.locked", "large"], ["format.protection.hide-formula", "large"]] },
+  { id: "review", label: "Review", key: "R", groups: [
+    { label: "Notes", fold: 3, icon: "comment_add", items: [L("insert.note", "comment_add", "New Note")] },
+    { label: "Protect", fold: 4, icon: "lock_closed", items: [
+      L("format.protection.protect-this-sheet", "lock_closed", "Protect Sheet"),
+      R([[S("format.protection.locked", "lock_closed", "Lock Cell")], [S("format.protection.hide-formula", "eye", "Hide Formula")]]),
+    ] },
   ] },
-  { id: "view", label: "View", groups: [
-    { label: "Sheet View", ord: 3, items: [["data.clear-my-view", "med"]] },
-    { label: "Show", ord: 5, items: ["view.zero-values"] },
-    { label: "Zoom", ord: 6, items: [["view.zoom", "large"], "view.zoom.50", ["view.zoom.100", "large"]] },
-    { label: "Window", ord: 7, items: [["view.freeze", "med"], "view.freeze.up-to-selection"] },
-    { label: "Collaboration", ord: 2, items: [["file.version-history", "large"]] },
+  { id: "view", label: "View", key: "W", groups: [
+    { label: "Sheet View", fold: 2, icon: "eye", items: [L("data.clear-my-view", "eye", "Exit Sheet View")] },
+    { label: "Show", fold: 3, icon: "grid", items: [
+      R([[S("view.gridlines", "grid", "Gridlines")], [S("view.cell-markings", "table", "Headings")], [S("view.zero-values", "number_symbol", "Zero Values")]]),
+    ] },
+    { label: "Zoom", fold: 5, icon: "zoom_in", items: [
+      L("view.zoom", "zoom_in", "Zoom", { menu: ["view.zoom.50", "view.zoom.75", "view.zoom.100", "view.zoom.150", "view.zoom.200"] }),
+      L("view.zoom.100", "search", "100%"),
+    ] },
+    { label: "Window", fold: 6, icon: "table_freeze_column_and_row", items: [
+      L("view.freeze", "table_freeze_column_and_row", "Freeze Panes", { menu: ["view.freeze.up-to-selection", "view.freeze.top-row", "view.freeze.first-column", "view.freeze.unfreeze"] }),
+    ] },
+    { label: "Collaboration", fold: 4, icon: "history", items: [L("file.version-history", "history", "Version History")] },
   ] },
-  { id: "help", label: "Help", groups: [
-    { label: "Help", ord: 1, items: [["help.keyboard-shortcuts", "large"]] },
+  { id: "help", label: "Help", key: "Y", groups: [
+    { label: "Help", fold: 1, icon: "question_circle", items: [
+      L("help.keyboard-shortcuts", "keyboard", "Keyboard Shortcuts"),
+      L("help.about-opencalc", "info", "About"),
+    ] },
   ] },
 ];
 
-/// Normalise an entry to `{cmd, size}`. A bare string is a small control, which
-/// is most of them, so the model stays readable at a glance.
-export const item = (e) => (typeof e === "string" ? { cmd: e, size: "small" } : { cmd: e[0], size: e[1] });
+/// The File page's rail, in Excel's order. Each pane lists commands; `new`
+/// draws template tiles instead.
+export const FILE_RAIL = [
+  { id: "new", label: "New", icon: "document_add" },
+  { id: "open", label: "Open", icon: "folder_open", cmds: ["file.open"] },
+  { id: "info", label: "Info", icon: "info", cmds: ["file.properties", "file.version-history"] },
+  { id: "save", label: "Save a Copy", icon: "save", cmds: ["file.save", "file.download.excel-xlsx", "file.download.opendocument-ods", "file.download.csv-csv", "file.download.tab-separated-tsv", "file.download.pipe-separated-psv", "file.download.excel-macro-enabled-xlsm", "file.download.same-format-as-opened"] },
+  { id: "print", label: "Print", icon: "print", cmds: ["file.print", "file.export-as-pdf", "file.page-setup"] },
+  { id: "share", label: "Share", icon: "share", cmds: ["file.share"] },
+  { id: "options", label: "Options", icon: "settings", cmds: ["view.theme.auto", "view.theme.light", "view.theme.dark", "tools.settings"] },
+];
+
+/// Every command id the model names, for the registry-completeness gate.
+export function modelCommandIds() {
+  const ids = new Set();
+  const walk = (it) => {
+    if (it.kind === "rows") { for (const row of it.rows) row.forEach(walk); return; }
+    ids.add(it.id);
+    for (const m of it.menu || []) ids.add(m);
+  };
+  for (const tab of TABS) for (const g of tab.groups) {
+    g.items.forEach(walk);
+    if (g.launcher) ids.add(g.launcher);
+  }
+  for (const r of FILE_RAIL) for (const c of r.cmds || []) ids.add(c);
+  ids.add("file.new");
+  // Group-level wrappers that are not commands themselves: the button only
+  // drops its menu.
+  for (const id of ["cells.insert", "cells.delete", "cells.format", "data.ungroup"]) ids.delete(id);
+  return [...ids];
+}

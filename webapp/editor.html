@@ -16,7 +16,6 @@
          and host theming carry over without a second vocabulary. -->
     <link rel="stylesheet" href="./ribbon.tokens.css?v=1" />
     <link rel="stylesheet" href="./ribbon.css?v=24" />
-    <link rel="stylesheet" href="./sheets.css?v=8" />
   </head>
   <body class="editor-body">
     <a class="skip-link" href="#grid">Skip to spreadsheet</a>
@@ -139,7 +138,7 @@
            needs no title telling the user what they just clicked. -->
       <div class="settings-head">
         <h2 class="settings-title" id="settings-title">Settings</h2>
-        <button class="settings-close" id="settings-close" type="button" title="Close (Esc)" aria-label="Close">&times;</button>
+        <button class="settings-close" id="settings-close" type="button" title="Close (Esc)" aria-label="Close"><svg viewBox="0 0 20 20" width="16" height="16" fill="currentColor" aria-hidden="true"><use href="#fi-dismiss"/></svg></button>
       </div>
       <!-- **Theme is not here any more; it is `View ▸ Theme`** (`UX-CHR-01`).
            It is a display option, and the View menu is where this editor's
@@ -172,14 +171,6 @@
            people's trademarks, and naming a competitor in our own settings
            panel is a claim about compatibility we would then have to keep. They
            describe the shape instead, which is also what a user is choosing. -->
-      <div class="set-row">
-        <span>Interface</span>
-        <span class="chrome-choice" id="set-chrome" role="radiogroup" aria-label="Interface">
-          <button type="button" data-chrome="toolbar" role="radio" aria-checked="true" title="The single-row toolbar this editor shipped with">Classic</button>
-          <button type="button" data-chrome="ribbon" role="radio" aria-checked="false" title="Tabbed ribbon with a File backstage — the layout an Excel user expects">Ribbon</button>
-          <button type="button" data-chrome="sheets" role="radio" aria-checked="false" title="One compact row plus the full menu bar — the layout a Google Sheets user expects">Compact</button>
-        </span>
-      </div>
       <div class="set-row">
         <span>Accent</span>
         <span class="swatches" id="set-accent">
@@ -232,7 +223,7 @@
     <!-- Lightweight modal used by Help ▸ (shortcuts / about). -->
     <div class="oc-modal" id="oc-modal" hidden>
       <div class="oc-modal-box" role="dialog" aria-modal="true" aria-labelledby="oc-modal-title">
-        <button class="oc-modal-x" id="oc-modal-x" aria-label="Close">&times;</button>
+        <button class="oc-modal-x" id="oc-modal-x" aria-label="Close"><svg viewBox="0 0 20 20" width="16" height="16" fill="currentColor" aria-hidden="true"><use href="#fi-dismiss"/></svg></button>
         <h2 class="oc-modal-title" id="oc-modal-title"></h2>
         <div class="oc-modal-body" id="oc-modal-body"></div>
       </div>
@@ -530,7 +521,7 @@
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" class="icon-sm"><polyline points="6 9 12 15 18 9"/></svg>
         </button>
       </span>
-      <button class="fx" id="fx-insert" title="Insert function" aria-label="Insert function">fx</button>
+      <button class="fx" id="fx-insert" title="Insert function" aria-label="Insert function"><svg viewBox="0 0 20 20" width="16" height="16" fill="currentColor" aria-hidden="true"><use href="#fi-math_formula"/></svg></button>
       <!-- **A `<textarea>`, because an `<input>` cannot wrap** (`UX-CHR-08`,
            `docs/88` §4). Expanding the bar used to produce an 86px-tall box
            containing one vertically-centred line: the box grew and the text did
@@ -570,11 +561,11 @@
         <input id="replace-input" class="find-field" placeholder="Replace with" spellcheck="false" />
         <button id="replace-one" class="find-action">Replace</button>
         <button id="replace-all" class="find-action">Replace all</button>
-        <label class="find-case" title="Match case"><input type="checkbox" id="find-case" /> Aa</label>
-        <label class="find-case" title="Match the entire cell"><input type="checkbox" id="find-whole" /> ⌷</label>
-        <label class="find-case" title="Search displayed values instead of formulas"><input type="checkbox" id="find-values" /> 123</label>
-        <label class="find-case" title="Search every sheet"><input type="checkbox" id="find-all-sheets" /> ⧉</label>
-        <label class="find-case" title="Wildcards: * matches any characters, ? matches one"><input type="checkbox" id="find-wildcards" /> *?</label>
+        <label class="find-case" title="Match case"><input type="checkbox" id="find-case" /><svg viewBox="0 0 20 20" width="16" height="16" fill="currentColor" aria-hidden="true"><use href="#fi-text_case_title"/></svg><span class="sr-only">Match case</span></label>
+        <label class="find-case" title="Match the entire cell"><input type="checkbox" id="find-whole" /><svg viewBox="0 0 20 20" width="16" height="16" fill="currentColor" aria-hidden="true"><use href="#fi-table_cell_center"/></svg><span class="sr-only">Match the entire cell</span></label>
+        <label class="find-case" title="Search displayed values instead of formulas"><input type="checkbox" id="find-values" /><svg viewBox="0 0 20 20" width="16" height="16" fill="currentColor" aria-hidden="true"><use href="#fi-number_symbol"/></svg><span class="sr-only">Search displayed values instead of formulas</span></label>
+        <label class="find-case" title="Search every sheet"><input type="checkbox" id="find-all-sheets" /><svg viewBox="0 0 20 20" width="16" height="16" fill="currentColor" aria-hidden="true"><use href="#fi-tab_desktop_multiple"/></svg><span class="sr-only">Search every sheet</span></label>
+        <label class="find-case" title="Wildcards: * matches any characters, ? matches one"><input type="checkbox" id="find-wildcards" /><svg viewBox="0 0 20 20" width="16" height="16" fill="currentColor" aria-hidden="true"><use href="#fi-asterisk"/></svg><span class="sr-only">Wildcards: * matches any characters, ? matches one</span></label>
         <button id="find-close" class="find-btn" title="Close (Esc)" aria-label="Close">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" class="icon-sm"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
         </button>
@@ -606,8 +597,7 @@
     <aside class="side-panel" id="side-panel" hidden aria-label="Tool panel">
       <div class="side-panel-head">
         <span class="side-panel-title" id="side-panel-title">Panel</span>
-        <button class="side-panel-close" id="side-panel-close" title="Close (Esc)" aria-label="Close panel">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" class="icon-sm"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+        <button class="side-panel-close" id="side-panel-close" title="Close (Esc)" aria-label="Close panel"><svg viewBox="0 0 20 20" width="16" height="16" fill="currentColor" aria-hidden="true"><use href="#fi-dismiss"/></svg>
         </button>
       </div>
       <div class="side-panel-body" id="side-panel-body"></div>
@@ -672,10 +662,10 @@
            rather than from each control, so the wheel and the menu keep it
            right too. -->
       <div class="zoom-widget" id="zoom-widget">
-        <button class="zoom-step" id="zoom-out" type="button" title="Zoom out" aria-label="Zoom out">&#8722;</button>
+        <button class="zoom-step" id="zoom-out" type="button" title="Zoom out" aria-label="Zoom out"><svg viewBox="0 0 20 20" width="14" height="14" fill="currentColor" aria-hidden="true"><use href="#fi-subtract"/></svg></button>
         <input class="zoom-slider" id="zoom-slider" type="range" min="25" max="200" step="5" value="100"
                aria-label="Zoom level" title="Zoom">
-        <button class="zoom-step" id="zoom-in" type="button" title="Zoom in" aria-label="Zoom in">+</button>
+        <button class="zoom-step" id="zoom-in" type="button" title="Zoom in" aria-label="Zoom in"><svg viewBox="0 0 20 20" width="14" height="14" fill="currentColor" aria-hidden="true"><use href="#fi-add"/></svg></button>
         <!-- A button, not a label: the percentage is the affordance for getting
              back to 100%, which is the only thing a user wants from it once
              they have zoomed by accident. Excel opens a Zoom dialog here; there
@@ -698,7 +688,6 @@
     <script type="module">
       import { ribbonRequested, start as startRibbon, stop as stopRibbon,
                setChrome, chosenChrome } from "./ribbon.js?v=19";
-      import { start as startSheets, stop as stopSheets } from "./sheets.js?v=9";
       // The wait is for the *command layer*, not for `load`. Toolbar controls
       // are stamped with `data-oc-command` after boot and `buildMenuBar()`
       // inserts its buttons later still, so a chrome built on `DOMContentLoaded`
@@ -728,9 +717,8 @@
 
       async function doApply(which) {
         stopRibbon();
-        stopSheets();
-        if (which === "ribbon") await startRibbon();
-        else if (which === "sheets") await startSheets();
+        // One shell (UX-SHELL-08): the toolbar and Sheets chromes are retired.
+        await startRibbon();
         // The chrome changed height, so the grid's box did too — see
         // `settleGrid()` for why this is three shots rather than one.
         settleGrid();
@@ -793,27 +781,6 @@
         watchGrid();
         await apply(chosenChrome());
 
-        const box = document.getElementById("set-chrome");
-        if (!box) return;
-        const paint = () => {
-          const cur = chosenChrome();
-          for (const b of box.querySelectorAll("[data-chrome]")) {
-            const on = b.dataset.chrome === cur;
-            b.setAttribute("aria-checked", on ? "true" : "false");
-            b.classList.toggle("is-on", on);
-          }
-        };
-        box.addEventListener("click", async (e) => {
-          const b = e.target.closest("[data-chrome]");
-          if (!b) return;
-          // No reload: each chrome gives its borrowed controls back, so the
-          // document, the selection and the undo history all survive the
-          // switch. That is the difference between a setting and a restart.
-          setChrome(b.dataset.chrome);
-          await apply(b.dataset.chrome);
-          paint();
-        });
-        paint();
       }
     </script>
   </body>

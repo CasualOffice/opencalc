@@ -21,8 +21,8 @@ async function openHostile(page) {
   page.on("pageerror", (e) => problems.push(e.message));
   page.on("request", (r) => requests.push(r.url()));
 
-  await page.goto("/editor.html");
-  await expect(page.locator("#tb-status")).toHaveText(/^engine v\d/, { timeout: 30_000 });
+  await page.goto("/editor.html?sample=demo");
+  await expect(page.locator("#tb-status")).toHaveAttribute("data-engine", /^\d/, { timeout: 30_000 });
 
   // Loaded through the engine, which is the path a real open takes.
   await page.evaluate(async (bytes) => {

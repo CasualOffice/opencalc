@@ -13,8 +13,8 @@
 import { expect, test } from "@playwright/test";
 
 async function boot(page) {
-  await page.goto("/editor.html");
-  await expect(page.locator("#tb-status")).toHaveText(/^engine v\d/, { timeout: 30_000 });
+  await page.goto("/editor.html?sample=demo");
+  await expect(page.locator("#tb-status")).toHaveAttribute("data-engine", /^\d/, { timeout: 30_000 });
   await page.evaluate(() => {
     const a = window.opencalcEditor.wasmApi();
     a.session_new();

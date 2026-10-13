@@ -11,8 +11,8 @@
 import { expect, test } from "@playwright/test";
 
 async function boot(page) {
-  await page.goto("/editor.html");
-  await expect(page.locator("#tb-status")).toHaveText(/^engine v\d/, { timeout: 30_000 });
+  await page.goto("/editor.html?sample=demo");
+  await expect(page.locator("#tb-status")).toHaveAttribute("data-engine", /^\d/, { timeout: 30_000 });
   await page.evaluate(() => {
     const tag = document.querySelector('script[type="module"][src*="editor.js"]');
     window.__editorModule = tag.src;
@@ -81,24 +81,25 @@ test("a sheet can be moved and stays where it was put", async ({ page }) => {
 /// The toolbar button carries a bar tinted by `--oc-x-border-swatch`. Without
 /// it a user picks a colour and the control looks identical, so the only way to
 /// know what the next border will be is to draw one and look.
-test("choosing a border colour tints the toolbar swatch", async ({ page }) => {
-  // **A window wide enough to show the group.** The toolbar collapses groups
-  // Excel-style rather than wrapping or scrolling, so at the suite's default
-  // 1280px the border control is inside a `hidden` group and unclickable —
-  // which is the toolbar working, not a defect, and looked like one until the
-  // button was probed.
-  await page.setViewportSize({ width: 1800, height: 900 });
+test("choosing a border colour tints the Borders button", async ({ page }) => {
+  // The Borders button carries a bar in the chosen colour, as in Excel, so the
+  // next border's colour is visible without drawing one. It is the ribbon's
+  // own button now (UX-SHELL-07), mirroring the editor's border state.
   await boot(page);
-  await page.locator("#tb-border").click();
+  const button = page.locator('.oc-ribbon [data-cmd="toolbar.border"]');
+  await button.click();
   await expect(page.locator("#border-menu"), "the border menu did not open").toBeVisible();
 
   const swatch = page.locator("#border-menu .bd-color[data-color='e5484d']").first();
   await expect(swatch, "the border menu has no colour swatches").toBeVisible();
   await swatch.click();
 
-  const tint = await page.evaluate(() =>
-    document.getElementById("tb-border").style.getPropertyValue("--oc-x-border-swatch").trim());
-  expect(tint, "the toolbar swatch did not take the chosen colour").toBe("#e5484d");
+  await expect
+    .poll(() => button.evaluate((b) => b.style.getPropertyValue("--rb-swatch").trim()),
+      { message: "the Borders button did not take the chosen colour" })
+    .toBe("#e5484d");
+  const bar = await button.evaluate((b) => getComputedStyle(b, "::after").backgroundColor);
+  expect(bar, "the colour bar is not drawn").toBe("rgb(229, 72, 77)");
 
   // And the chosen swatch is marked, so reopening the menu shows what is set.
   await expect(swatch, "the chosen swatch is not marked as selected").toHaveClass(/\bon\b/);

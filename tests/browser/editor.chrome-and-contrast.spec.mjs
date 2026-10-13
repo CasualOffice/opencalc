@@ -9,7 +9,7 @@ import { expect, test } from "@playwright/test";
 
 async function boot(page, query = "") {
   await page.goto(`/editor.html${query}`);
-  await expect(page.locator("#tb-status")).toHaveText(/^engine v\d/, { timeout: 30_000 });
+  await expect(page.locator("#tb-status")).toHaveAttribute("data-engine", /^\d/, { timeout: 30_000 });
 }
 
 /// **A host that renders its own header can turn ours off.**
@@ -33,7 +33,7 @@ test("a host can hide the editor's header", async ({ page }) => {
 test("hiding the header keeps the status element readable", async ({ page }) => {
   await boot(page, "?hide=header");
   // Attached and carrying its text, even though it is not painted.
-  await expect(page.locator("#tb-status")).toHaveText(/^engine v\d/);
+  await expect(page.locator("#tb-status")).toHaveAttribute("data-engine", /^\d/);
 });
 
 /// **An unknown region is ignored, not turned into a class.**

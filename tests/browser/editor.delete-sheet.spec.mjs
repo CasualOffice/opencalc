@@ -19,8 +19,8 @@
 import { expect, test } from "@playwright/test";
 
 async function boot(page) {
-  await page.goto("/editor.html");
-  await expect(page.locator("#tb-status")).toHaveText(/^engine v\d/, { timeout: 30_000 });
+  await page.goto("/editor.html?sample=demo");
+  await expect(page.locator("#tb-status")).toHaveAttribute("data-engine", /^\d/, { timeout: 30_000 });
   await page.evaluate(() => {
     const ed = window.opencalcEditor;
     const a = ed.wasmApi();
@@ -108,8 +108,8 @@ test("the verb is a command, and running it asks the same question", async ({ pa
 });
 
 test("the last sheet is refused, and is refused before the question", async ({ page }) => {
-  await page.goto("/editor.html");
-  await expect(page.locator("#tb-status")).toHaveText(/^engine v\d/, { timeout: 30_000 });
+  await page.goto("/editor.html?sample=demo");
+  await expect(page.locator("#tb-status")).toHaveAttribute("data-engine", /^\d/, { timeout: 30_000 });
   await page.evaluate(() => window.opencalcEditor.wasmApi().session_new());
   await page.waitForTimeout(200);
 

@@ -23,8 +23,8 @@ import { expect, test } from "@playwright/test";
 const CEILING = 28;
 
 test("context menu rows are compact with a mouse", async ({ page }) => {
-  await page.goto("/editor.html");
-  await expect(page.locator("#tb-status")).toHaveText(/^engine v\d/, { timeout: 30_000 });
+  await page.goto("/editor.html?sample=demo");
+  await expect(page.locator("#tb-status")).toHaveAttribute("data-engine", /^\d/, { timeout: 30_000 });
 
   await page.locator("canvas").first()
     .click({ button: "right", position: { x: 120, y: 90 } });
