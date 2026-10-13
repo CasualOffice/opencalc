@@ -2436,7 +2436,14 @@ html, .editor-body { overscroll-behavior: none; }
 .oc-btn:hover:not(:disabled) { background: var(--oc-surface-color); border-color: var(--oc-border-hover-color); }
 .oc-btn:focus-visible { outline: 2px solid var(--oc-accent-color); outline-offset: 2px; }
 .oc-btn:disabled { opacity: .45; cursor: default; }
-.oc-btn.primary:hover:not(:disabled) { filter: brightness(1.08); }
+/* The primary keeps its fill on hover and darkens a step: the shared hover
+   above set the light surface colour, which outranked `.primary` and left white
+   text on a near-white button. */
+.oc-btn.primary:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--oc-accent-fill-color, var(--oc-accent-color)), #000 14%);
+  border-color: color-mix(in srgb, var(--oc-accent-fill-color, var(--oc-accent-color)), #000 14%);
+  filter: none;
+}
 .oc-btn.danger { color: var(--oc-danger-color); border-color: color-mix(in srgb, var(--oc-danger-color) 45%, var(--oc-control-border-color)); }
 .oc-btn.danger:hover:not(:disabled) { background: color-mix(in srgb, var(--oc-danger-color) 8%, var(--oc-background-color)); }
 
