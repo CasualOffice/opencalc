@@ -28,6 +28,7 @@ export const BUILD =
 // The imports below are what this file still calls; the re-exports keep the
 // module's public surface — `window.opencalcEditor` is this namespace — exactly
 // what it was.
+import { register as registerCommand } from "./commands.js";
 import { paintList } from "./editor.paintlist.js";
 import {
   applyChart,
@@ -320,6 +321,7 @@ import {
   inStringLiteral,
   insertLines,
   insertRef,
+  commandIsRunnable,
   listCommands,
   looksLikeHeader,
   off,
@@ -727,6 +729,7 @@ export {
   inStringLiteral,
   insertLines,
   insertRef,
+  commandIsRunnable,
   listCommands,
   looksLikeHeader,
   off,
@@ -4501,7 +4504,7 @@ export function buildChartPanel(body) {
     body.appendChild(row);
   });
 
-  const add = el("button", "panel-btn-ghost", "Add series from selection");
+  const add = el("button", "oc-btn", "Add series from selection");
   add.addEventListener("click", () => {
     const r = effectiveRange();
     const sheetName = sheetNameAt(state.sheet);
@@ -5214,7 +5217,7 @@ function buildHistoryPanel(body) {
     catch (why) { statusError(errText(why)); return; }
 
     const bar = el("div", "hist-actions");
-    const keep = el("button", "btn", "Save a version");
+    const keep = el("button", "oc-btn primary", "Save a version");
     keep.title = "Capture the document as it is now";
     keep.addEventListener("click", () => {
       try {
@@ -5589,7 +5592,7 @@ function buildNotePanel(body) {
 
   const actions = el("div", "panel-actions");
   const button = (label, cls, fn) => {
-    const b = el("button", cls, label);
+    const b = el("button", cls ? `oc-btn ${cls}` : "oc-btn", label);
     b.addEventListener("click", fn);
     actions.appendChild(b);
     return b;
@@ -6838,6 +6841,55 @@ export let lastFill = null;
 // Insert Function: the catalogue, searchable, with each entry's signature and
 // summary. The `fx` beside the formula bar was decorative — the only way to find
 // a function was to already know its name and start typing it.
+/// Commands that have no menu node of their own, registered so the ribbon, the
+/// File page and command search can reach them (UX-SHELL-06). Each runs the
+/// same function the right-click menu or a dialog already runs — nothing here
+/// is a second implementation.
+function registerShellCommands() {
+  const R = registerCommand;
+  const span = () => { const r = effectiveRange(); return { r, rows: r.r1 - r.r0 + 1, cols: r.c1 - r.c0 + 1 }; };
+  const shift = (insert, vertical, label) => () => {
+    const r = effectiveRange();
+    const go = () => { tryEdit(() => wasm.session_shift_cells(state.sheet, r.r0, r.c0, r.r1, r.c1, insert, vertical)); status.textContent = label.toLowerCase(); };
+    if (!shiftIsRisky(() => wasm.session_shift_affects_formulas(state.sheet, r.r0, r.c0, r.r1, r.c1, vertical))) { go(); return; }
+    confirmModal("Formulas reference these cells",
+      "Moving them will not adjust those references — they will keep pointing at the same addresses, which will now hold different cells.",
+      label).then((ok) => { if (ok) go(); });
+  };
+  R("edit.paste-special", { label: "Paste Special…", run: () => pasteSpecialDialog(), shortcut: "Ctrl+Alt+V" });
+  R("edit.paste-values", { label: "Paste Values", run: () => doPasteMode("values") });
+  R("edit.paste-formulas", { label: "Paste Formulas", run: () => doPasteMode("formulas") });
+  R("edit.paste-formats", { label: "Paste Formatting", run: () => doPasteMode("formats") });
+  R("edit.paste-transpose", { label: "Transpose", run: () => doPasteMode("transpose") });
+  R("format.format-cells", { label: "Format Cells…", run: () => formatCellsDialog(), shortcut: "Ctrl+1" });
+  R("insert.cells-down", { label: "Insert Cells, Shift Down", run: shift(true, true, "Inserted, shifted down") });
+  R("insert.cells-right", { label: "Insert Cells, Shift Right", run: shift(true, false, "Inserted, shifted right") });
+  R("insert.delete-cells-up", { label: "Delete Cells, Shift Up", run: shift(false, true, "Deleted, shifted up") });
+  R("insert.delete-cells-left", { label: "Delete Cells, Shift Left", run: shift(false, false, "Deleted, shifted left") });
+  R("insert.sheet", { label: "Insert Sheet", shortcut: "Shift+F11", run: () => {
+    try { switchSheet(wasm.session_add_sheet()); renderTabs(); } catch (e) { statusError(errText(e)); }
+  } });
+  R("sheet.rename", { label: "Rename Sheet", run: () => {
+    renameSheet(state.sheet, document.querySelectorAll("#sheet-tabs .sheet-tab")[state.sheet]);
+  } });
+  R("format.row-height", { label: "Row Height…", run: () => sizeDialog("row", selRect().r0) });
+  R("format.column-width", { label: "Column Width…", run: () => sizeDialog("col", selRect().c0) });
+  R("format.autofit-row", { label: "AutoFit Row Height", run: () => {
+    const { r } = span(); for (let i = r.r0; i <= r.r1; i++) autofitRow(i); draw();
+  } });
+  R("format.autofit-column", { label: "AutoFit Column Width", run: () => {
+    const { r } = span(); for (let i = r.c0; i <= r.c1; i++) autofitColumn(i); draw();
+  } });
+  R("formulas.autosum", { label: "AutoSum", shortcut: "Alt+=", run: () => autoSum() });
+  R("formulas.insert-function", { label: "Insert Function…", shortcut: "Shift+F3", run: () => insertFunctionDialog() });
+  R("formulas.define-name", { label: "Define Name…", run: () => {
+    const r = canvas.getBoundingClientRect();
+    openNameManager(r.left + 120, r.top + 90);
+  } });
+  R("edit.replace", { label: "Replace…", shortcut: "Ctrl+H", run: () => openReplace() });
+  R("edit.go-to", { label: "Go To…", shortcut: "Ctrl+G", run: () => { cellRef.focus(); cellRef.select(); } });
+}
+
 function insertFunctionDialog() {
   if (!fnCatalog) { try { fnCatalog = JSON.parse(wasm.function_catalog()); } catch { fnCatalog = []; } }
   const modal = byId("oc-modal");
@@ -6876,7 +6928,7 @@ function insertFunctionDialog() {
   const actions = el("div", "oc-confirm-actions");
   const cancel = el("button", "oc-btn", "Cancel");
   const ok = el("button", "oc-btn primary", "Insert");
-  actions.append(cancel, ok);
+  actions.append(ok, cancel);
   body.appendChild(actions);
   modal.hidden = false;
 
@@ -8953,6 +9005,41 @@ function wireEvents() {
     ["0.00E+00", "Scientific"],
     ["@", "Text"],
   ]);
+  // The ribbon's three combos are registry commands with their own option
+  // lists, so the ribbon draws its own box rather than borrowing the toolbar's
+  // (UX-SHELL-06). Each applies through the same setter the toolbar uses.
+  const cellFmt = () => { try { return JSON.parse(wasm.session_cell_format(state.sheet, state.sel.row, state.sel.col)) || {}; } catch { return {}; } };
+  registerCommand("toolbar.font", {
+    label: "Font", combo: true,
+    values: () => fontFamilies().map((f) => ({ v: f.n, label: f.n, font: fontStack(f.n) })),
+    current: () => cellFmt().fn || "",
+    run: (v) => { if (v !== undefined) setFontName(String(v).trim()); },
+  });
+  registerCommand("toolbar.size", {
+    label: "Font Size", combo: true,
+    values: () => SIZE_LADDER.map((n) => ({ v: String(n), label: String(n) })),
+    current: () => String(cellFmt().fs ?? ""),
+    run: (v) => {
+      if (v === undefined) return;
+      const raw = parseFloat(v);
+      setFontSize(Number.isFinite(raw) && raw > 0 ? Math.min(409, Math.max(1, raw)) : 0);
+    },
+  });
+  registerCommand("toolbar.numfmt", {
+    label: "Number Format", combo: true, readOnly: true,
+    values: () => [
+      ["", "General"], ["0.00", "Number"], ["$#,##0.00", "Currency"],
+      ['_($* #,##0.00_);_($* (#,##0.00);_($* "-"??_);_(@_)', "Accounting"],
+      ["yyyy-mm-dd", "Short Date"], ["dddd, mmmm d, yyyy", "Long Date"], ["h:mm:ss AM/PM", "Time"],
+      ["0.00%", "Percentage"], ["0.00E+00", "Scientific"], ["@", "Text"],
+      ["__more__", "More Number Formats…"],
+    ].map(([v, label]) => ({ v, label })),
+    current: () => NF_NAMES.get(cellFmt().nf || "") ?? "Custom",
+    run: (v) => {
+      if (v === undefined) return;
+      if (v === "__more__") formatCellsDialog(); else setNumberFormat(v);
+    },
+  });
   // The active cell's format, cached on the coordinates it was read for.
   // `updateNumberFormatReadout` is called from the paint tail, so it runs on
   // every frame including every scroll frame; without this it would add a wasm
@@ -10166,6 +10253,10 @@ function wireEvents() {
     // Alt+letter opens the matching menu; holding Alt alone reveals which letter
     // each menu answers to.
     document.addEventListener("keydown", (e) => {
+      // In the one shell the menu bar is parked off-screen and the ribbon's
+      // KeyTips own Alt (UX-SHELL-08); opening an off-screen menu would only
+      // move focus somewhere nobody can see.
+      if (document.documentElement.classList.contains("oc-chrome-ribbon")) return;
       if (e.key === "Alt") { bar.classList.add("show-mnemonics"); return; }
       if (!e.altKey || e.ctrlKey || e.metaKey) return;
       const i = menuMnemonics.get((e.key || "").toLowerCase());
@@ -10401,6 +10492,8 @@ function bindElements() {
   canvas = byId("grid");
   wrap = byId("grid-wrap");
   inline = byId("inline-edit");
+  // Every keystroke can change how wide the entry is (UX-SHELL-14).
+  inline.addEventListener("input", () => { if (editSurface === inline) positionInline(); });
   selStats = byId("sel-stats");
   vscroll = byId("vscroll");
   vthumb = byId("vthumb");
@@ -11039,7 +11132,8 @@ async function main() {
     if (!node.dataset.ocTip) node.dataset.ocTip = node.dataset.tip || node.title;
   }
   relabel();
-  seed();
+  registerShellCommands();
+  seed(PARAMS.get("sample") === "demo");
   renderTabs();
   resize();
   // The status bar's zoom controls. After `resize()`, so the first readout is
@@ -11056,7 +11150,11 @@ async function main() {
   // nothing, which is the whole of "the default changes nothing".
   if (getCapabilities().readOnly) setReadOnly(true);
   else applyCommandRules();
-  status.textContent = `engine v${wasm.version()}`;
+  // The version is a fact about the build, not the document: it is kept on the
+  // element (the readiness signal hosts and gates wait on) and in Help ▸ About,
+  // never drawn in the status bar (UX-SHELL-05).
+  status.textContent = "";
+  status.dataset.engine = wasm.version();
 
   // Give the grid the keyboard (`UX-FOCUS-01`).
   //

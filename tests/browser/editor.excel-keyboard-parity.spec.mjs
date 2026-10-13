@@ -16,8 +16,8 @@
 import { expect, test } from "@playwright/test";
 
 async function boot(page) {
-  await page.goto("/editor.html");
-  await expect(page.locator("#tb-status")).toHaveText(/^engine v\d/, { timeout: 30_000 });
+  await page.goto("/editor.html?sample=demo");
+  await expect(page.locator("#tb-status")).toHaveAttribute("data-engine", /^\d/, { timeout: 30_000 });
   await page.evaluate(() => window.opencalcEditor.wasmApi().session_new());
   // Focus first, always. Every chord here is bound on the canvas, and a probe
   // that skips this measures a key going to `<body>`.
@@ -95,7 +95,7 @@ test("Ctrl+Shift+F opens Format cells rather than the find bar", async ({ page }
   await page.evaluate(() => window.opencalcEditor.selectForTest(1, 1));
   await page.keyboard.press("Control+Shift+f");
   await expect(page.locator("#oc-modal")).toBeVisible();
-  await expect(page.locator("#oc-modal-title")).toHaveText("Format cells");
+  await expect(page.locator("#oc-modal-title")).toHaveText("Format Cells");
   await expect(page.locator("#find-bar")).toBeHidden();
 });
 

@@ -14,8 +14,8 @@ import { expect, test } from "@playwright/test";
 
 async function boot(page) {
   await page.setViewportSize({ width: 1280, height: 860 });
-  await page.goto("/editor.html");
-  await expect(page.locator("#tb-status")).toHaveText(/^engine v\d/, { timeout: 30_000 });
+  await page.goto("/editor.html?sample=demo");
+  await expect(page.locator("#tb-status")).toHaveAttribute("data-engine", /^\d/, { timeout: 30_000 });
   await page.evaluate(() => window.opencalcEditor.wasmApi().session_new());
   await page.waitForTimeout(300);
 }
@@ -34,7 +34,7 @@ test("a version can be saved and the document brought back to it", async ({ page
   await expect(page.locator("#side-panel-title")).toHaveText("Version history");
 
   await page.fill(".hist-name", "before the change");
-  await page.click(".hist-actions .btn");
+  await page.click(".hist-actions .oc-btn");
   await page.waitForTimeout(300);
   await expect(page.locator(".hist-row"), "saving a version did not add one to the list").toHaveCount(1);
 
@@ -71,7 +71,7 @@ test("a restore is one undo step, and undo puts the document back", async ({ pag
   });
   await page.waitForTimeout(200);
   await page.evaluate(() => window.opencalcEditor.runCommand("file.version-history"));
-  await page.click(".hist-actions .btn");
+  await page.click(".hist-actions .oc-btn");
   await page.waitForTimeout(300);
 
   await page.evaluate(() => {
@@ -102,9 +102,9 @@ test("saving a version twice with no edit between does not store two", async ({ 
   await page.evaluate(() => window.opencalcEditor.wasmApi().session_set_cell(0, 0, 0, "x"));
   await page.waitForTimeout(200);
   await page.evaluate(() => window.opencalcEditor.runCommand("file.version-history"));
-  await page.click(".hist-actions .btn");
+  await page.click(".hist-actions .oc-btn");
   await page.waitForTimeout(250);
-  await page.click(".hist-actions .btn");
+  await page.click(".hist-actions .oc-btn");
   await page.waitForTimeout(250);
   await expect(page.locator(".hist-row"),
     "an unchanged document was captured twice, so the list grows while nothing changes").toHaveCount(1);

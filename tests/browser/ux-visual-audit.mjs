@@ -257,7 +257,7 @@ await page.addInitScript(() => {
 });
 await page.goto(PAGE_URL);
 await page.waitForFunction(
-  () => /^engine v/.test(document.querySelector("#tb-status")?.textContent || ""),
+  () => !!document.querySelector("#tb-status")?.dataset?.engine,
   null, { timeout: 30_000 },
 );
 

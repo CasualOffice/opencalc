@@ -19,8 +19,8 @@
 import { expect, test } from "@playwright/test";
 
 async function boot(page) {
-  await page.goto("/editor.html");
-  await expect(page.locator("#tb-status")).toHaveText(/^engine v\d/, { timeout: 30_000 });
+  await page.goto("/editor.html?sample=demo");
+  await expect(page.locator("#tb-status")).toHaveAttribute("data-engine", /^\d/, { timeout: 30_000 });
   // Focus first, always. Every shortcut here is bound on the canvas, and a
   // probe that skips this measures a key going to `<body>`.
   await page.locator("#grid").focus();
@@ -195,29 +195,27 @@ test("Ctrl+Enter puts the entry in every selected cell", async ({ page }) => {
   await expect.poll(inputs).toEqual(["=A1*2", "=A2*2", "=A3*2"]);
 });
 
-test("Alt opens the menus by their access keys", async ({ page }) => {
+test("Alt shows KeyTips, and a letter opens its tab or the File page", async ({ page }) => {
+  // The one shell's access keys are Excel's KeyTips (UX-SHELL-08): press and
+  // release Alt, then the letter. The old menu-bar mnemonics opened menus in
+  // a bar that is parked off-screen, which only moved focus out of sight.
   await boot(page);
-  const openMenu = () =>
-    page.evaluate(() => {
-      const b = [...document.querySelectorAll("button.menu-top")]
-        .find((x) => x.getAttribute("aria-expanded") === "true");
-      return b ? (b.dataset.ocLabel || b.textContent.trim()) : null;
-    });
+  const tap = async (k) => { await page.keyboard.down("Alt"); await page.keyboard.up("Alt"); await page.keyboard.press(k); };
 
-  // Claimed absent in docs/47 for months, on the strength of a grep. The
-  // binding is registered on `document`, not in the grid handler, so a search
-  // of the handler finds nothing and concludes the wrong thing.
-  for (const [key, want] of [["Alt+f", "File"], ["Alt+d", "Data"], ["Alt+h", "Help"]]) {
-    await page.keyboard.press("Escape");
-    await page.keyboard.press(key);
-    await expect.poll(openMenu, { message: `${key} must open ${want}` }).toBe(want);
-  }
-
-  // Holding Alt alone underlines each menu's letter, as on Windows.
-  await page.keyboard.press("Escape");
   await page.keyboard.down("Alt");
-  await expect.poll(() =>
-    page.evaluate(() => document.getElementById("menubar").classList.contains("show-mnemonics")),
-  ).toBe(true);
   await page.keyboard.up("Alt");
+  await expect(page.locator(".oc-ribbon .rb-tip").first(), "Alt alone shows the letters").toBeVisible();
+  await page.keyboard.press("a");
+  await expect(page.locator("#rb-tab-data")).toHaveAttribute("aria-selected", "true");
+
+  await tap("h");
+  await expect(page.locator("#rb-tab-home")).toHaveAttribute("aria-selected", "true");
+
+  await tap("f");
+  await expect(page.locator(".rb-backstage")).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(page.locator(".rb-backstage")).toBeHidden();
+
+  // Alt as a modifier never raises them: Alt+= is AutoSum, not a KeyTip.
+  await expect(page.locator(".oc-ribbon .rb-tip")).toHaveCount(0);
 });

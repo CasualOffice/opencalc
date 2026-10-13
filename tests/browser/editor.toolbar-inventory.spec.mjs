@@ -17,8 +17,8 @@ import { expect, test } from "@playwright/test";
 
 async function boot(page, width) {
   await page.setViewportSize({ width, height: 900 });
-  await page.goto("/editor.html");
-  await expect(page.locator("#tb-status")).toHaveText(/^engine v\d/, { timeout: 30_000 });
+  await page.goto("/editor.html?sample=demo");
+  await expect(page.locator("#tb-status")).toHaveAttribute("data-engine", /^\d/, { timeout: 30_000 });
   await page.waitForTimeout(250);
 }
 
@@ -42,20 +42,18 @@ for (const width of [1920, 1600, 1440, 1366, 1280]) {
 /// combo, LibreOffice as a listbox, Sheets behind `123 ⌄`. Ours had an icon that
 /// opened a menu of formats to *set*, and nothing that reported the one in
 /// force, so the only way to learn a cell's format was to change it.
-test("the toolbar reports the active cell's number format", async ({ page }) => {
+test("the ribbon reports the active cell's number format", async ({ page }) => {
   await boot(page, 1440);
-  const readout = page.locator("#tb-numfmt-label");
-  await expect(readout, "there is no number-format readout in the toolbar").toBeVisible();
-  await expect(readout).toHaveText(/General/i);
+  // The Number group's combo — Excel's readout — now that the ribbon draws its
+  // own controls rather than borrowing the toolbar's (UX-SHELL-06).
+  const readout = page.locator('.oc-ribbon input[data-oc-proxy="toolbar.numfmt"]');
+  await expect(readout, "there is no number-format readout in the ribbon").toBeVisible();
+  await expect(readout).toHaveValue(/General/i);
 
-  // Through the control a user would use, not by writing the model behind it:
-  // the readout is refreshed from the paint tail, so a direct wasm write would
-  // leave it stale and the test would be asserting against a frame that never
-  // happened.
+  // Through the control a user would use, not by writing the model behind it.
   await page.evaluate(() => window.opencalcEditor.wasmApi().session_set_cell(0, 0, 0, "1234.5"));
-  await page.click("#tb-currency");
-  await page.waitForTimeout(250);
-  await expect(readout, "the readout did not follow the cell's format").toHaveText(/Currency/i);
+  await page.click('.oc-ribbon [data-oc-proxy="toolbar.currency"]');
+  await expect(readout, "the readout did not follow the cell's format").toHaveValue(/Currency/i);
 });
 
 /// **A menu item that routes through a button is a route, not a listing.**

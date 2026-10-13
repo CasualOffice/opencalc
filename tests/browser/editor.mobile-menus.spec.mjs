@@ -27,8 +27,8 @@ import { expect, test } from "@playwright/test";
 test.use({ hasTouch: true, isMobile: true, viewport: { width: 390, height: 844 } });
 
 async function boot(page) {
-  await page.goto("/editor.html");
-  await expect(page.locator("#tb-status")).toHaveText(/^engine v\d/, { timeout: 30_000 });
+  await page.goto("/editor.html?sample=demo");
+  await expect(page.locator("#tb-status")).toHaveAttribute("data-engine", /^\d/, { timeout: 30_000 });
   await page.evaluate(() => window.opencalcEditor.wasmApi().session_new());
   await page.waitForTimeout(300);
 }

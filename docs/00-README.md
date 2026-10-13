@@ -143,6 +143,7 @@ the other way around. This index is the map.
 | 93 | [Google Sheets' chrome, as this editor's other one](93-SHEETS-CHROME-DESIGN.md) | The second of two selectable chromes, paired with [91](91-EXCEL-RIBBON-CHROME-DESIGN.md): the app bar and the collaboration surfaces this project already runs a server for; the stated rule for what earns one of about thirty toolbar slots; panels where the ribbon uses modals; the motion token set; and the chrome chooser — where the preference lives, what precedence it has against an integrator's setting, and what survives the switch |
 
 | 94 | [OpenDoc editor alignment](94-OPENDOC-EDITOR-ALIGNMENT.md) | Editor-first shell, typography, navigation and functional acceptance gates |
+| 95 | [The Excel shell](95-EXCEL-SHELL-TARGET.md) | Owner-approved target: Excel's shell with our identity and lowest cognitive load; prototype in `prototypes/excel-shell-2026/`; rows `UX-SHELL-01..18` |
 
 ### Measured gap trackers (50–53, 73)
 

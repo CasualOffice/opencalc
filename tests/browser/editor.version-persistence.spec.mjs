@@ -9,8 +9,8 @@ import { expect, test } from "@playwright/test";
 
 async function boot(page) {
   await page.setViewportSize({ width: 1200, height: 820 });
-  await page.goto("/editor.html");
-  await expect(page.locator("#tb-status")).toHaveText(/^engine v\d/, { timeout: 30_000 });
+  await page.goto("/editor.html?sample=demo");
+  await expect(page.locator("#tb-status")).toHaveAttribute("data-engine", /^\d/, { timeout: 30_000 });
   await page.waitForTimeout(400);
 }
 
@@ -32,7 +32,7 @@ test("a saved version is still there after a reload, and still restores", async 
 
   await page.evaluate(() => window.opencalcEditor.runCommand("file.version-history"));
   await page.fill(".hist-name", "the good one");
-  await page.click(".hist-actions .btn");
+  await page.click(".hist-actions .oc-btn");
   await page.waitForTimeout(700);   // the write is async
   await expect(page.locator(".hist-row")).toHaveCount(1);
 
@@ -41,7 +41,7 @@ test("a saved version is still there after a reload, and still restores", async 
   await page.waitForTimeout(200);
 
   await page.reload();
-  await expect(page.locator("#tb-status")).toHaveText(/^engine v\d/, { timeout: 30_000 });
+  await expect(page.locator("#tb-status")).toHaveAttribute("data-engine", /^\d/, { timeout: 30_000 });
   await page.evaluate(() => {
     const ed = window.opencalcEditor;
     ed.wasmApi().session_new();
@@ -77,7 +77,7 @@ test("versions are kept per document", async ({ page }) => {
   });
   await page.waitForTimeout(300);
   await page.evaluate(() => window.opencalcEditor.runCommand("file.version-history"));
-  await page.click(".hist-actions .btn");
+  await page.click(".hist-actions .oc-btn");
   await page.waitForTimeout(700);
 
   // A second document, same tab.
@@ -117,7 +117,7 @@ test("stored snapshots are compressed", async ({ page }) => {
   });
   await page.waitForTimeout(400);
   await page.evaluate(() => window.opencalcEditor.runCommand("file.version-history"));
-  await page.click(".hist-actions .btn");
+  await page.click(".hist-actions .oc-btn");
   await page.waitForTimeout(1200);
 
   const seen = await page.evaluate(async () => {

@@ -13,7 +13,7 @@ import { expect, test } from "@playwright/test";
 
 async function boot(page, query = "") {
   await page.goto(`/editor.html${query}`);
-  await expect(page.locator("#tb-status")).toHaveText(/^engine v\d/, { timeout: 30_000 });
+  await expect(page.locator("#tb-status")).toHaveAttribute("data-engine", /^\d/, { timeout: 30_000 });
 }
 
 /// Resolve a custom property to the value the browser computed.

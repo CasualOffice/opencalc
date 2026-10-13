@@ -37,7 +37,7 @@ const installShell = (page) =>
 async function boot(page) {
   await installShell(page);
   await page.goto("/editor.html?chrome=native");
-  await expect(page.locator("#tb-status")).toHaveText(/^engine v\d/, { timeout: 30_000 });
+  await expect(page.locator("#tb-status")).toHaveAttribute("data-engine", /^\d/, { timeout: 30_000 });
   await page.evaluate(() => { window.__editingReports.length = 0; });
 }
 

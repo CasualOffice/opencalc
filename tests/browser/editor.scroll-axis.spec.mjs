@@ -15,8 +15,8 @@
 import { expect, test } from "@playwright/test";
 
 async function boot(page) {
-  await page.goto("/editor.html");
-  await expect(page.locator("#tb-status")).toHaveText(/^engine v\d/, { timeout: 30_000 });
+  await page.goto("/editor.html?sample=demo");
+  await expect(page.locator("#tb-status")).toHaveAttribute("data-engine", /^\d/, { timeout: 30_000 });
   // Something to scroll through. `clampScroll` holds the view to the used
   // range, so on a blank sheet every one of these assertions would pass or fail
   // for the wrong reason — there is nowhere to go.

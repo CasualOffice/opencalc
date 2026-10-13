@@ -17,8 +17,8 @@ import { expect, test } from "@playwright/test";
 
 /// Load the editor and expose its module, the way the other editor specs do.
 async function boot(page) {
-  await page.goto("/editor.html");
-  await expect(page.locator("#tb-status")).toHaveText(/^engine v\d/, {
+  await page.goto("/editor.html?sample=demo");
+  await expect(page.locator("#tb-status")).toHaveAttribute("data-engine", /^\d/, {
     timeout: 30_000,
   });
   await page.evaluate(async () => {

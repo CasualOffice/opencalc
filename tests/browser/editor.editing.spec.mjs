@@ -29,8 +29,8 @@ async function boot(page) {
     if (m.type() === "error") problems.push(m.text());
   });
   page.on("pageerror", (e) => problems.push(e.message));
-  await page.goto("/editor.html");
-  await expect(page.locator("#tb-status")).toHaveText(/^engine v\d/, {
+  await page.goto("/editor.html?sample=demo");
+  await expect(page.locator("#tb-status")).toHaveAttribute("data-engine", /^\d/, {
     timeout: 30_000,
   });
   return problems;

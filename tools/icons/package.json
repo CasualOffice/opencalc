@@ -1,0 +1,8 @@
+{
+  "name": "opencalc-icon-sprite",
+  "private": true,
+  "description": "Builds webapp/icons.fluent.svg from Fluent UI System Icons (MIT). UX-SHELL-16.",
+  "type": "module",
+  "scripts": { "build": "node build-sprite.mjs" },
+  "devDependencies": { "@fluentui/svg-icons": "1.1.344" }
+}

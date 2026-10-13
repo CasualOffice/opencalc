@@ -699,7 +699,7 @@ for (const c of SELECTED) {
   try {
     await page.goto(EDITOR, { waitUntil: "networkidle" });
     await page.waitForFunction(
-      () => document.querySelector("#tb-status")?.textContent?.startsWith("engine v"),
+      () => document.querySelector("#tb-status")?.dataset?.engine,
       null,
       { timeout: 30_000 },
     );

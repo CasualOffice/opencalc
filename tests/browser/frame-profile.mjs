@@ -430,7 +430,7 @@ async function boot(browser, port) {
   const page = await context.newPage();
   await page.goto(`http://127.0.0.1:${port}/editor.html`);
   await page.waitForFunction(
-    () => /^engine v/.test(document.querySelector("#tb-status")?.textContent || ""),
+    () => !!document.querySelector("#tb-status")?.dataset?.engine,
     null,
     { timeout: 30_000 },
   );

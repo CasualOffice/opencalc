@@ -20,8 +20,8 @@
 import { expect, test } from "@playwright/test";
 
 async function boot(page) {
-  await page.goto("/editor.html");
-  await expect(page.locator("#tb-status")).toHaveText(/^engine v\d/, { timeout: 30_000 });
+  await page.goto("/editor.html?sample=demo");
+  await expect(page.locator("#tb-status")).toHaveAttribute("data-engine", /^\d/, { timeout: 30_000 });
   // The sample workbook is not what any of this measures, but `session_new()`
   // is cheap and it is the mistake this repository has already made once.
   await page.evaluate(() => window.opencalcEditor.wasmApi().session_new());

@@ -4,7 +4,7 @@ const b = await chromium.launch();
 async function measure(rows) {
   const p = await (await b.newContext({ viewport: { width: 1280, height: 800 } })).newPage();
   await p.goto("http://127.0.0.1:8123/editor.html", { waitUntil: "networkidle" });
-  await p.waitForFunction(() => document.querySelector("#tb-status")?.textContent?.startsWith("engine v"), null, { timeout: 30000 });
+  await p.waitForFunction(() => document.querySelector("#tb-status")?.dataset?.engine, null, { timeout: 30000 });
   await p.evaluate((rows) => {
     const a = window.opencalcEditor.wasmApi();
     for (let r = 0; r < rows; r++)

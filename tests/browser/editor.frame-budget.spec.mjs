@@ -18,8 +18,8 @@
 import { expect, test } from "@playwright/test";
 
 async function boot(page, { cols = 40, rows = 300, width } = {}) {
-  await page.goto("/editor.html");
-  await expect(page.locator("#tb-status")).toHaveText(/^engine v\d/, { timeout: 30_000 });
+  await page.goto("/editor.html?sample=demo");
+  await expect(page.locator("#tb-status")).toHaveAttribute("data-engine", /^\d/, { timeout: 30_000 });
   await page.evaluate(([cols, rows, width]) => {
     const ed = window.opencalcEditor;
     const a = ed.wasmApi();
@@ -130,8 +130,8 @@ test("a chart costs the frame its anchor, not the range its series name", async 
   // Stated as an equality rather than a ceiling. A byte budget would need
   // re-tuning whenever a field is added; that the number does not *move* is
   // the invariant, and it is what a regression would break.
-  await page.goto("/editor.html");
-  await expect(page.locator("#tb-status")).toHaveText(/^engine v\d/, { timeout: 30_000 });
+  await page.goto("/editor.html?sample=demo");
+  await expect(page.locator("#tb-status")).toHaveAttribute("data-engine", /^\d/, { timeout: 30_000 });
 
   const seen = await page.evaluate(async () => {
     const ed = window.opencalcEditor;

@@ -42,8 +42,8 @@ async function boot(page) {
   });
   page.on("pageerror", (err) => problems.push(`uncaught: ${err.message}`));
 
-  await page.goto("/editor.html");
-  await expect(page.locator("#tb-status")).toHaveText(/^engine v\d/, {
+  await page.goto("/editor.html?sample=demo");
+  await expect(page.locator("#tb-status")).toHaveAttribute("data-engine", /^\d/, {
     timeout: 30_000,
   });
   expect(problems, "the page logged nothing while booting").toEqual([]);
@@ -68,7 +68,7 @@ test("the editor boots, reports its engine version, and logs nothing", async ({
   await boot(page);
   // The version is the engine's own, so a page served beside a `pkg/` from a
   // different build says so rather than running it.
-  await expect(page.locator("#tb-status")).toHaveText(/^engine v\d+\.\d+\.\d+$/);
+  await expect(page.locator("#tb-status")).toHaveAttribute("data-engine", /^\d+\.\d+\.\d+$/);
 });
 
 test("the grid canvas actually paints", async ({ page }) => {
@@ -141,9 +141,9 @@ test("one undo reverses one edit", async ({ page }) => {
   await expect(cell(page, D5)).toHaveText("43.48");
 
   // And by the toolbar, which is the same command by another route.
-  await page.click('[data-oc-proxy="toolbar.redo"]');
+  await page.click('.rb-qat [data-oc-proxy="edit.redo"]');
   await expect(cell(page, D2)).toHaveText("45");
-  await page.click('[data-oc-proxy="toolbar.undo"]');
+  await page.click('.rb-qat [data-oc-proxy="edit.undo"]');
   await expect(cell(page, D2)).toHaveText("13.5");
 });
 

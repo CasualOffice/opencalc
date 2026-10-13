@@ -112,7 +112,7 @@ test("the file picker itself refuses, not just the menu entry", async ({ page })
 
 test("running the command rules at boot does not reveal what was hidden", async ({ page }) => {
   await boot(page);
-  await expect(page.locator("#tb-status")).toHaveText(/^engine v\d/, { timeout: 30_000 });
+  await expect(page.locator("#tb-status")).toHaveAttribute("data-engine", /^\d/, { timeout: 30_000 });
 
   // `applyCommandRules()` had never run at boot before. It wrote
   // `node.hidden = on` and `node.disabled = dim` outright, which asserts that
@@ -133,7 +133,7 @@ test("running the command rules at boot does not reveal what was hidden", async 
 test("a narrow window does not destroy the collapsed toolbar groups", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 800 });
   await boot(page);
-  await expect(page.locator("#tb-status")).toHaveText(/^engine v\d/, { timeout: 30_000 });
+  await expect(page.locator("#tb-status")).toHaveAttribute("data-engine", /^\d/, { timeout: 30_000 });
 
   // The toolbar's collapse *moves* controls into a group's flyout, so every
   // `.tb-group` is genuinely empty on a small screen. Marking those groups

@@ -46,6 +46,43 @@ we are pre-1.0 a rename is a minor version. Pin what you test against.
 
 ## Unreleased
 
+### 2026-10-14 — The Excel shell
+
+**Changed**
+
+- **One Excel-style shell** (UX-SHELL-06/07/08, [docs/95](docs/95-EXCEL-SHELL-TARGET.md)).
+  The editor's chrome is rebuilt to the owner-approved prototype: a title bar
+  with Save/Undo/Redo, command search (Alt+Q) and Share; Excel's tabs and
+  groups in the Classic ribbon, with Simplified as a toggle; a File page in
+  Excel's order; and Excel mobile's bottom command bar on phones. The toolbar
+  and Sheets chromes are retired. The ribbon draws its own controls from a
+  command registry instead of moving the toolbar's buttons, which also brings
+  back Format Cells, Paste Special, Insert Function, Replace and Go To — 23
+  commands the old ribbon could not reach.
+- **Icons are Fluent UI System Icons** (UX-SHELL-16), generated into
+  `webapp/icons.fluent.svg` by `tools/icons/build-sprite.mjs` with the licence
+  recorded; no text characters stand in for icons in the shell.
+- **Dialogs and side panels share one design** (UX-SHELL-18): one button
+  component, the action before Cancel as in Excel, one frame and radius, an
+  icon close, and panel actions that stay on screen.
+- **Format Cells ▸ Number** offers Excel's categories with a sample drawn from
+  the selected cell (UX-SHELL-13).
+- **A new workbook is blank** (UX-SHELL-04); the demo sheet is `?sample=demo`.
+- **The engine version left the status bar** (UX-SHELL-05). It is
+  `#tb-status[data-engine]` — the readiness signal hosts and gates wait on —
+  and Help ▸ About.
+
+**Fixed**
+
+- Escape anywhere moved keyboard focus to the Home tab, so the next keystrokes
+  were lost (UX-SHELL-01). Escape now also closes the editor's own menus
+  (UX-SHELL-09).
+- A formula missing its closing bracket is completed, as Excel does (UX-SHELL-02).
+- A status-bar error ends with the edit or selection it was about (UX-SHELL-03).
+- The in-cell editor widens to its text instead of clipping (UX-SHELL-14).
+- The Share dialog warned about COL-46, which is fixed, and not about COL-50,
+  which is open; it now describes the open limitation in plain words.
+
 ### 2026-08-12 — Iterative calculation, and the service stack decided
 
 **Added**

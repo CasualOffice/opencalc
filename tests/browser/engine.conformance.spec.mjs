@@ -25,8 +25,8 @@ import { SCRIPT, runScript } from "./engine-trace.mjs";
 const TRACER = readFileSync(new URL("./engine-trace.mjs", import.meta.url), "utf8");
 
 test("the editor's engine answers a scripted session the same way twice", async ({ page }) => {
-  await page.goto("/editor.html");
-  await expect(page.locator("#tb-status")).toHaveText(/^engine v\d/, { timeout: 30_000 });
+  await page.goto("/editor.html?sample=demo");
+  await expect(page.locator("#tb-status")).toHaveAttribute("data-engine", /^\d/, { timeout: 30_000 });
 
   // The module is read from disk and evaluated in the page rather than
   // imported: the spec runs in node and the engine lives in the browser, and a
@@ -56,8 +56,8 @@ test("the editor's engine answers a scripted session the same way twice", async 
 });
 
 test("the trace records answers, not just that a call happened", async ({ page }) => {
-  await page.goto("/editor.html");
-  await expect(page.locator("#tb-status")).toHaveText(/^engine v\d/, { timeout: 30_000 });
+  await page.goto("/editor.html?sample=demo");
+  await expect(page.locator("#tb-status")).toHaveAttribute("data-engine", /^\d/, { timeout: 30_000 });
 
   const trace = await page.evaluate(async (src) => {
     const url = URL.createObjectURL(new Blob([src], { type: "text/javascript" }));

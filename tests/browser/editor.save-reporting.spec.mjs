@@ -28,8 +28,8 @@ async function boot(page, native) {
       open: () => Promise.resolve(null),
     };
   }, native);
-  await page.goto("/editor.html");
-  await expect(page.locator("#tb-status")).toHaveText(/^engine v\d/, { timeout: 30_000 });
+  await page.goto("/editor.html?sample=demo");
+  await expect(page.locator("#tb-status")).toHaveAttribute("data-engine", /^\d/, { timeout: 30_000 });
   await page.evaluate(() => {
     window.opencalcEditor.wasmApi().session_new();
     window.opencalcEditor.wasmApi().session_set_cell(0, 0, 0, "unsaved work");

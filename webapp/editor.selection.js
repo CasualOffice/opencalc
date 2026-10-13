@@ -5,6 +5,7 @@
 // function below only *reads* it, which is what made the move safe to do
 // without touching a single body.
 
+import { command as registryCommand, isRegistered, registeredIds, setPolicy } from "./commands.js";
 import {
   A1,
   A1_PART,
@@ -474,7 +475,34 @@ export function commitToSelection(value) {
   return true;
 }
 
+/// Excel's completion of a formula typed without its closing brackets
+/// (UX-SHELL-02): an unterminated string is closed first, then every bracket
+/// still open. Brackets inside a string or a quoted sheet name do not count,
+/// and a surplus `)` is left for the formula guard to report.
+export function closeFormula(value) {
+  if (!value.trim().startsWith("=")) return value;
+  let depth = 0;
+  let quote = "";
+  for (let i = 0; i < value.length; i++) {
+    const ch = value[i];
+    if (quote) {
+      if (ch === quote) {
+        // A doubled quote is an escaped one, inside the same literal.
+        if (value[i + 1] === quote) i++;
+        else quote = "";
+      }
+    } else if (ch === '"' || ch === "'") quote = ch;
+    else if (ch === "(") depth++;
+    else if (ch === ")") depth--;
+  }
+  let out = value;
+  if (quote) out += quote;
+  if (depth > 0) out += ")".repeat(depth);
+  return out;
+}
+
 export function commit(value, advance, source = "user") {
+  value = closeFormula(value);
   // Cancellable before it is written, and told who is writing. A host without
   // either cannot enforce its own permissions, and cannot tell its own
   // programmatic write from a keystroke — so it echoes its change back into its
@@ -1037,10 +1065,17 @@ export function commandId(path, label) {
 /// `toolbar.delete-sheet` (whose *visible* route is the tab's context menu),
 /// and `#tb-more` with its flyout are the narrow-window overflow. Filtering on
 /// `hidden` would drop those from a standalone editor that has hidden nothing.
+/// Whether `runCommand(id)` has something to run: a menu or toolbar node, or
+/// a registered command (UX-SHELL-06).
+export function commandIsRunnable(id) {
+  return !!qsa(`[data-oc-command="${CSS.escape(String(id))}"]`)[0] || isRegistered(String(id));
+}
+
 export function listCommands() {
   return [...qsa("[data-oc-command]")]
     .filter((n) => !n.classList.contains("oc-cmd-hidden"))
     .map((n) => n.dataset.ocCommand)
+    .concat(registeredIds().filter((id) => !commandPolicy(id).hidden))
     .filter((v, i, a) => a.indexOf(v) === i)
     .sort();
 }
@@ -1143,8 +1178,30 @@ export function setNativeChrome(on) {
   document.documentElement.classList.toggle("oc-chrome-native", !!on);
 }
 
+/// What the rules say about one command id: hidden (the host's list, the
+/// mode's capabilities, read-only's whitelist) or disabled (the host's list).
+/// The same predicate `applyCommandRules()` stamps onto DOM nodes, so a
+/// registered command with no node is held to exactly the same promise.
+export function commandPolicy(id) {
+  const viewer = getCapabilities().readOnly === true;
+  const hidden =
+    commandRules.hidden.includes(id) ||
+    capabilityForbids(id) ||
+    (viewer && !isReadOnlySafe(id));
+  return { hidden, disabled: !hidden && commandRules.disabled.includes(id) };
+}
+setPolicy(commandPolicy);
+
 export function runCommand(id) {
   const node = qsa(`[data-oc-command="${CSS.escape(String(id))}"]`)[0];
+  if (!node && isRegistered(String(id))) {
+    // A command with no menu node (UX-SHELL-06): same refusals, same order.
+    const p = commandPolicy(String(id));
+    if (p.hidden) throw new Error(`the command "${id}" is not available in this mode`);
+    if (p.disabled) throw new Error(`the command "${id}" is disabled`);
+    registryCommand(String(id)).run();
+    return true;
+  }
   if (!node) {
     throw new Error(`unknown OpenCalc command "${id}" — listCommands() has the ids this build has`);
   }
@@ -1282,6 +1339,9 @@ export function applyCommandRules() {
   // of this function is here: it is the one place the rules are applied, and a
   // caller added later is covered without anybody remembering.
   window.__opencalcNative?.publishMenu?.();
+  // The shell redraws from the rules too — including registered commands,
+  // which have no node for an observer to watch (UX-SHELL-06).
+  document.dispatchEvent(new Event("oc:command-rules"));
 }
 
 export function followHyperlink(row, col) {
@@ -1423,7 +1483,16 @@ export function positionInline() {
   inline.style.left = left * z + "px";
   inline.style.top = top * z + "px";
   inline.style.fontSize = 13 * z + "px";
-  inline.style.width = Math.max(0, Math.min(x1, hiX) - left) * z + "px";
+  // Grow rightward to fit the entry, as Excel's in-cell editor does, up to
+  // the edge of the pane (UX-SHELL-14). The cell's own width is the floor, so
+  // a short entry still sits exactly over its cell. Measured with the box at
+  // the cell's width first: `scrollWidth` of a no-wrap textarea is its text.
+  const cellW = Math.max(0, Math.min(x1, hiX) - left) * z;
+  inline.style.width = cellW + "px";
+  const need = inline.scrollWidth + 6;
+  const room = Math.max(cellW, (hiX - left) * z);
+  inline.style.width = Math.min(Math.max(cellW, need), room) + "px";
+  if (need <= room) inline.scrollLeft = 0;
   const boxH = Math.max(0, Math.min(y1, hiY) - top) * z;
   // Grow past the cell for a multi-line entry (Alt+Enter), the way Excel's
   // in-cell editor does — the value is taller than the cell until it commits.
@@ -1480,7 +1549,23 @@ export function cancelEdit() {
   }
   if (editSurface) editSurface.value = editOriginal;
   endEdit();
+  clearStatusError();
   if (wasm) refreshFormulaBar();
+}
+
+/// An error in the status bar describes one cell; it ends when the edit is
+/// cancelled or the selection leaves that cell (UX-SHELL-03).
+export function clearStatusError() {
+  const err = status.querySelector(".err");
+  if (err) status.textContent = "";
+}
+
+function dropStaleStatusError() {
+  const err = status.querySelector(".err");
+  if (!err || editSurface) return;
+  const here = `${state.sheet}:${state.sel.row}:${state.sel.col}`;
+  if (!err.dataset.at) err.dataset.at = here;
+  else if (err.dataset.at !== here) clearStatusError();
 }
 
 export function updateCellMode() {
@@ -1497,6 +1582,7 @@ export function updateCellMode() {
 }
 
 export function updateNameBox() {
+  dropStaleStatusError();
   if (activeEl() === cellRef) return;
   const r = selRect();
   const rows = r.r1 - r.r0 + 1, cols = r.c1 - r.c0 + 1;
@@ -1734,16 +1820,24 @@ export function autofillToNeighbour() {
   draw();
 }
 
-export function seed() {
+/// A new workbook is blank (UX-SHELL-04). The demo sheet is opt-in, with
+/// `?sample=demo`, for demos and for the specs written against it.
+export function seed(sample = false) {
+  if (!sample) {
+    wasm.session_clear_history();
+    markSaved();
+    select(0, 0);
+    return;
+  }
   const set = (r, c, v) => wasm.session_set_cell(0, r, c, v);
   set(0, 0, "Item"); set(0, 1, "Qty"); set(0, 2, "Price"); set(0, 3, "Total");
   set(1, 0, "Widget"); set(1, 1, "3"); set(1, 2, "4.50"); set(1, 3, "=B2*C2");
   set(2, 0, "Gadget"); set(2, 1, "5"); set(2, 2, "2"); set(2, 3, "=B3*C3");
   set(3, 0, "Gizmo"); set(3, 1, "2"); set(3, 2, "9.99"); set(3, 3, "=B4*C4");
   set(4, 0, "Total"); set(4, 3, "=SUM(D2:D4)");
-  // A styled header row + a highlighted total.
-  const dark = matchMedia("(prefers-color-scheme: dark)").matches;
-  const headerFill = dark ? "24303f" : "e8eef7";
+  // A styled header row + a highlighted total. One fill whatever the OS theme:
+  // it is document content, and a document must not change with the viewer.
+  const headerFill = "e8eef7";
   for (let c = 0; c < 4; c++) wasm.session_set_style(0, 0, c, true, headerFill);
   wasm.session_set_style(0, 4, 3, true, "");
   wasm.session_set_style(0, 4, 0, true, "");
