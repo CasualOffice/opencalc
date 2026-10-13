@@ -695,6 +695,8 @@ impl WorkbookSession {
         let source = bytes.clone();
         let outcome = import_package_cancellable(bytes, config.limits, cancel)?;
         let mut workbook = outcome.workbook;
+        let mut report = outcome.report;
+        report_uncomputable(&workbook, &mut report);
         apply_environment(&mut workbook, &config);
         let calculation = config
             .calculation
@@ -706,7 +708,7 @@ impl WorkbookSession {
             author: None,
             workbook,
             history: History::with_depth(config.undo_depth),
-            report: outcome.report,
+            report,
             config,
             calculation,
             // A manual-mode file arrives with its own cached values, which are
@@ -2019,6 +2021,35 @@ impl WorkbookSession {
             SessionFormat::Ods => casual_calc_ods::export_loss(&self.workbook),
             SessionFormat::Delimited(_) => delimited_loss(&self.workbook, DELIMITED_SHEET),
         };
+        // **What the file carried and import could not keep** (`XL-FEAT-006`).
+        // The import report said so on open; this says it again where it
+        // matters, before the save that makes it permanent. An unedited save
+        // hands back the original bytes and loses none of it.
+        if !self.writes_source_verbatim(format) {
+            // A worksheet `<extLst>` is SpreadsheetML text, carried for the
+            // SpreadsheetML writer and for no other (`XL-FEAT-007`).
+            if !matches!(format, SessionFormat::Xlsx | SessionFormat::Xlsm) {
+                let sheets = self
+                    .workbook
+                    .sheets
+                    .iter()
+                    .filter(|s| s.ext_lst.is_some())
+                    .count();
+                report.record_n(
+                    "worksheet extensions (sparklines, x14 rules)",
+                    ModelOutcome::Omitted,
+                    RetentionOutcome::NotRetained,
+                    sheets as u64,
+                );
+            }
+            for entry in self.report.entries() {
+                if entry.retention == RetentionOutcome::NotRetained
+                    && entry.model != ModelOutcome::Mapped
+                {
+                    report.record_n(&entry.feature, entry.model, entry.retention, entry.count);
+                }
+            }
+        }
         // **The `.xlsm` half of `IO-04`.** Macros can only travel in a
         // macro-enabled package, so writing this document as anything else
         // leaves them behind — and the whole point of the row is that this had
@@ -2816,6 +2847,44 @@ fn delimited_carries_style(style: &Style) -> bool {
 fn apply_environment(workbook: &mut Workbook, config: &SessionConfig) {
     workbook.volatile_now = config.environment.now;
     workbook.volatile_seed = config.environment.seed;
+}
+
+/// Name, in the import report, every formula whose value is the file's cached
+/// one because this engine cannot compute it (`XL-FEAT-005`/`006`).
+///
+/// The value shown is right — it is what Excel showed — but it will not move
+/// when its inputs do, and the person opening the file has to be told that.
+/// One entry per unsupported function, `f/unsupported:NAME`, counted per cell,
+/// with the `_xlfn.` qualification the file carries left off for reading; text
+/// the parser could not read is already counted at import as `f/unparsed`.
+fn report_uncomputable(workbook: &Workbook, report: &mut CompatibilityReport) {
+    for sheet in &workbook.sheets {
+        for (_, cell) in sheet.cells.iter() {
+            if !cell
+                .flags
+                .contains(casual_calc_model::CellFlags::FILE_CACHED)
+            {
+                continue;
+            }
+            let Some(expr) = cell.formula.and_then(|h| workbook.formula(h)) else {
+                continue;
+            };
+            for name in casual_calc_eval::cannot_compute(workbook, expr) {
+                if name.starts_with('(') {
+                    continue; // unparsed text, already counted by import
+                }
+                let shown = name
+                    .strip_prefix("_xlfn._xlws.")
+                    .or_else(|| name.strip_prefix("_xlfn."))
+                    .unwrap_or(&name);
+                report.record(
+                    &format!("f/unsupported:{shown}"),
+                    ModelOutcome::Degraded,
+                    RetentionOutcome::Preserved,
+                );
+            }
+        }
+    }
 }
 
 /// The calculation mode the file itself asks for.

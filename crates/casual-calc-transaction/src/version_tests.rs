@@ -736,6 +736,7 @@ fn every_sheet_field_is_carried_by_an_operation_or_counted_as_unexpressed() {
         images: _,
         format_pr: _,
         carried: _,
+        ext_lst: _,
         retained_refs: _,
     } = sheet;
 }

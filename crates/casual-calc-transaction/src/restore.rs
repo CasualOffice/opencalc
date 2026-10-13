@@ -308,6 +308,9 @@ fn unexpressed_sheet_fields(
     if mine.carried != theirs.carried {
         note("carried");
     }
+    if mine.ext_lst != theirs.ext_lst {
+        note("ext_lst");
+    }
     if mine.retained_refs != theirs.retained_refs {
         note("retained_refs");
     }

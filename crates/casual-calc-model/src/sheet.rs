@@ -251,6 +251,22 @@ pub struct Sheet {
     /// byte for byte on the same reasoning as [`SheetProtection`].
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub carried: Vec<(String, BTreeMap<String, String>)>,
+    /// The worksheet's own `<extLst>`, as XML text, carried verbatim
+    /// (`XL-FEAT-007`).
+    ///
+    /// Where Excel keeps everything added to the format after 2007 —
+    /// sparklines, `x14` conditional formats and validations, slicer
+    /// references. Nothing here models any of it, and the semantic writer
+    /// rebuilds the sheet from the model, so before this the first edited save
+    /// deleted it. Self-contained: every namespace prefix it uses is declared
+    /// on its own start tag, because the writer's root element declares a
+    /// different set from the file's.
+    ///
+    /// Not shifted by structural edits — the same rule as
+    /// `casual_calc_formula::Expr::Raw`: text that is not understood cannot be
+    /// rewritten without guessing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ext_lst: Option<String>,
     /// Tables (ListObjects) defined on this sheet.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tables: Vec<Table>,
@@ -1268,6 +1284,7 @@ impl Sheet {
             images: Vec::new(),
             sort_state: None,
             carried: Vec::new(),
+            ext_lst: None,
             format_pr: BTreeMap::new(),
             retained_refs: Vec::new(),
             protection: None,

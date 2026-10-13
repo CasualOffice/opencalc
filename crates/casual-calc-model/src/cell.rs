@@ -20,6 +20,17 @@ impl CellFlags {
     pub const SPILL_ANCHOR: u8 = 1 << 1;
     /// This cell is filled by a neighboring spill anchor.
     pub const SPILL_CHILD: u8 = 1 << 2;
+    /// The value is the result the **file** cached for this formula, and
+    /// nothing here has recomputed it yet.
+    ///
+    /// Set by import on every formula cell that arrived with a cached value.
+    /// The evaluator keeps that value — rather than replacing it with its own
+    /// `#NAME?` — when the formula uses something this engine cannot compute
+    /// (an unimplemented function, or text the parser could not read), which
+    /// is what Excel would show (`XL-FEAT-005`). Cleared the first time the
+    /// engine does compute the cell; never set on a cell a person typed, so a
+    /// typed unknown function is `#NAME?` exactly as in Excel.
+    pub const FILE_CACHED: u8 = 1 << 3;
 
     /// Empty flags.
     pub fn new() -> Self {

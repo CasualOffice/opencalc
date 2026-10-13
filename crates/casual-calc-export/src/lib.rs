@@ -2855,6 +2855,12 @@ fn worksheet_xml(
         }
         s.push_str("</tableParts>");
     }
+    // `<extLst>` is CT_Worksheet's last child. Carried verbatim — sparklines,
+    // `x14` rules — and already self-contained, every prefix it uses declared
+    // on its own start tag at import (`XL-FEAT-007`).
+    if let Some(ext) = &sheet.ext_lst {
+        s.push_str(ext);
+    }
 
     s.push_str("</worksheet>");
     s

@@ -153,6 +153,12 @@ impl<'a> Evaluator<'a> {
             {
                 return value_from_cell(&cell.value, &self.workbook.strings);
             }
+            // The file's own answer for a formula this engine cannot compute
+            // (`XL-FEAT-005`). Here as well as at the write, so a formula
+            // reading this cell reads that answer too.
+            if crate::keeps_file_value(self.workbook, cell) {
+                return value_from_cell(&cell.value, &self.workbook.strings);
+            }
             return match self.workbook.formula(handle) {
                 Some(expr) => {
                     let previous = self.current;

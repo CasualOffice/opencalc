@@ -75,7 +75,11 @@ pub const FUTURE_FUNCTIONS: &[&str] = &[
     "COMBINA",
     "CONCAT",
     "CONFIDENCE.NORM",
+    "COT",
+    "COTH",
     "COVARIANCE.P",
+    "CSC",
+    "CSCH",
     "DAYS",
     "ECMA.CEILING",
     "EXPON.DIST",
@@ -87,6 +91,9 @@ pub const FUTURE_FUNCTIONS: &[&str] = &[
     "GAMMA.INV",
     "IFNA",
     "IFS",
+    "IMCOSH",
+    "IMSINH",
+    "IMTAN",
     "ISFORMULA",
     "ISO.CEILING",
     "ISOMITTED",
@@ -162,20 +169,35 @@ pub fn qualify_future_functions(expr: &mut Expr) -> bool {
 }
 
 /// Remove the `_xlfn.` (and `_xlfn._xlws.`) prefix from every function in
-/// `expr`, for reading.
+/// `expr` that this engine implements, for reading.
 ///
-/// Unconditional about the name that follows: a file may legitimately carry a
-/// prefixed function this engine does not implement, and stripping it gives the
-/// evaluator the chance to report an unknown *function* rather than a mangled
-/// one. The name is what the file said it was.
+/// **Only those.** The prefix is what tells Excel a name is a function it
+/// should know rather than a defined name or an add-in, and the writer puts it
+/// back only on the names in [`FUTURE_FUNCTIONS`]. Stripping it from a function
+/// this engine does *not* implement therefore lost it for good:
+/// `_xlfn.CEILING.MATH(4.2)` was saved as `CEILING.MATH(4.2)`, which Excel
+/// itself reads as `#NAME?` (`XL-FEAT-005`). So the rule is symmetric with the
+/// writer's — strip exactly what will be re-added — and an unknown name keeps
+/// its prefixes, spelled the way Excel spells them, and is written back as the
+/// file had it.
 pub fn strip_future_prefixes(expr: &mut Expr) -> bool {
     map_function_names(expr, &mut |name| {
         let rest = strip_prefix_ignoring_case(name, XLFN)?;
-        Some(
-            strip_prefix_ignoring_case(rest, XLWS)
-                .unwrap_or(rest)
-                .to_owned(),
-        )
+        let (ws, bare) = match strip_prefix_ignoring_case(rest, XLWS) {
+            Some(bare) => (true, bare),
+            None => (false, rest),
+        };
+        if is_future_function(bare) {
+            return Some(bare.to_owned());
+        }
+        // Not ours: keep the qualification, in the lower case the file format
+        // uses (the parser upper-cases function names).
+        let kept = if ws {
+            format!("_xlfn._xlws.{bare}")
+        } else {
+            format!("_xlfn.{bare}")
+        };
+        (kept != *name).then_some(kept)
     })
 }
 
@@ -477,10 +499,23 @@ mod tests {
     }
 
     #[test]
-    fn a_prefixed_function_we_do_not_implement_still_loses_its_prefix() {
-        // Reading is unconditional. Leaving the prefix on would report an
-        // unknown function under a name that is not the one in the file.
-        assert_eq!(stripped("_xlfn.NOTAREALFUNCTION(1)"), "NOTAREALFUNCTION(1)");
+    fn a_prefixed_function_we_do_not_implement_keeps_its_prefix() {
+        // XL-FEAT-005. The writer re-adds the prefix only for names in
+        // `FUTURE_FUNCTIONS`, so stripping it from anything else lost it for
+        // good, and Excel then read the saved formula as `#NAME?`.
+        assert_eq!(
+            stripped("_xlfn.NOTAREALFUNCTION(1)"),
+            "_xlfn.NOTAREALFUNCTION(1)"
+        );
+        assert_eq!(
+            stripped("_xlfn._xlws.NOTAREALFUNCTION(1)"),
+            "_xlfn._xlws.NOTAREALFUNCTION(1)"
+        );
+        // And writing leaves it exactly as read.
+        let mut expr = parse("_xlfn.CEILING.MATH(4.2)").unwrap();
+        strip_future_prefixes(&mut expr);
+        qualify_future_functions(&mut expr);
+        assert_eq!(expr.to_string(), "_xlfn.CEILING.MATH(4.2)");
     }
 
     #[test]
