@@ -1233,17 +1233,57 @@ pub(crate) fn eval_if(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -> Va
     if args.len() < 2 || args.len() > 3 {
         return Value::Error(ErrorValue::Value);
     }
-    match ev.eval_expr(sheet, &args[0]).as_bool() {
-        Ok(true) => ev.eval_expr(sheet, &args[1]),
+    // The condition is read in array context: `IF(A1:A5>2, …)` is a column of
+    // five decisions, not one. Collapsing it to the corner answered the first
+    // row's decision for every row — `SUM(IF(A1:A5>2,1,0))` was 0 where Excel
+    // says 3 (`XL-FEAT-003`). A scalar context still collapses the result, in
+    // `eval_expr`, so `=IF(A1>2,…)` in a cell is unchanged.
+    let condition = ev.eval_expr_array(sheet, &args[0]);
+    if let Value::Array { .. } = condition {
+        return if_elementwise(ev, sheet, args, &condition);
+    }
+    // A scalar condition picks one branch and evaluates only that one — the
+    // laziness is observable (`IF(A1=0,0,1/A1)`), so it is kept. The branch is
+    // handed through whole: `SUM(IF(TRUE,A1:A5,0))` is the column's sum.
+    match condition.as_bool() {
+        Ok(true) => ev.eval_expr_array(sheet, &args[1]),
         Ok(false) => {
             if args.len() == 3 {
-                ev.eval_expr(sheet, &args[2])
+                ev.eval_expr_array(sheet, &args[2])
             } else {
                 Value::Bool(false)
             }
         }
         Err(e) => Value::Error(e),
     }
+}
+
+/// `IF` with an array condition: each element picks from the branch at the
+/// same position, broadcasting a scalar branch, exactly as a binary operator
+/// pairs its operands. An omitted else is `FALSE` per element — which the
+/// aggregates then skip, so `MAX(IF(r>2, r))` is the max of the kept values.
+fn if_elementwise(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr], condition: &Value) -> Value {
+    // Both branches are needed: each element may choose either.
+    let then = ev.eval_expr_array(sheet, &args[1]);
+    let otherwise = if args.len() == 3 {
+        ev.eval_expr_array(sheet, &args[2])
+    } else {
+        Value::Bool(false)
+    };
+    let Some((rows, cols)) = crate::value::broadcast_shape(&[condition, &then, &otherwise]) else {
+        return Value::Error(ErrorValue::Value);
+    };
+    let mut cells = Vec::with_capacity(rows * cols);
+    for r in 0..rows {
+        for c in 0..cols {
+            cells.push(match condition.broadcast_at(r, c).as_bool() {
+                Ok(true) => then.broadcast_at(r, c),
+                Ok(false) => otherwise.broadcast_at(r, c),
+                Err(e) => Value::Error(e),
+            });
+        }
+    }
+    Value::Array { rows, cols, cells }
 }
 
 pub(crate) fn eval_iferror(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -> Value {
@@ -1602,9 +1642,20 @@ pub(crate) fn flatten_numbers(
             };
             match ev.eval_expr_array(sheet, arg) {
                 Value::Array { cells, .. } => {
+                    // An array argument contributes only its numbers, as a
+                    // reference does: Excel's rule is that logicals and text
+                    // *in an array or reference* are ignored. Coercing here
+                    // made `MIN(IF(r>2, r))` 0 and `AVERAGE(IF(r>2, r))` the
+                    // kept values over the full count, because every FALSE
+                    // the IF left behind was read as a zero.
                     for v in cells {
-                        // One level: an array cannot contain another.
-                        take(v)?;
+                        match v {
+                            Value::Number(n) => out.push(n),
+                            Value::Error(e) => return Err(e),
+                            Value::Lambda(_) => return Err(ErrorValue::Value),
+                            // One level: an array cannot contain another.
+                            _ => {}
+                        }
                     }
                 }
                 other => take(other)?,

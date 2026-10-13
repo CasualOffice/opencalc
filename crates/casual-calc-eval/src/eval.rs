@@ -572,16 +572,33 @@ impl<'a> Evaluator<'a> {
         }
     }
 
+    /// A unary operator, lifted element-wise over an array operand.
+    ///
+    /// The operand is read in array context for the same reason
+    /// [`Self::eval_binary`]'s are: `--(A1:A5>2)` is how a column of flags is
+    /// turned into ones and zeros for `SUMPRODUCT`, and `SUM(-A1:A5)` is the
+    /// negated column. Collapsing to the corner first answered one element (or
+    /// `#VALUE!` for a bare range) — a plausible wrong number (`XL-FEAT-004`).
+    /// A scalar context still collapses the result, in `eval_expr`.
     fn eval_unary(&mut self, sheet_index: usize, op: UnaryOp, operand: &Expr) -> Value {
-        let value = self.eval_expr(sheet_index, operand);
-        let n = match value.as_number() {
-            Ok(n) => n,
-            Err(e) => return Value::Error(e),
+        let apply = |value: &Value| -> Value {
+            let n = match value.as_number() {
+                Ok(n) => n,
+                Err(e) => return Value::Error(e),
+            };
+            match op {
+                UnaryOp::Negate => Value::Number(-n),
+                UnaryOp::Plus => Value::Number(n),
+                UnaryOp::Percent => Value::Number(n / 100.0),
+            }
         };
-        match op {
-            UnaryOp::Negate => Value::Number(-n),
-            UnaryOp::Plus => Value::Number(n),
-            UnaryOp::Percent => Value::Number(n / 100.0),
+        match self.eval_expr_array(sheet_index, operand) {
+            Value::Array { rows, cols, cells } => Value::Array {
+                rows,
+                cols,
+                cells: cells.iter().map(apply).collect(),
+            },
+            scalar => apply(&scalar),
         }
     }
 
@@ -591,30 +608,13 @@ impl<'a> Evaluator<'a> {
     /// and must agree in shape, because guessing how to line up a 3×1 against a
     /// 1×4 produces a plausible answer to a question nobody asked.
     fn broadcast_binary(&mut self, op: BinaryOp, lv: &Value, rv: &Value) -> Value {
-        let shape = |v: &Value| match v {
-            Value::Array { rows, cols, .. } => (*rows, *cols),
-            _ => (1, 1),
-        };
-        let (lr, lc) = shape(lv);
-        let (rr, rc) = shape(rv);
-        let (rows, cols) = (lr.max(rr), lc.max(rc));
-        let both_arrays = lr * lc > 1 && rr * rc > 1;
-        if both_arrays && (lr, lc) != (rr, rc) {
+        let Some((rows, cols)) = crate::value::broadcast_shape(&[lv, rv]) else {
             return Value::Error(ErrorValue::Value);
-        }
-        let pick = |v: &Value, r: usize, c: usize| -> Value {
-            match v {
-                Value::Array { rows, cols, cells } => cells
-                    .get((r % *rows) * *cols + (c % *cols))
-                    .cloned()
-                    .unwrap_or(Value::Empty),
-                other => other.clone(),
-            }
         };
         let mut cells = Vec::with_capacity(rows * cols);
         for r in 0..rows {
             for c in 0..cols {
-                let (a, b) = (pick(lv, r, c), pick(rv, r, c));
+                let (a, b) = (lv.broadcast_at(r, c), rv.broadcast_at(r, c));
                 cells.push(self.apply_scalar_binary(op, &a, &b));
             }
         }

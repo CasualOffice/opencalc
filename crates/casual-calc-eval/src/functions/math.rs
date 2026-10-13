@@ -126,31 +126,59 @@ pub(crate) fn eval_parity(
     }
 }
 
-/// SUMPRODUCT: element-wise product of equal-length arrays, then summed.
+/// SUMPRODUCT: element-wise product of same-shaped arrays, then summed.
+///
+/// Every argument is read in array context, so a computed block counts as
+/// much as a reference: `SUMPRODUCT(--(A1:A5>2))` and
+/// `SUMPRODUCT((A1:A5>2)*A1:A5)` are the canonical conditional count and sum,
+/// and reading only references collapsed them to one element (`XL-FEAT-002`).
+///
+/// Excel's rules, each one observable:
+/// - the arrays must have the same *shape*, not merely the same element count
+///   — a 5×1 against a 1×5 is `#VALUE!`;
+/// - an entry that is not a number — text, blank, **and logicals** — counts as
+///   0, which is why `SUMPRODUCT(A1:A5>2)` is 0 and the idiom needs `--`;
+/// - an error anywhere is the answer.
 pub(crate) fn eval_sumproduct(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -> Value {
     if args.is_empty() {
         return Value::Error(ErrorValue::Value);
     }
-    let mut cols: Vec<Vec<f64>> = Vec::new();
+    let mut arrays: Vec<Vec<f64>> = Vec::with_capacity(args.len());
+    let mut shape = None;
+    let mut error = None;
     for arg in args {
-        let mut nums = Vec::new();
-        for v in flatten_values(ev, sheet, arg) {
+        let value = ev.eval_expr_array(sheet, arg);
+        let this = value.shape();
+        if *shape.get_or_insert(this) != this {
+            return Value::Error(ErrorValue::Value);
+        }
+        let cells = match value {
+            Value::Array { cells, .. } => cells,
+            other => vec![other],
+        };
+        let mut nums = Vec::with_capacity(cells.len());
+        for v in cells {
             match v {
                 Value::Number(n) => nums.push(n),
-                Value::Bool(b) => nums.push(if b { 1.0 } else { 0.0 }),
-                Value::Error(e) => return Value::Error(e),
-                _ => nums.push(0.0), // text/empty contribute 0, per Excel
+                Value::Error(e) => {
+                    error.get_or_insert(e);
+                    nums.push(0.0);
+                }
+                Value::Lambda(_) => return Value::Error(ErrorValue::Value),
+                _ => nums.push(0.0),
             }
         }
-        cols.push(nums);
+        arrays.push(nums);
     }
-    let len = cols[0].len();
-    if cols.iter().any(|c| c.len() != len) {
-        return Value::Error(ErrorValue::Value);
+    // Shape is checked over every argument before an error is reported, so a
+    // mismatch is #VALUE! whichever argument carried the error.
+    if let Some(e) = error {
+        return Value::Error(e);
     }
+    let len = arrays[0].len();
     let mut total = 0.0;
     for i in 0..len {
-        total += cols.iter().map(|c| c[i]).product::<f64>();
+        total += arrays.iter().map(|c| c[i]).product::<f64>();
     }
     Value::Number(total)
 }

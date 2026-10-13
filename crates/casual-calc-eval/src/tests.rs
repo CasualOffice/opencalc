@@ -4719,3 +4719,113 @@ fn dotted_names_that_gained_a_cumulative_flag_honour_it() {
         num("LOGNORM.DIST(2,0,1,FALSE)")
     );
 }
+
+/// `XL-FEAT-002/003/004`: the array formulas every Excel user writes —
+/// `SUMPRODUCT(--(r>2))`, `SUM(IF(r>2,…))`, `SUM(-r)` — all answered a
+/// plausible wrong number (0) or `#VALUE!`, because unary operators and `IF`
+/// collapsed an array to its corner and `SUMPRODUCT` only read references.
+#[test]
+fn array_lifting_unary_if_and_sumproduct() {
+    use casual_calc_model::ErrorValue;
+    let mut b = Builder::new();
+    for i in 0..5u32 {
+        b.number((i, 0), f64::from(i + 1)); // A1:A5 = 1..5
+    }
+    // B1:B5 = 1, (empty), "x", 4, TRUE
+    b.number((0, 1), 1.0)
+        .text((2, 1), "x")
+        .number((3, 1), 4.0)
+        .boolean((4, 1), true);
+    // C1:C3 = 1, #DIV/0!, 3
+    b.number((0, 2), 1.0)
+        .formula((1, 2), "1/0")
+        .number((2, 2), 3.0);
+    // F1:G2 = [1 2; 3 4]
+    b.number((0, 5), 1.0)
+        .number((0, 6), 2.0)
+        .number((1, 5), 3.0)
+        .number((1, 6), 4.0);
+
+    let cases: &[(&str, CellValue)] = &[
+        // The formulas from the fit-gap report.
+        ("SUMPRODUCT(--(A1:A5>2))", CellValue::Number(3.0)),
+        ("SUMPRODUCT((A1:A5>2)*A1:A5)", CellValue::Number(12.0)),
+        ("SUM(IF(A1:A5>2,1,0))", CellValue::Number(3.0)),
+        ("MAX(IF(A1:A5>2,A1:A5))", CellValue::Number(5.0)),
+        ("SUM(-A1:A5)", CellValue::Number(-15.0)),
+        ("SUM(+A1:A5)", CellValue::Number(15.0)),
+        ("SUM(A1:A5%)", CellValue::Number(0.15)),
+        // FALSE elements of an array argument are ignored, not counted as 0.
+        ("MIN(IF(A1:A5>2,A1:A5))", CellValue::Number(3.0)),
+        ("AVERAGE(IF(A1:A5>2,A1:A5))", CellValue::Number(4.0)),
+        ("COUNT(IF(A1:A5>2,A1:A5))", CellValue::Number(3.0)),
+        // Only the selected element of each branch is used.
+        ("SUM(IF(A1:A5>0,A1:A5,1/0))", CellValue::Number(15.0)),
+        ("SUM(IF(A1:A5>2,A1:A5,-A1:A5))", CellValue::Number(9.0)),
+        // A scalar condition with an array branch hands the branch through whole.
+        ("SUM(IF(TRUE,A1:A5,0))", CellValue::Number(15.0)),
+        // Empty is 0 under negation; text is #VALUE! element-wise.
+        ("SUM(-B1:B2)", CellValue::Number(-1.0)),
+        ("SUM(--B1:B5)", CellValue::Error(ErrorValue::Value)),
+        // SUMPRODUCT: non-numbers (text, blank, logicals) in an array are 0.
+        ("SUMPRODUCT(B1:B5)", CellValue::Number(5.0)),
+        ("SUMPRODUCT(A1:A5>2)", CellValue::Number(0.0)),
+        // Errors inside arrays propagate.
+        (
+            "SUMPRODUCT(--(C1:C3>0))",
+            CellValue::Error(ErrorValue::Div0),
+        ),
+        ("SUM(IF(C1:C3>0,1,0))", CellValue::Error(ErrorValue::Div0)),
+        ("SUM(-C1:C3)", CellValue::Error(ErrorValue::Div0)),
+        // Mismatched shapes are #VALUE!, even when the element counts agree.
+        (
+            "SUMPRODUCT(A1:A5,A1:A4)",
+            CellValue::Error(ErrorValue::Value),
+        ),
+        (
+            "SUMPRODUCT(A1:A5,TRANSPOSE(A1:A5))",
+            CellValue::Error(ErrorValue::Value),
+        ),
+        // A 2×1 against a 1×2: two elements each, still not the same shape.
+        (
+            "SUMPRODUCT(A1:A2,F1:G1)",
+            CellValue::Error(ErrorValue::Value),
+        ),
+        // ...and the error in one argument does not outrank the mismatch.
+        (
+            "SUMPRODUCT(C1:C3,A1:A2)",
+            CellValue::Error(ErrorValue::Value),
+        ),
+        // 2-D arrays.
+        ("SUMPRODUCT((F1:G2>1)*F1:G2)", CellValue::Number(9.0)),
+        ("SUMPRODUCT(F1:G2,F1:G2)", CellValue::Number(30.0)),
+        ("SUM(IF(F1:G2>2,F1:G2,0))", CellValue::Number(7.0)),
+        ("SUMPRODUCT(-F1:G2)", CellValue::Number(-10.0)),
+        // Scalars are unchanged.
+        ("-A1", CellValue::Number(-1.0)),
+        ("--A2", CellValue::Number(2.0)),
+        ("A1%", CellValue::Number(0.01)),
+        ("IF(A1>5,1)", CellValue::Bool(false)),
+        ("IF(A1>0,7,8)", CellValue::Number(7.0)),
+        ("IF(A1>5,7,8)", CellValue::Number(8.0)),
+        ("SUMPRODUCT(A1:A3,A1:A3)", CellValue::Number(14.0)),
+        ("SUMPRODUCT(3)", CellValue::Number(3.0)),
+    ];
+    for (i, (f, _)) in cases.iter().enumerate() {
+        b.formula((10 + i as u32, 3), f);
+    }
+    let mut wb = b.build();
+    recalculate(&mut wb);
+    let mut failures = Vec::new();
+    for (i, (f, want)) in cases.iter().enumerate() {
+        let got = value_at(&wb, 10 + i as u32, 3);
+        let ok = match (&got, want) {
+            (CellValue::Number(g), CellValue::Number(w)) => (g - w).abs() < 1e-9,
+            _ => &got == want,
+        };
+        if !ok {
+            failures.push(format!("={f}: got {got:?}, want {want:?}"));
+        }
+    }
+    assert!(failures.is_empty(), "\n{}", failures.join("\n"));
+}
