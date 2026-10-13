@@ -522,16 +522,22 @@ export function drawMoveGhost(v) {
 
   // The source, washed out so it reads as vacated rather than merely selected.
   // A scrim of the *page background* does that in either theme, where a fixed
-  // white or black would only work in one. The ghost's own rectangle is
-  // subtracted (`evenodd`), so a short drag does not wash out the copy it just
-  // lifted.
+  // white or black would only work in one.
+  //
+  // **The ghost is excluded by a clip, not by filling the two rectangles
+  // `evenodd`.** `evenodd` over {source, ghost} leaves out only where they
+  // *overlap* — so it spared the ghost on a short drag and, once the pointer
+  // had travelled more than a band's width, filled the ghost too: the copy was
+  // washed back towards the page colour and the lifted header read as plain.
+  // A clip of "everything but the ghost" excludes it at any distance.
   ctx.save();
+  ctx.beginPath();
+  ctx.rect(-1e6, -1e6, 2e6, 2e6);
+  ctx.rect(src.x + dx, src.y + dy, src.w, src.h);
+  ctx.clip("evenodd");
   ctx.globalAlpha = 0.6;
   ctx.fillStyle = colors.bg || "#fff";
-  ctx.beginPath();
-  ctx.rect(src.x, src.y, src.w, src.h);
-  ctx.rect(src.x + dx, src.y + dy, src.w, src.h);
-  ctx.fill("evenodd");
+  ctx.fillRect(src.x, src.y, src.w, src.h);
   ctx.restore();
 
   // An accent edge on the ghost, so it reads as one lifted object even where
