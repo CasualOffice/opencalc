@@ -175,14 +175,17 @@ test("Alt+Down on a column with nothing to offer says so and stays put", async (
 //
 // Characterization, not a fix: these passed before this change and pass after.
 // They are here because the audit said otherwise and nothing asserted it.
-test("Ctrl+G and F5 both reach the name box", async ({ page }) => {
+// Both now open Excel's Go To dialog rather than the name box (XL-UX-019);
+// `editor.go-to.spec.mjs` holds what the dialog does.
+test("Ctrl+G and F5 both open Go To", async ({ page }) => {
   await boot(page);
   await page.keyboard.press("Control+g");
-  await expect(page.locator("#cell-ref")).toBeFocused();
+  await expect(page.locator("#oc-goto-ref")).toBeFocused();
+  await page.keyboard.press("Escape");
 
   await page.locator("#grid").focus();
   await page.keyboard.press("F5");
-  await expect(page.locator("#cell-ref")).toBeFocused();
+  await expect(page.locator("#oc-goto-ref")).toBeFocused();
 });
 
 test("Ctrl+F3 opens the name manager", async ({ page }) => {

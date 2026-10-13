@@ -192,7 +192,7 @@ function button(spec, size) {
       if (!src) return;
       for (const v of ["--oc-x-border-swatch", "--oc-x-font-swatch", "--oc-x-fill-swatch"]) {
         const val = src.style.getPropertyValue(v);
-        if (val) b.style.setProperty("--rb-swatch", val);
+        if (val && b.style.getPropertyValue("--rb-swatch") !== val) b.style.setProperty("--rb-swatch", val);
       }
     });
   }
@@ -208,8 +208,13 @@ function button(spec, size) {
     // The editor's rules (read-only, a host's hidden list, a mode's
     // capabilities) decide; a hidden command leaves the ribbon entirely.
     if (!spec.menu) b.hidden = cc.hidden ? cc.hidden() : false;
-    b.disabled = cc.enabled ? !cc.enabled() : false;
-    if (cc.checked) b.setAttribute("aria-pressed", cc.checked() ? "true" : "false");
+    // Written only on change, so a sync that changes nothing touches nothing.
+    const off = cc.enabled ? !cc.enabled() : false;
+    if (b.disabled !== off) b.disabled = off;
+    if (cc.checked) {
+      const p = cc.checked() ? "true" : "false";
+      if (b.getAttribute("aria-pressed") !== p) b.setAttribute("aria-pressed", p);
+    }
   });
   return b;
 }
@@ -335,7 +340,13 @@ let syncQueued = false;
 function queueSync() {
   if (syncQueued) return;
   syncQueued = true;
-  requestAnimationFrame(() => { syncQueued = false; for (const f of sync) f(); });
+  requestAnimationFrame(() => {
+    syncQueued = false;
+    // Counted for the scroll-cost gate (UX-SHELL-22): a property, not an
+    // attribute, so counting is not itself a DOM write.
+    if (el) el._syncs = (el._syncs || 0) + 1;
+    for (const f of sync) f();
+  });
 }
 
 /// Fold groups, lowest `fold` first, until the active panel fits.
@@ -681,6 +692,8 @@ function buildMobile(select, current) {
     else { run(it.id); refocusGrid(); queueSync(); }
   };
   const paint = () => {
+    // Off a phone the bar is not displayed; rebuilding it there is pure cost.
+    if (!document.documentElement.classList.contains("oc-phone")) return;
     const tab = TABS.find((t) => t.id === current()) || TABS[0];
     pickLabel.textContent = tab.label;
     icons.textContent = "";
@@ -895,9 +908,15 @@ export async function start() {
   }
   document.addEventListener("oc:command-rules", queueSync);
   cleanups.push(() => document.removeEventListener("oc:command-rules", queueSync));
-  const obs = new MutationObserver(queueSync);
+  // Only a value that actually changed is news. The editor rewrites these
+  // attributes on every frame, a scroll included, and each same-value write is
+  // still a mutation record — reacting to those re-synced the whole ribbon (and
+  // rebuilt the phone bar) on every frame of a scroll (UX-SHELL-22).
+  const obs = new MutationObserver((records) => {
+    if (records.some((m) => m.oldValue !== m.target.getAttribute(m.attributeName))) queueSync();
+  });
   for (const n of document.querySelectorAll(".toolbar [data-oc-command], #menubar [data-oc-command]")) {
-    obs.observe(n, { attributes: true, attributeFilter: ["disabled", "aria-pressed", "aria-checked", "class", "style"] });
+    obs.observe(n, { attributes: true, attributeOldValue: true, attributeFilter: ["disabled", "aria-pressed", "aria-checked", "class", "style"] });
   }
   cleanups.push(() => obs.disconnect());
 
@@ -908,7 +927,10 @@ export async function start() {
   mobile = buildMobile((id) => el._select(id), () => currentTab);
   (document.querySelector(".bottom-bar") || document.body.lastElementChild).after(mobile);
   const phone = window.matchMedia("(max-width: 600px)");
-  const applyPhone = () => document.documentElement.classList.toggle("oc-phone", phone.matches);
+  const applyPhone = () => {
+    document.documentElement.classList.toggle("oc-phone", phone.matches);
+    mobile?._paint();   // it skips painting off a phone, so paint on arrival
+  };
   phone.addEventListener("change", applyPhone);
   cleanups.push(() => phone.removeEventListener("change", applyPhone));
   applyPhone();

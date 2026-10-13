@@ -138,9 +138,11 @@ export function relabel() {
 }
 
 export function setTip(node, text) {
-  if (node.dataset.tip !== undefined) node.dataset.tip = text;
-  else node.title = text;
-  node.setAttribute("aria-label", text);
+  // Unchanged writes are skipped: this runs every frame for undo/redo, and a
+  // same-value write is still a DOM mutation that observers pay for.
+  if (node.dataset.tip !== undefined) { if (node.dataset.tip !== text) node.dataset.tip = text; }
+  else if (node.title !== text) node.title = text;
+  if (node.getAttribute("aria-label") !== text) node.setAttribute("aria-label", text);
 }
 
 export function tipify(node) {
