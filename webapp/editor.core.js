@@ -65,6 +65,7 @@ import {
   formatCellsDialog,
   insertDeleteDialog,
   goToDialog,
+  goToSpecialDialog,
   headerMenu,
   hyperlinkDialog,
   manageCfRules,
@@ -478,6 +479,7 @@ export {
   formatCellsDialog,
   insertDeleteDialog,
   goToDialog,
+  goToSpecialDialog,
   headerMenu,
   hyperlinkDialog,
   manageCfRules,
@@ -6932,6 +6934,7 @@ function registerShellCommands() {
   } });
   R("edit.replace", { label: "Replace…", shortcut: "Ctrl+H", run: () => openReplace() });
   R("edit.go-to", { label: "Go To…", shortcut: "Ctrl+G", run: () => goToDialog() });
+  R("edit.go-to-special", { label: "Go To Special…", run: () => goToSpecialDialog() });
 }
 
 function insertFunctionDialog() {

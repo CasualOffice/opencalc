@@ -72,7 +72,7 @@ export const TABS = [
         [S("edit.clear", "eraser", "Clear", { menu: ["edit.clear.all", "edit.clear.formatting", "edit.clear.values"] })],
       ]),
       L("data.sort-range", "arrow_sort_down_lines", "Sort & Filter", { menu: ["data.sort-range.a-z", "data.sort-range.z-a", "data.sort-range.custom-sort", "data.filter", "data.clear-all-filters"] }),
-      L("edit.find-replace", "search", "Find & Select", { menu: ["edit.find-replace", "edit.replace", "edit.go-to", "edit.select-all"] }),
+      L("edit.find-replace", "search", "Find & Select", { menu: ["edit.find-replace", "edit.replace", "edit.go-to", "edit.go-to-special", "edit.select-all"] }),
     ] },
   ] },
   { id: "insert", label: "Insert", key: "N", groups: [

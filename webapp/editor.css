@@ -2525,3 +2525,11 @@ html, .editor-body { overscroll-behavior: none; }
   height: 160px; max-height: none; margin: 0 0 6px; padding: 2px;
   border: 1px solid var(--oc-control-border-color); border-radius: 6px;
 }
+/* Excel's Special… sits at the far left of the footer; it is last in the DOM so
+   OK stays the first action. */
+.oc-confirm-actions .oc-goto-special { order: -1; margin-right: auto; }
+/* Go To Special (XL-UX-020): Excel's two columns of choices, the value-type
+   checks indented under Formulas. */
+.oc-gts-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0 24px; margin: 0 0 8px; align-items: start; }
+.oc-gts-types { display: flex; flex-direction: column; gap: 6px; padding-left: 24px; }
+.oc-gts-types .oc-check:has(input:disabled) { color: var(--oc-muted-text-color); }

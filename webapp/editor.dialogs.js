@@ -17,6 +17,7 @@ import {
   TOTALS_FUNCTIONS,
   activePanel,
   afterFilterChange,
+  allRanges,
   applyPersonalFilter,
   applySort,
   applyTableStyle,
@@ -82,6 +83,7 @@ import {
   tintColor,
   toggleFilter,
   tryEdit,
+  usedBounds,
   validationChevron,
   wasm,
   wrap,
@@ -3405,9 +3407,14 @@ export function goToDialog() {
   const actions = el("div", "oc-confirm-actions");
   const ok = el("button", "oc-btn primary", "OK");
   const cancel = el("button", "oc-btn", "Cancel");
-  actions.append(ok, cancel);
+  // Excel's Special… sits at the far left of the footer. Last in the DOM so OK
+  // stays the first action (and the first Tab stop after the fields); CSS
+  // moves it across.
+  const special = el("button", "oc-btn oc-goto-special", "Special…");
+  actions.append(ok, cancel, special);
   body.append(form, actions);
   modal.hidden = false;
+  special.addEventListener("click", () => { close(); goToSpecialDialog(); });
 
   const x = byId("oc-modal-x");
   const close = () => {
@@ -3461,4 +3468,181 @@ export function goToDialog() {
   modal.addEventListener("click", onBackdrop);
   document.addEventListener("keydown", onKey, true);
   input.focus();
+}
+
+// ---- Go To Special (fit-gap XL-UX-020) ---------------------------------------
+
+/// The value-type checkboxes, as the bits `session_special_cells` takes.
+const GTS_TYPES = [["Numbers", 1], ["Text", 2], ["Logicals", 4], ["Errors", 8]];
+
+/// The option picked last, so the dialog reopens on it as Excel's does.
+let gtsLast = "notes";
+
+/// Runs of indices whose size is non-zero — the shown rows or columns of
+/// `[first, first + sizes.length)`.
+function shownRuns(first, sizes) {
+  const runs = [];
+  sizes.forEach((px, i) => {
+    if (!(px > 0)) return;
+    const at = first + i;
+    const last = runs[runs.length - 1];
+    if (last && last[1] + 1 === at) last[1] = at; else runs.push([at, at]);
+  });
+  return runs;
+}
+
+/// What Go To Special's `kind` selects: rectangles on the current sheet.
+///
+/// The scope is Excel's: the selection when it is more than one cell, else the
+/// used range. Current region and Last cell ignore it, as they do in Excel.
+export function goToSpecialBoxes(kind, types) {
+  const sheet = state.sheet;
+  const b = usedBounds();
+  const used = { r0: 0, c0: 0, r1: b.rows - 1, c1: b.cols - 1 };
+  const sel = allRanges();
+  const one = sel.length === 1 && sel[0].r0 === sel[0].r1 && sel[0].c0 === sel[0].c1;
+  const scope = one ? [used] : sel;
+  const boxes = [];
+  if (kind === "constants" || kind === "formulas" || kind === "blanks") {
+    for (const r of scope) {
+      boxes.push(...JSON.parse(wasm.session_special_cells(sheet, r.r0, r.c0, r.r1, r.c1, kind, types)));
+    }
+  } else if (kind === "notes") {
+    for (const r of scope) {
+      for (const { r: row, c: col } of JSON.parse(wasm.session_comments(sheet, r.r0, r.c0, r.r1, r.c1))) {
+        boxes.push({ r0: row, c0: col, r1: row, c1: col });
+      }
+    }
+  } else if (kind === "region") {
+    let blk = null;
+    try { blk = JSON.parse(wasm.session_block_bounds(sheet, state.sel.row, state.sel.col)); } catch {}
+    boxes.push(blk ? { r0: blk.r0, c0: blk.c0, r1: blk.r1, c1: blk.c1 }
+      : { r0: state.sel.row, c0: state.sel.col, r1: state.sel.row, c1: state.sel.col });
+  } else if (kind === "last") {
+    boxes.push({ r0: used.r1, c0: used.c1, r1: used.r1, c1: used.c1 });
+  } else if (kind === "visible") {
+    for (const r of scope) {
+      const rows = shownRuns(r.r0, JSON.parse(wasm.session_row_px(sheet, r.r0, r.r1 - r.r0 + 1)));
+      const cols = shownRuns(r.c0, JSON.parse(wasm.session_col_px(sheet, r.c0, r.c1 - r.c0 + 1)));
+      for (const [r0, r1] of rows) for (const [c0, c1] of cols) boxes.push({ r0, c0, r1, c1 });
+    }
+  }
+  // Reading order, and the first area holds the active cell — the last box is
+  // the active one to `selectBoxes`, so the first goes to the end.
+  boxes.sort((p, q) => p.r0 - q.r0 || p.c0 - q.c0);
+  if (boxes.length > 1) boxes.push(boxes.shift());
+  return boxes;
+}
+
+/// Excel's Go To Special dialog. Picks the matching cells as a multi-range
+/// selection; "No cells were found." when there are none, with the selection
+/// left as it was and the dialog still open for another choice.
+export function goToSpecialDialog() {
+  const modal = byId("oc-modal");
+  const body = byId("oc-modal-body");
+  byId("oc-modal-title").textContent = "Go To Special";
+  body.textContent = "";
+
+  const grid = el("div", "oc-gts-grid");
+  const left = el("div", "oc-radio-group");
+  const right = el("div", "oc-radio-group");
+  for (const g of [left, right]) {
+    g.setAttribute("role", "radiogroup");
+    g.setAttribute("aria-label", "Select");
+  }
+  const radio = (group, value, label) => {
+    const row = el("label", "oc-radio");
+    const input = document.createElement("input");
+    input.type = "radio";
+    input.name = "oc-gts";
+    input.value = value;
+    input.checked = value === gtsLast;
+    row.append(input, el("span", null, label));
+    group.appendChild(row);
+    return input;
+  };
+  radio(left, "notes", "Notes");
+  radio(left, "constants", "Constants");
+  radio(left, "formulas", "Formulas");
+  const checks = el("div", "oc-gts-types");
+  const typeBoxes = GTS_TYPES.map(([label, bit]) => {
+    const row = el("label", "oc-check");
+    const box = document.createElement("input");
+    box.type = "checkbox";
+    box.checked = true;
+    box.dataset.bit = String(bit);
+    row.append(box, el("span", null, label));
+    checks.appendChild(row);
+    return box;
+  });
+  left.appendChild(checks);
+  radio(left, "blanks", "Blanks");
+  radio(left, "region", "Current region");
+  radio(right, "last", "Last cell");
+  radio(right, "visible", "Visible cells only");
+  grid.append(left, right);
+
+  const err = el("div", "oc-form-error");
+  err.id = "oc-gts-error";
+  err.setAttribute("role", "alert");
+  err.hidden = true;
+
+  const picked = () => body.querySelector("input[name=oc-gts]:checked")?.value ?? "notes";
+  // The type filter applies to Constants and Formulas only, as in Excel.
+  const syncChecks = () => {
+    const on = picked() === "constants" || picked() === "formulas";
+    for (const box of typeBoxes) box.disabled = !on;
+    err.hidden = true;
+  };
+  grid.addEventListener("change", syncChecks);
+  syncChecks();
+
+  const actions = el("div", "oc-confirm-actions");
+  const ok = el("button", "oc-btn primary", "OK");
+  const cancel = el("button", "oc-btn", "Cancel");
+  actions.append(ok, cancel);
+  body.append(grid, err, actions);
+  modal.hidden = false;
+
+  const x = byId("oc-modal-x");
+  const close = () => {
+    modal.hidden = true;
+    body.textContent = "";
+    document.removeEventListener("keydown", onKey, true);
+    x.removeEventListener("click", onCancel);
+    modal.removeEventListener("click", onBackdrop);
+  };
+  const onCancel = () => { close(); canvas.focus(); };
+  const onBackdrop = (e) => { if (e.target === modal) onCancel(); };
+  const apply = () => {
+    const kind = picked();
+    const types = typeBoxes.reduce((m, box) => (box.checked ? m | Number(box.dataset.bit) : m), 0);
+    let boxes = [];
+    try { boxes = goToSpecialBoxes(kind, types); }
+    catch (e) { statusError(errText(e)); return; }
+    gtsLast = kind;
+    if (!boxes.length) {
+      err.textContent = "No cells were found.";
+      err.hidden = false;
+      ok.focus();
+      return;
+    }
+    close();
+    selectBoxes(state.sheet, boxes);
+    canvas.focus();
+  };
+  const onKey = (e) => {
+    if (!grid.isConnected || modal.hidden) { document.removeEventListener("keydown", onKey, true); return; }
+    if (e.key === "Escape") { e.stopPropagation(); e.preventDefault(); onCancel(); }
+    else if (e.key === "Enter") {
+      e.stopPropagation(); e.preventDefault();
+      if (document.activeElement === cancel) onCancel(); else apply();
+    }
+  };
+  ok.addEventListener("click", apply);
+  cancel.addEventListener("click", onCancel);
+  x.addEventListener("click", onCancel);
+  modal.addEventListener("click", onBackdrop);
+  document.addEventListener("keydown", onKey, true);
+  body.querySelector("input[name=oc-gts]:checked")?.focus();
 }
