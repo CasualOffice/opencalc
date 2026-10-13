@@ -36,6 +36,9 @@ jobs:
         run: |
           mkdir -p site/pkg
           cp webapp/*.html webapp/*.js webapp/*.css site/
+          # The icon sprite the ribbon fetches at runtime (UX-SHELL-16). It is
+          # not imported by any module, so nothing else would bring it along.
+          cp webapp/*.svg site/
           cp -r webapp/fonts site/fonts
           cp crates/casual-calc-wasm/pkg/casual_calc_wasm.js site/pkg/
           cp crates/casual-calc-wasm/pkg/casual_calc_wasm_bg.wasm site/pkg/
@@ -48,6 +51,7 @@ jobs:
           set -euo pipefail
           for f in index.html editor.html docs.html embed.html download.html \
                    editor.js embed.js collab.js style.css editor.css \
+                   ribbon.js ribbon.css commands.js icons.fluent.svg \
                    pkg/casual_calc_wasm_bg.wasm fonts/Carlito-Regular.ttf; do
             [ -s "site/$f" ] || { echo "::error::site/$f is missing or empty"; exit 1; }
           done
