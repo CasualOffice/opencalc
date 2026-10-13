@@ -87,16 +87,21 @@
      5.08:1 and still reads as clearly secondary. */
   --oc-faint-text-color: #666e7c;       /* tertiary / shortcuts */
   --oc-disabled-color: #b6bcc7;
-  --oc-border-color: #e3e8f1;      /* dividers, gridlines */
-  --oc-control-border-color: #cfd6e4;    /* control outlines */
-  --oc-border-hover-color: #c9cfd9;
-  --oc-surface-color: #eef1f7;     /* toolbar pill groups, name box */
+  --oc-border-color: #e1e5e3;      /* dividers, gridlines */
+  --oc-control-border-color: #cbd2ce;    /* control outlines */
+  --oc-border-hover-color: #c3cac6;
+  --oc-surface-color: #f0f2f1;     /* toolbar pill groups, name box — neutral, as Excel's */
   --oc-popover-background-color: #ffffff;        /* popovers, panels */
   --oc-gridline-color: #d3d7de;        /* interior gridlines — see the contrast note */
-  --oc-accent-color: #3355c4;
-  --oc-accent-hover-color: #2945a1;
+  /* OpenCalc green (owner, 2026-10-14: "green screams spreadsheet"). Our own
+     emerald, deliberately not Excel's #217346/#107C41. */
+  --oc-accent-color: #0e7a55;
+  --oc-accent-hover-color: #0b6446;
   --oc-accent-contrast-color: #ffffff;
-  --oc-selection-color: rgba(47, 109, 246, .10);
+  /* A filled accent surface (primary buttons, the open File page, Share) and
+     its text: white at about 5.4:1 in both themes. */
+  --oc-accent-fill-color: #0e7a55;
+  --oc-selection-color: rgba(14, 122, 85, .11);
   --oc-find-highlight-color: rgba(245, 158, 11, .28);
   --oc-success-color: #16a34a;
   /* Advertised in the SDK's theme list and referenced by nothing, so a host
@@ -152,10 +157,11 @@
   --oc-surface-color: #1a1f27;
   --oc-popover-background-color: #171b21;
   --oc-gridline-color: #333b46;
-  --oc-accent-color: #5b8bff;
-  --oc-accent-hover-color: #7aa0ff;
+  --oc-accent-color: #3ccb8f;
+  --oc-accent-hover-color: #6bdaab;
   --oc-accent-contrast-color: #0b0d12;
-  --oc-selection-color: rgba(91, 139, 255, .16);
+  --oc-accent-fill-color: #0e7a55;
+  --oc-selection-color: rgba(60, 203, 143, .16);
   --oc-find-highlight-color: rgba(245, 158, 11, .34);
   --oc-control-shadow: 0 1px 2px rgba(0, 0, 0, .4);
   --oc-danger-color: #ff6b6b;
@@ -198,10 +204,11 @@
     --oc-surface-color: #1a1f27;
     --oc-popover-background-color: #171b21;
     --oc-gridline-color: #333b46;
-    --oc-accent-color: #5b8bff;
-    --oc-accent-hover-color: #7aa0ff;
+    --oc-accent-color: #3ccb8f;
+    --oc-accent-hover-color: #6bdaab;
     --oc-accent-contrast-color: #0b0d12;
-    --oc-selection-color: rgba(91, 139, 255, .16);
+    --oc-accent-fill-color: #0e7a55;
+    --oc-selection-color: rgba(60, 203, 143, .16);
   --oc-find-highlight-color: rgba(245, 158, 11, .34);
     --oc-control-shadow: 0 1px 2px rgba(0, 0, 0, .4);
   --oc-danger-color: #ff6b6b;
@@ -635,12 +642,12 @@ body {
    swaps the accent gets a legible button rather than one that happened to work
    for green. The ribbon's File tab carries the same correction. */
 .oc-btn.primary {
-  background: color-mix(in srgb, var(--oc-accent-color), #000 25%);
-  border-color: color-mix(in srgb, var(--oc-accent-color), #000 25%);
+  background: var(--oc-accent-fill-color, color-mix(in srgb, var(--oc-accent-color), #000 25%));
+  border-color: var(--oc-accent-fill-color, color-mix(in srgb, var(--oc-accent-color), #000 25%));
   color: #fff;
 }
 @supports not (background: color-mix(in srgb, red, blue)) {
-  .oc-btn.primary { background: var(--oc-accent-color); border-color: var(--oc-accent-color); }
+  .oc-btn.primary { background: var(--oc-accent-fill-color, var(--oc-accent-color)); border-color: var(--oc-accent-fill-color, var(--oc-accent-color)); }
 }
 .oc-btn.primary:hover { filter: brightness(1.06); }
 
@@ -1396,7 +1403,7 @@ textarea.panel-field { resize: vertical; min-height: 68px; font-family: inherit;
 .panel-swatches .swatch.on { border-color: var(--oc-text-color); }
 .panel-actions { display: flex; gap: 8px; margin-top: 2px; }
 .panel-actions button { flex: 1 1 auto; height: 34px; border-radius: 8px; font-size: 13px; font-weight: 600; cursor: pointer; border: 1px solid var(--oc-control-border-color); }
-.panel-btn-primary { background: var(--oc-accent-color); color: #fff; border-color: var(--oc-accent-color); }
+.panel-btn-primary { background: var(--oc-accent-fill-color); color: #fff; border-color: var(--oc-accent-fill-color); }
 .panel-btn-primary:hover { filter: brightness(1.05); }
 .panel-btn-ghost { background: var(--oc-background-color); color: var(--oc-text-color); }
 .panel-btn-ghost:hover { background: var(--oc-surface-color); }
@@ -2429,7 +2436,14 @@ html, .editor-body { overscroll-behavior: none; }
 .oc-btn:hover:not(:disabled) { background: var(--oc-surface-color); border-color: var(--oc-border-hover-color); }
 .oc-btn:focus-visible { outline: 2px solid var(--oc-accent-color); outline-offset: 2px; }
 .oc-btn:disabled { opacity: .45; cursor: default; }
-.oc-btn.primary:hover:not(:disabled) { filter: brightness(1.08); }
+/* The primary keeps its fill on hover and darkens a step: the shared hover
+   above set the light surface colour, which outranked `.primary` and left white
+   text on a near-white button. */
+.oc-btn.primary:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--oc-accent-fill-color, var(--oc-accent-color)), #000 14%);
+  border-color: color-mix(in srgb, var(--oc-accent-fill-color, var(--oc-accent-color)), #000 14%);
+  filter: none;
+}
 .oc-btn.danger { color: var(--oc-danger-color); border-color: color-mix(in srgb, var(--oc-danger-color) 45%, var(--oc-control-border-color)); }
 .oc-btn.danger:hover:not(:disabled) { background: color-mix(in srgb, var(--oc-danger-color) 8%, var(--oc-background-color)); }
 

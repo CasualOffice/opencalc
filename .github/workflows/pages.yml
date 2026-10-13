@@ -36,10 +36,17 @@ jobs:
         run: |
           mkdir -p site/pkg
           cp webapp/*.html webapp/*.js webapp/*.css site/
+          # The icon sprite the ribbon fetches at runtime (UX-SHELL-16). It is
+          # not imported by any module, so nothing else would bring it along.
+          cp webapp/*.svg site/
           cp -r webapp/fonts site/fonts
           cp crates/casual-calc-wasm/pkg/casual_calc_wasm.js site/pkg/
           cp crates/casual-calc-wasm/pkg/casual_calc_wasm_bg.wasm site/pkg/
           cp fixtures/generated/minimal.xlsx site/sample.xlsx
+          # Pages serves files as they are, so the dev server's per-tree `?v=`
+          # stamps must be applied here, or a deploy keeps the old URLs and
+          # browsers keep the old files (and cached 404s) for hours.
+          python3 tools/stamp-site.py site
 
       # The pages that must exist, asserted rather than assumed — a silent
       # 404 on the deployed site is exactly the failure this job just had.
@@ -48,6 +55,7 @@ jobs:
           set -euo pipefail
           for f in index.html editor.html docs.html embed.html download.html \
                    editor.js embed.js collab.js style.css editor.css \
+                   ribbon.js ribbon.css commands.js icons.fluent.svg \
                    pkg/casual_calc_wasm_bg.wasm fonts/Carlito-Regular.ttf; do
             [ -s "site/$f" ] || { echo "::error::site/$f is missing or empty"; exit 1; }
           done

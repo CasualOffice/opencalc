@@ -185,3 +185,12 @@
   -webkit-font-smoothing: antialiased;
   user-select: none;
 }
+
+/* A filled accent surface and the text on it (the Share button, the open File
+ * page, a chosen chip). White in both themes on the accent deepened a quarter
+ * toward black: the dark theme's accent is a light blue meant for text, and
+ * its paired text colour is near-black, which read as black on blue. */
+:root, :host {
+  --rb-accent-fill: var(--oc-accent-fill-color, color-mix(in srgb, var(--oc-accent-color), #000 25%));
+  --rb-on-accent: #fff;
+}

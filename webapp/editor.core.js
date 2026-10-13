@@ -872,7 +872,10 @@ const HIDDEN_CHROME = (PARAMS.get("hide") || "")
 // the brand is the tab's own title and `Help ▸ About`, which is where five of
 // five put it, and `editor.branding` asserts both.
 if (BRAND !== "OpenCalc") document.title = BRAND;
-if (ACCENT) document.documentElement.style.setProperty("--oc-accent-color", ACCENT);
+if (ACCENT) {
+  document.documentElement.style.setProperty("--oc-accent-color", ACCENT);
+  document.documentElement.style.setProperty("--oc-accent-fill-color", `color-mix(in srgb, ${ACCENT}, #000 25%)`);
+}
 
 // Applied to the root, because `.oc-hide-header` and its siblings are written
 // as descendant selectors and the header is a child of `<body>` here where in
@@ -1855,8 +1858,8 @@ export function readColors() {
     muted: css("--oc-muted-text-color") || "#7b8391",
     grid: css("--oc-gridline-color") || "#f0f1f4",
     headerBg: css("--oc-surface-color") || "#f6f7f9",
-    accent: css("--oc-accent-color") || "#2f6df6",
-    sel: css("--oc-selection-color") || "rgba(47,109,246,.10)",
+    accent: css("--oc-accent-color") || "#0e7a55",
+    sel: css("--oc-selection-color") || "rgba(14,122,85,.11)",
     // Distinct from the selection tint: a find hit and the active cell must not
     // read as the same thing.
     findHit: css("--oc-find-highlight-color") || "rgba(245,158,11,.28)",

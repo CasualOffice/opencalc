@@ -171,17 +171,49 @@ export const TABS = [
   ] },
 ];
 
-/// The File page's rail, in Excel's order. Each pane lists commands; `new`
-/// draws template tiles instead.
+/// The File page, in Excel's order. Each page is a list of sections; an item
+/// names a command, its icon, and one line saying what it does — Excel's File
+/// page describes its choices rather than listing bare links. `new` draws
+/// template tiles and `options` draws grouped settings instead.
+const I = (id, icon, label, desc) => ({ id, icon, label, desc });
 export const FILE_RAIL = [
   { id: "new", label: "New", icon: "document_add" },
-  { id: "open", label: "Open", icon: "folder_open", cmds: ["file.open"] },
-  { id: "info", label: "Info", icon: "info", cmds: ["file.properties", "file.version-history"] },
-  { id: "save", label: "Save a Copy", icon: "save", cmds: ["file.save", "file.download.excel-xlsx", "file.download.opendocument-ods", "file.download.csv-csv", "file.download.tab-separated-tsv", "file.download.pipe-separated-psv", "file.download.excel-macro-enabled-xlsm", "file.download.same-format-as-opened"] },
-  { id: "print", label: "Print", icon: "print", cmds: ["file.print", "file.export-as-pdf", "file.page-setup"] },
-  { id: "share", label: "Share", icon: "share", cmds: ["file.share"] },
-  { id: "options", label: "Options", icon: "settings", cmds: ["view.theme.auto", "view.theme.light", "view.theme.dark", "tools.settings"] },
+  { id: "open", label: "Open", icon: "folder_open", sections: [
+    { items: [I("file.open", "folder_open", "Browse", "Open an Excel, OpenDocument or CSV file from this device")] },
+  ] },
+  { id: "info", label: "Info", icon: "info", sections: [
+    { items: [
+      I("file.properties", "info", "Properties", "Title, subject, author and keywords saved with the workbook"),
+      I("file.version-history", "history", "Version History", "See earlier versions of this workbook and restore one"),
+    ] },
+  ] },
+  { id: "save", label: "Save a Copy", icon: "save", sections: [
+    { items: [I("file.save", "save", "Save", "Save to the file this workbook was opened from")] },
+    { title: "Save a copy as", items: [
+      I("file.download.excel-xlsx", "table", "Excel Workbook", ".xlsx — opens in Excel and most spreadsheet apps"),
+      I("file.download.excel-macro-enabled-xlsm", "table", "Excel Macro-Enabled Workbook", ".xlsm — keeps the workbook's macros"),
+      I("file.download.opendocument-ods", "document", "OpenDocument Spreadsheet", ".ods — for LibreOffice and other ODF apps"),
+      I("file.download.csv-csv", "document", "CSV (Comma delimited)", ".csv — values of the active sheet only"),
+      I("file.download.tab-separated-tsv", "document", "Text (Tab delimited)", ".tsv — values of the active sheet only"),
+      I("file.download.pipe-separated-psv", "document", "Text (Pipe delimited)", ".psv — values of the active sheet only"),
+      I("file.download.same-format-as-opened", "arrow_download", "Same format as opened", "Keep the format the file came in"),
+    ] },
+  ] },
+  { id: "print", label: "Print", icon: "print", sections: [
+    { items: [
+      I("file.print", "print", "Print", "Print the active sheet (Ctrl+P)"),
+      I("file.export-as-pdf", "document_pdf", "Export as PDF", "Save the sheet as a PDF document"),
+      I("file.page-setup", "document_one_page", "Page Setup", "Margins, orientation, scaling and print titles"),
+    ] },
+  ] },
+  { id: "share", label: "Share", icon: "share", sections: [
+    { items: [I("file.share", "people", "Share with people", "Invite others to edit this workbook with you")] },
+  ] },
+  { id: "options", label: "Options", icon: "settings" },
 ];
+
+/// Commands the Options page uses (for the completeness gate).
+export const OPTIONS_COMMANDS = ["view.theme.auto", "view.theme.light", "view.theme.dark", "tools.settings"];
 
 /// Every command id the model names, for the registry-completeness gate.
 export function modelCommandIds() {
@@ -195,7 +227,8 @@ export function modelCommandIds() {
     g.items.forEach(walk);
     if (g.launcher) ids.add(g.launcher);
   }
-  for (const r of FILE_RAIL) for (const c of r.cmds || []) ids.add(c);
+  for (const r of FILE_RAIL) for (const sec of r.sections || []) for (const it of sec.items) ids.add(it.id);
+  for (const c of OPTIONS_COMMANDS) ids.add(c);
   ids.add("file.new");
   // Group-level wrappers that are not commands themselves: the button only
   // drops its menu.

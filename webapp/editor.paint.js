@@ -861,6 +861,9 @@ export function applyTheme(theme) {
 
 export function applyAccent(color) {
   ocThemeHost.style.setProperty("--oc-accent-color", color);
+  // The filled surfaces follow a picked accent too, deepened so white text
+  // stays readable on it.
+  ocThemeHost.style.setProperty("--oc-accent-fill-color", `color-mix(in srgb, ${color}, #000 25%)`);
   localStorage.setItem("oc-accent", color);
   for (const b of qsa("#set-accent button")) {
     b.setAttribute("aria-current", b.dataset.c === color ? "true" : "false");
