@@ -2592,7 +2592,54 @@ export function refreshValidationPrompt() {
   box.hidden = false;
 }
 
-export function cellMenu(x, y) {
+/// Arrow keys, Home/End, Right/Left into and out of a submenu, Escape — the
+/// keyboard half of a context menu (XL-UX-015).
+///
+/// Installed on every cell and header menu, so a right-click menu answers to
+/// the arrows as Excel's does; `focusFirst` is for a menu the keyboard opened
+/// (ContextMenu, Shift+F10), where nothing else would put focus inside it and
+/// every key would go on driving the grid underneath. Enter needs no handling:
+/// it activates the focused `<button>` natively, and each item's click already
+/// closes the menu and runs its verb.
+export function menuKeyboard(menu, focusFirst) {
+  const items = (scope) => [...scope.children].filter((n) => n.tagName === "BUTTON" && !n.hidden && !n.disabled);
+  const scopeOf = (n) => n?.closest(".ctx-submenu") ?? menu;
+  menu.addEventListener("keydown", (e) => {
+    const cur = document.activeElement;
+    const scope = menu.contains(cur) ? scopeOf(cur) : menu;
+    const list = items(scope);
+    const i = list.indexOf(cur);
+    const go = (j) => { const n = list[(j + list.length) % list.length]; if (n) n.focus(); };
+    switch (e.key) {
+      case "ArrowDown": go(i + 1); break;
+      case "ArrowUp": go(i < 0 ? -1 : i - 1); break;
+      case "Home": go(0); break;
+      case "End": go(-1); break;
+      case "ArrowRight":
+        if (cur?.classList.contains("has-sub")) {
+          cur.click();
+          const sub = cur.nextElementSibling;
+          if (sub && !sub.hidden) items(sub)[0]?.focus();
+        }
+        break;
+      case "ArrowLeft":
+        if (scope !== menu) { scope.hidden = true; scope.previousElementSibling?.focus(); }
+        break;
+      case "Escape":
+        if (scope !== menu) { scope.hidden = true; scope.previousElementSibling?.focus(); break; }
+        closeSheetMenu();
+        canvas.focus();
+        break;
+      case "Tab": go(i + (e.shiftKey ? -1 : 1)); break;
+      default: return;
+    }
+    e.preventDefault();
+    e.stopPropagation();
+  });
+  if (focusFirst) items(menu)[0]?.focus({ preventScroll: true });
+}
+
+export function cellMenu(x, y, fromKeyboard = false) {
   closeSheetMenu();
   const menu = document.createElement("div");
   menu.className = "popmenu ctx-menu";
@@ -2602,7 +2649,7 @@ export function cellMenu(x, y) {
   const item = (label, danger, fn) => {
     const b = el("button", danger ? "danger" : null, label);
     b.addEventListener("mouseenter", hideSubs);
-    b.addEventListener("click", () => { closeSheetMenu(); fn(); });
+    b.addEventListener("click", () => { closeSheetMenu(); canvas.focus(); fn(); });
     menu.appendChild(b);
   };
   // A submenu row (label + ›); its child popmenu is nested so it is removed
@@ -2614,7 +2661,7 @@ export function cellMenu(x, y) {
     sub.hidden = true;
     for (const [lbl, danger, fn] of entries) {
       const c = el("button", danger ? "danger" : null, lbl);
-      c.addEventListener("click", (e) => { e.stopPropagation(); closeSheetMenu(); fn(); });
+      c.addEventListener("click", (e) => { e.stopPropagation(); closeSheetMenu(); canvas.focus(); fn(); });
       sub.appendChild(c);
     }
     const openSub = () => {
@@ -2746,6 +2793,7 @@ export function cellMenu(x, y) {
   });
   item("Filter", false, () => toggleFilter());
   positionMenu(menu, x, y);
+  menuKeyboard(menu, fromKeyboard);
 }
 
 /// The largest size this dialog will accept, in device pixels.
@@ -2937,14 +2985,14 @@ export function sizeDialog(axis, index) {
   input.select();
 }
 
-export function headerMenu(axis, x, y) {
+export function headerMenu(axis, x, y, fromKeyboard = false) {
   closeSheetMenu();
   const isCol = axis === "col";
   const menu = el("div", "popmenu ctx-menu");
   menu.id = "sheet-ctx";
   const item = (label, danger, fn) => {
     const b = el("button", danger ? "danger" : null, label);
-    b.addEventListener("click", () => { closeSheetMenu(); fn(); });
+    b.addEventListener("click", () => { closeSheetMenu(); canvas.focus(); fn(); });
     menu.appendChild(b);
   };
   const sep = () => menu.appendChild(el("div", "menu-sep"));
@@ -3003,6 +3051,7 @@ export function headerMenu(axis, x, y) {
       : wasm.session_unhide_rows(state.sheet, r.r0, r.r1)));
   });
   positionMenu(menu, x, y);
+  menuKeyboard(menu, fromKeyboard);
 }
 
 export function openColumnFilterForTest(col) {

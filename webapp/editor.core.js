@@ -8000,8 +8000,55 @@ function wireEvents() {
   window.addEventListener("mouseup", () => {
     if (sbDrag) { vthumb.classList.remove("drag"); hthumb.classList.remove("drag"); sbDrag = null; }
   });
+  // The keyboard's own menu keys (XL-UX-015). The ContextMenu key and
+  // Shift+F10 open the menu *at the active cell* and leave the selection
+  // alone, as Excel does. Handled at keydown because Shift+F10 raises no
+  // `contextmenu` at all in most browsers, and where the key does raise one its
+  // coordinates are the mouse pointer's — which the handler below used to
+  // treat as a right-click there, opening the menu at the pointer and moving
+  // the selection under it.
+  let keyMenuAt = -Infinity;
+  const keyboardMenu = () => {
+    keyMenuAt = performance.now();
+    endInline();
+    ensureVisible();
+    draw();
+    const rect = canvas.getBoundingClientRect();
+    const z = state.zoom;
+    const { row, col } = state.sel;
+    const x = rect.left + ((colXAt(col) ?? HW) + Math.min(colWAt(col) ?? 0, 24)) * z;
+    const y = rect.top + ((rowYAt(row) ?? HH) + (rowHAt(row) ?? 0)) * z;
+    if (state.selKind === "cols") headerMenu("col", x, y, true);
+    else if (state.selKind === "rows") headerMenu("row", x, y, true);
+    else cellMenu(x, y, true);
+    // Short of room below, a pointer menu flips above the pointer; anchored to
+    // a cell near the top that throws it over the ribbon. Slide it up only as
+    // far as it has to go instead, so it stays beside the cell it is about.
+    const m = byId("sheet-ctx");
+    if (m && y + m.offsetHeight > window.innerHeight) {
+      m.style.top = Math.max(4, window.innerHeight - m.offsetHeight - 4) + "px";
+    }
+  };
+  canvas.addEventListener("keydown", (e) => {
+    if (state.editing) return;
+    const menuKey = e.key === "ContextMenu" || (e.key === "F10" && e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey);
+    if (!menuKey) return;
+    e.preventDefault();
+    e.stopImmediatePropagation();
+    keyboardMenu();
+  });
   canvas.addEventListener("contextmenu", (e) => {
     e.preventDefault();
+    // A keyboard-raised `contextmenu`: either the echo of a key handled above,
+    // or one whose keydown never reached us. Pointer Events give a keyboard
+    // origin `pointerId` -1 with no `pointerType`; Firefox says so outright.
+    const fromKeys = performance.now() - keyMenuAt < 1000 ||
+      (typeof PointerEvent !== "undefined" && e instanceof PointerEvent && e.pointerId === -1 && e.pointerType === "") ||
+      e.mozInputSource === 6;
+    if (fromKeys) {
+      if (!byId("sheet-ctx")) keyboardMenu();
+      return;
+    }
     const rect = canvas.getBoundingClientRect();
     const px = (e.clientX - rect.left) / state.zoom, py = (e.clientY - rect.top) / state.zoom;
     // A right-click in a header targets that row or column. cellAt() returns
