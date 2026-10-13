@@ -143,7 +143,7 @@ pub(crate) fn special_cells(
 }
 
 /// Go To Special over a range: JSON `[{r0,c0,r1,c1}, …]`, the matching cells
-/// as rectangles. See [`special_cells`] for `kind` and `types`.
+/// as rectangles. See `special_cells` for `kind` and `types`.
 #[wasm_bindgen]
 pub fn session_special_cells(
     sheet: usize,
