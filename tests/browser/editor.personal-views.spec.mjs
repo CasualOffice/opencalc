@@ -47,8 +47,8 @@ async function seed(page) {
 /// operation to explain it.
 async function turnFilterOn(page) {
   await page.evaluate(() => window.opencalcEditor.selectForTest(0, 0));
-  await page.locator('[data-oc-label="Data"]').click();
-  await page.locator('[data-oc-label="Filter"]').click();
+  await page.locator("#rb-tab-data").click();
+  await page.locator('.oc-ribbon [data-cmd="data.filter"]').click();
 }
 
 /// **A personal filter hides rows here and moves no value.**

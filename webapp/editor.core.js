@@ -9510,6 +9510,10 @@ function wireEvents() {
   function reflowToolbar() {
     restoreFromMore();
     for (const c of collapsibles) expandGroup(c); // reset to fully expanded
+    // Under the ribbon this bar is parked off-screen and only lends the ribbon
+    // its controls' popups (borders, colours, merge). Folding it to the phone's
+    // width hid the group a popup lives in, and Borders opened as nothing.
+    if (document.documentElement.classList.contains("oc-chrome-ribbon")) return;
     for (const c of collapsibles) { if (fits()) break; collapseGroup(c); }
     if (!fits()) overflowToMore();
   }

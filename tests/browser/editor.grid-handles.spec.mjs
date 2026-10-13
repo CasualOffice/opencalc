@@ -40,10 +40,10 @@ test("a hidden column is revealed by clicking its handle", async ({ page }) => {
 
   // Hide column C through the menu, as a user would.
   await page.evaluate(() => window.opencalcEditor.selectForTest(0, 2));
-  // The menu bar and its items both carry `data-oc-label`, which is the label
-  // before translation and mnemonic markup touch it.
-  await page.locator('[data-oc-label="Data"]').click();
-  await page.locator('[data-oc-label="Hide columns"]').click();
+  // Home ▸ Format ▸ Hide Columns, the ribbon's route, as in Excel.
+  await page.locator("#rb-tab-home").click();
+  await page.locator('.oc-ribbon [data-cmd="cells.format"]').click();
+  await page.locator('.rb-pop-item[data-cmd="data.hide-columns"]').click();
 
   const hidden = await handles(page);
   expect(hidden.hiddenCols.length, "no handle was drawn for the hidden column").toBe(1);

@@ -79,6 +79,8 @@
 .oc-chrome-ribbon .rb-tabs {
   height: 34px; display: flex; align-items: flex-end; gap: 2px; padding: 0 12px;
 }
+/* The roster, when a host has hidden the title bar it normally sits in. */
+.oc-chrome-ribbon .rb-tabs > .presence { align-self: center; flex: none; }
 .oc-chrome-ribbon .rb-tablist { display: flex; align-items: flex-end; gap: 2px; min-width: 0; overflow-x: auto; scrollbar-width: none; }
 .oc-chrome-ribbon .rb-tablist::-webkit-scrollbar { display: none; }
 .oc-chrome-ribbon .rb-file,

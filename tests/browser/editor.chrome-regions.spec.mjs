@@ -1,5 +1,9 @@
 // Hiding chrome by region, without hiding things that are not chrome.
 //
+// Retaken for the ribbon shell (UX-SHELL-21): the menu bar it was written
+// against is parked off-screen there, so the old assertions measured a box no
+// one could see and the roster with it.
+//
 // A host embedding the editor turns regions off by name. The menu bar is one of
 // them — and the roster of who else is in the document lives *inside* it, put
 // there by COL-33 precisely so it would not fold away with the page header.
@@ -12,58 +16,65 @@
 
 import { expect, test } from "@playwright/test";
 
-async function boot(page) {
-  await page.goto("/editor.html?sample=demo");
-  await expect(page.locator("#tb-status")).toHaveAttribute("data-engine", /^\d/, { timeout: 30_000 });
-}
-
-/// Turn the region off the way the embed API does — a class on an ancestor.
-const hideMenubar = (page, { withPresence }) =>
+/// Where the roster is and whether it can be seen, with or without a session.
+///
+/// The roster's markup sits in the menu bar, which the ribbon shell parks
+/// off-screen; the shell seats it beside Share in the title bar, or at the end
+/// of the tab row when a host has hidden the title bar. Measured on the page,
+/// not on classes: the promise is that a person can see it.
+const roster = (page, { withPresence }) =>
   page.evaluate((show) => {
     const presence = document.getElementById("presence");
     // The roster carries `hidden` until there is a collaborative session, which
     // is the state most of these assertions turn on.
     if (show) presence.removeAttribute("hidden");
     else presence.setAttribute("hidden", "");
-    document.body.classList.add("oc-hide-menubar");
-    const seen = (el) => {
-      const s = getComputedStyle(el);
-      return s.display !== "none" && s.visibility !== "hidden";
-    };
-    const bar = document.getElementById("menubar");
-    const menuItem = bar.querySelector('[data-oc-label], .menu-btn, button:not(.presence-btn)');
+    const r = presence.getBoundingClientRect();
+    const s = getComputedStyle(presence);
+    const header = document.querySelector(".app-header");
     return {
-      barHeight: bar.getBoundingClientRect().height,
-      presenceSeen: seen(presence),
-      menuItemSeen: menuItem ? seen(menuItem) : null,
+      presenceSeen: s.display !== "none" && s.visibility !== "hidden" && r.width > 0 && r.height > 0
+        && r.right <= innerWidth && r.left >= 0 && r.top >= 0 && r.bottom <= innerHeight,
+      inTitleBar: !!presence.closest(".app-header"),
+      inTabRow: !!presence.closest(".rb-tabs"),
+      headerShown: getComputedStyle(header).display !== "none",
+      tabRowHeight: document.querySelector(".rb-tabs").getBoundingClientRect().height,
     };
   }, withPresence);
 
-/// **A host hiding the menu bar keeps the roster.**
-test("hiding the menu bar keeps the collaborator roster", async ({ page }) => {
-  await boot(page);
-  const at = await hideMenubar(page, { withPresence: true });
+async function bootRibbon(page, query = "") {
+  await page.goto(`/editor.html?sample=demo${query}`);
+  await expect(page.locator("#tb-status")).toHaveAttribute("data-engine", /^\d/, { timeout: 30_000 });
+  await expect(page.locator(".oc-ribbon .rb-tabs")).toBeVisible();
+}
 
-  expect(at.presenceSeen, "the roster went with the menu bar").toBe(true);
-  expect(at.barHeight, "the roster is present but has no height to be seen in").toBeGreaterThan(0);
+/// **The roster can be seen in the shell at all.** It lives in the menu bar's
+/// markup, and the ribbon parks that bar off-screen: before this, a co-editor
+/// was present in the document and visible to nobody.
+test("the collaborator roster sits in the title bar, on screen", async ({ page }) => {
+  await bootRibbon(page);
+  const at = await roster(page, { withPresence: true });
+  expect(at.inTitleBar, "the roster is not in the title bar").toBe(true);
+  expect(at.presenceSeen, "the roster is off-screen").toBe(true);
 });
 
-/// **The menus themselves do go.** Otherwise "hide the menu bar" hides nothing
-/// and the first assertion passes for the wrong reason.
-test("hiding the menu bar does hide the menus", async ({ page }) => {
-  await boot(page);
-  const at = await hideMenubar(page, { withPresence: true });
-  expect(at.menuItemSeen, "a menu item survived a hidden menu bar").toBe(false);
+/// **A host hiding the title bar keeps the roster.**
+test("hiding the title bar keeps the collaborator roster", async ({ page }) => {
+  await bootRibbon(page, "&hide=header");
+  const at = await roster(page, { withPresence: true });
+  expect(at.headerShown, "the host asked for no title bar").toBe(false);
+  expect(at.inTabRow, "the roster went with the title bar").toBe(true);
+  expect(at.presenceSeen, "the roster is present but cannot be seen").toBe(true);
 });
 
-/// **With nobody else present, a hidden menu bar is genuinely gone.**
-///
-/// The control for the fix above: keeping the bar alive to carry the roster
-/// must not leave an empty strip on every single-user embed, which would be a
-/// visible regression for the overwhelmingly common case.
-test("with no roster to show, a hidden menu bar takes up no room", async ({ page }) => {
-  await boot(page);
-  const at = await hideMenubar(page, { withPresence: false });
+/// **With nobody else present, it costs no room.** Seating the roster in the
+/// tab row must not grow the row for the overwhelmingly common single-user
+/// embed.
+test("with no roster to show, the tab row is no taller", async ({ page }) => {
+  await bootRibbon(page);
+  const plain = await roster(page, { withPresence: false });
+  await bootRibbon(page, "&hide=header");
+  const at = await roster(page, { withPresence: false });
   expect(at.presenceSeen).toBe(false);
-  expect(at.barHeight, "an empty strip is left where the menu bar was").toBe(0);
+  expect(at.tabRowHeight, "the tab row grew with nobody to show").toBe(plain.tabRowHeight);
 });
