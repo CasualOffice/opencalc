@@ -458,6 +458,9 @@ function seatPresence(strip) {
   const home = presence.parentNode, next = presence.nextSibling;
   cleanups.push(() => home.insertBefore(presence, next));
   const seat = () => {
+    // Desktop chrome already gives it a visible home in the status bar; two
+    // movers would take turns pulling it back and forth.
+    if (presence.closest(".bottom-bar")) return;
     const header = document.querySelector(".app-header");
     const right = header?.querySelector(".header-right");
     const shown = header && right && getComputedStyle(header).display !== "none";
