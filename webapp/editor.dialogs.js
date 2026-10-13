@@ -3241,3 +3241,224 @@ export function insertDeleteDialog(insert) {
   document.addEventListener("keydown", onKey, true);
   group.querySelector("input:checked").focus();
 }
+
+// ---- Go To (F5 / Ctrl+G, fit-gap XL-UX-019) ----------------------------------
+
+/// Excel's row and column limits. A reference past them is not a reference.
+const GOTO_MAX_ROWS = 1048576;
+const GOTO_MAX_COLS = 16384;
+
+/// The references gone to this session, newest first (Excel keeps the last few
+/// at the top of the Go To list). Session memory only: a list that survived a
+/// reload would be remembering somebody else's document.
+const goToRecent = [];
+
+const quoteSheet = (n) => (/^[A-Za-z_][A-Za-z0-9_.]*$/.test(n) ? n : `'${n.replace(/'/g, "''")}'`);
+
+/// `$C$5`, `$B$2:$D$4`, `$A:$C`, `$2:$4` — the way Excel writes a reference it
+/// remembers.
+function absRef(b) {
+  if (b.kind === "cols") return `$${colName(b.c0)}:$${colName(b.c1)}`;
+  if (b.kind === "rows") return `$${b.r0 + 1}:$${b.r1 + 1}`;
+  const one = (r, c) => `$${colName(c)}$${r + 1}`;
+  return b.r0 === b.r1 && b.c0 === b.c1 ? one(b.r0, b.c0) : `${one(b.r0, b.c0)}:${one(b.r1, b.c1)}`;
+}
+
+/// Resolve what was typed into Go To's Reference box: A1, a range, whole rows
+/// or columns, a sheet-qualified reference, a defined name, or a comma list of
+/// those on one sheet. `null` when it is none of them.
+///
+/// Deliberately not `gotoName`: that is the name box, which *defines* a name
+/// when given an unknown word. Go To answers "Reference isn't valid." instead.
+export function resolveGoTo(text, depth = 0) {
+  const t = (text || "").trim().replace(/^=/, "").trim();
+  if (!t || depth > 4) return null;
+  let sheets = [];
+  try { sheets = JSON.parse(wasm.session_sheet_names()); } catch { return null; }
+  // Commas inside a quoted sheet name are part of the name.
+  const parts = [];
+  let cur = "", quoted = false;
+  for (const ch of t) {
+    if (ch === "'") quoted = !quoted;
+    if (ch === "," && !quoted) { parts.push(cur); cur = ""; } else cur += ch;
+  }
+  parts.push(cur);
+  let sheet = null;
+  const boxes = [];
+  for (const raw of parts) {
+    const p = raw.trim();
+    if (!p) return null;
+    const m = /^(?:'((?:[^']|'')+)'|([^'!]+))!(.+)$/.exec(p);
+    let at = state.sheet, body = p;
+    if (m) {
+      const want = (m[1] !== undefined ? m[1].replace(/''/g, "'") : m[2]).toLowerCase();
+      at = sheets.findIndex((n) => n.toLowerCase() === want);
+      if (at < 0) return null;
+      body = m[3];
+    }
+    let found = null;
+    const box = /^[A-Za-z$0-9:]+$/.test(body) ? parseNameRange(body.replace(/\$/g, "")) : null;
+    if (box) {
+      if (box.r1 >= GOTO_MAX_ROWS || box.c1 >= GOTO_MAX_COLS) return null;
+      found = { sheet: at, boxes: [box] };
+    } else if (!m) {
+      let names = [];
+      try { names = JSON.parse(wasm.session_names()); } catch {}
+      const d = names.find((n) => (n.name || "").toLowerCase() === body.toLowerCase());
+      if (!d) return null;
+      found = resolveGoTo(d.refersTo, depth + 1);
+    }
+    if (!found) return null;
+    if (sheet === null) sheet = found.sheet;
+    else if (sheet !== found.sheet) return null;
+    boxes.push(...found.boxes);
+  }
+  return sheet === null ? null : { sheet, boxes };
+}
+
+/// Make `boxes` on `sheet` the selection: the last box is the active range with
+/// its top-left cell active, the others banked as a multi-range selection, the
+/// way Ctrl+click builds one. Shared by Go To and Go To Special.
+export function selectBoxes(sheet, boxes) {
+  if (!boxes.length) return;
+  if (sheet !== state.sheet) switchSheet(sheet);
+  const last = boxes[boxes.length - 1];
+  select(last.r0, last.c0);
+  state.ranges = boxes.slice(0, -1).map((b) => ({ r0: b.r0, c0: b.c0, r1: b.r1, c1: b.c1 }));
+  const kind = last.kind || "cells";
+  state.selKind = kind;
+  if (kind === "cols") {
+    state.sel = { row: 0, col: last.c0 };
+    state.anchor = { row: 0, col: last.c1 };
+  } else if (kind === "rows") {
+    state.sel = { row: last.r0, col: 0 };
+    state.anchor = { row: last.r1, col: 0 };
+  } else {
+    state.sel = { row: last.r0, col: last.c0 };
+    state.anchor = { row: last.r1, col: last.c1 };
+  }
+  draw();
+}
+
+/// Excel's Go To dialog: the workbook's names and the references recently gone
+/// to, a Reference box, OK and Cancel. An invalid reference is answered inline
+/// in Excel's words and the dialog stays open, so the typing is not lost.
+export function goToDialog() {
+  const modal = byId("oc-modal");
+  const body = byId("oc-modal-body");
+  byId("oc-modal-title").textContent = "Go To";
+  body.textContent = "";
+
+  let names = [];
+  try { names = JSON.parse(wasm.session_names()).map((n) => n.name).filter(Boolean); } catch {}
+  names.sort((a, b) => a.localeCompare(b));
+
+  const listLabel = el("label", "oc-form-label", "Go to:");
+  listLabel.htmlFor = "oc-goto-list";
+  const list = el("div", "fn-list oc-goto-list");
+  list.id = "oc-goto-list";
+  list.setAttribute("role", "listbox");
+  list.setAttribute("aria-label", "Go to");
+
+  const refLabel = el("label", "oc-form-label", "Reference:");
+  refLabel.htmlFor = "oc-goto-ref";
+  const input = document.createElement("input");
+  input.type = "text";
+  input.id = "oc-goto-ref";
+  input.className = "oc-form-field mono";
+  input.spellcheck = false;
+  input.autocomplete = "off";
+
+  const err = el("div", "oc-form-error");
+  err.id = "oc-goto-error";
+  err.setAttribute("role", "alert");
+  err.hidden = true;
+  const clearError = () => {
+    err.hidden = true;
+    err.textContent = "";
+    input.classList.remove("bad");
+    input.removeAttribute("aria-invalid");
+  };
+  input.addEventListener("input", clearError);
+
+  for (const text of [...goToRecent, ...names]) {
+    const opt = el("button", "fn-row", text);
+    opt.type = "button";
+    opt.setAttribute("role", "option");
+    opt.addEventListener("click", () => {
+      list.querySelectorAll(".fn-row").forEach((o) => { o.classList.remove("on"); o.setAttribute("aria-selected", "false"); });
+      opt.classList.add("on");
+      opt.setAttribute("aria-selected", "true");
+      input.value = text;
+      clearError();
+    });
+    opt.addEventListener("dblclick", () => { input.value = text; apply(); });
+    list.appendChild(opt);
+  }
+  if (!list.children.length) list.appendChild(el("div", "panel-hint", "No names or recent references yet."));
+
+  const form = el("div", "oc-goto-form");
+  const refCell = el("div", "oc-form-cell");
+  refCell.append(input, err);
+  form.append(listLabel, list, refLabel, refCell);
+
+  const actions = el("div", "oc-confirm-actions");
+  const ok = el("button", "oc-btn primary", "OK");
+  const cancel = el("button", "oc-btn", "Cancel");
+  actions.append(ok, cancel);
+  body.append(form, actions);
+  modal.hidden = false;
+
+  const x = byId("oc-modal-x");
+  const close = () => {
+    modal.hidden = true;
+    body.textContent = "";
+    document.removeEventListener("keydown", onKey, true);
+    x.removeEventListener("click", onCancel);
+    modal.removeEventListener("click", onBackdrop);
+  };
+  const onCancel = () => { close(); canvas.focus(); };
+  const onBackdrop = (e) => { if (e.target === modal) onCancel(); };
+  const apply = () => {
+    const typed = input.value.trim();
+    const hit = resolveGoTo(typed);
+    if (!hit) {
+      err.textContent = "Reference isn't valid.";
+      err.hidden = false;
+      input.classList.add("bad");
+      input.setAttribute("aria-invalid", "true");
+      input.focus();
+      input.select();
+      return;
+    }
+    close();
+    selectBoxes(hit.sheet, hit.boxes);
+    // Remembered as Excel lists it: sheet-qualified and absolute. A name is
+    // already in the list under its own name.
+    const isName = names.some((n) => n.toLowerCase() === typed.replace(/^=/, "").toLowerCase());
+    if (!isName) {
+      let sheetName = "";
+      try { sheetName = JSON.parse(wasm.session_sheet_names())[hit.sheet] ?? ""; } catch {}
+      const ref = `${quoteSheet(sheetName)}!${hit.boxes.map(absRef).join(",")}`;
+      const at = goToRecent.indexOf(ref);
+      if (at >= 0) goToRecent.splice(at, 1);
+      goToRecent.unshift(ref);
+      goToRecent.length = Math.min(goToRecent.length, 4);
+    }
+    canvas.focus();
+  };
+  const onKey = (e) => {
+    if (!input.isConnected || modal.hidden) { document.removeEventListener("keydown", onKey, true); return; }
+    if (e.key === "Escape") { e.stopPropagation(); e.preventDefault(); onCancel(); }
+    else if (e.key === "Enter") {
+      e.stopPropagation(); e.preventDefault();
+      if (document.activeElement === cancel) onCancel(); else apply();
+    }
+  };
+  ok.addEventListener("click", apply);
+  cancel.addEventListener("click", onCancel);
+  x.addEventListener("click", onCancel);
+  modal.addEventListener("click", onBackdrop);
+  document.addEventListener("keydown", onKey, true);
+  input.focus();
+}

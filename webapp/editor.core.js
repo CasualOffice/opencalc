@@ -64,6 +64,7 @@ import {
   deleteSheetWithConfirm,
   formatCellsDialog,
   insertDeleteDialog,
+  goToDialog,
   headerMenu,
   hyperlinkDialog,
   manageCfRules,
@@ -476,6 +477,7 @@ export {
   deleteSheetWithConfirm,
   formatCellsDialog,
   insertDeleteDialog,
+  goToDialog,
   headerMenu,
   hyperlinkDialog,
   manageCfRules,
@@ -6929,7 +6931,7 @@ function registerShellCommands() {
     openNameManager(r.left + 120, r.top + 90);
   } });
   R("edit.replace", { label: "Replace…", shortcut: "Ctrl+H", run: () => openReplace() });
-  R("edit.go-to", { label: "Go To…", shortcut: "Ctrl+G", run: () => { cellRef.focus(); cellRef.select(); } });
+  R("edit.go-to", { label: "Go To…", shortcut: "Ctrl+G", run: () => goToDialog() });
 }
 
 function insertFunctionDialog() {
@@ -8613,7 +8615,7 @@ function wireEvents() {
       // #replace-input, #replace-all, session_replace_all — reachable only
       // by opening Find and tabbing across, which is not the shortcut.
       if (k === "h") { openReplace(); e.preventDefault(); return; }
-      if (k === "g") { cellRef.focus(); e.preventDefault(); return; } // Go-To / Name box
+      if (k === "g") { goToDialog(); e.preventDefault(); return; } // Go To dialog (XL-UX-019)
       if (e.key === "F3") { const r = canvas.getBoundingClientRect(); openNameManager(r.left + 120, r.top + 90); e.preventDefault(); return; } // Name Manager
       if (k === "z" && !e.shiftKey) { doUndo(); e.preventDefault(); return; }
       if (k === "y" || (k === "z" && e.shiftKey)) { doRedo(); e.preventDefault(); return; }
@@ -8783,12 +8785,13 @@ function wireEvents() {
         else startInline(undefined, true);
         e.preventDefault(); break;
       }
-      // Plain F5 is Go To (the name box). Alt+F5 refreshes the pivot under the
-      // cursor and Ctrl+Alt+F5 refreshes every one, both Excel's bindings.
+      // Plain F5 is Go To — Excel's dialog, not the name box (XL-UX-019).
+      // Alt+F5 refreshes the pivot under the cursor and Ctrl+Alt+F5 refreshes
+      // every one, both Excel's bindings.
       case "F5":
         if (e.altKey && (e.ctrlKey || e.metaKey)) refreshAllPivots();
         else if (e.altKey) refreshPivotHere();
-        else cellRef.focus();
+        else goToDialog();
         e.preventDefault();
         break;
       // F9 recalculates, F11 (Shift) adds a sheet — both Excel's.
@@ -9776,7 +9779,7 @@ function wireEvents() {
         ["Select all", "Ctrl+A"],
         ["Insert / delete line", "Ctrl++ / Ctrl+−"],
         ["Edit cell", "F2 / Enter"],
-        ["Go to (name box)", "Ctrl+G / F5"],
+        ["Go To", "Ctrl+G / F5"],
         ["Insert date / time", "Ctrl+; / Ctrl+Shift+;"],
         ["Format cells", "Ctrl+1 / Ctrl+Shift+F"],
         ["Expand formula bar", "Ctrl+Shift+U"],
