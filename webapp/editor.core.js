@@ -5226,8 +5226,9 @@ function buildHistoryPanel(body) {
         const r = JSON.parse(wasm.session_capture_version("named", nameBox.value, Date.now()));
         // Written to storage on the same action that created it, rather than on
         // a timer: a version the user asked for and a reload lost would be
-        // worse than no version, because they would believe they had it.
-        persistVersions(wasm).catch(() => {});
+        // worse than no version, because they would believe they had it. The
+        // ring's evictions travel with it — storage deletes nothing else.
+        persistVersions(wasm, r.evicted || []).catch(() => {});
         // `stored: false` is not a failure — the store resolves a capture of an
         // unchanged document to the version already holding that state, and
         // saying so is more honest than writing a duplicate.
