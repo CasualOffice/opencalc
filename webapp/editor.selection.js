@@ -266,7 +266,7 @@ export function refreshFormulaBar() {
   ]) {
     const btn = byId(id);
     const enabled = wasm[can]();
-    btn.disabled = !enabled;
+    if (btn.disabled !== !enabled) btn.disabled = !enabled;
     let what = "";
     try { what = enabled ? wasm[label]() : ""; } catch {}
     const text = what ? `${verb} ${what} (${key})` : `${verb} (${key})`;
@@ -283,8 +283,12 @@ export function refreshFormulaBar() {
   const mixed = (k) => sel.mixed.has(k);
   // `aria-pressed="mixed"` is the ARIA state for a toggle that is neither on
   // nor off, which is exactly what a disagreeing selection is.
+  // Written only when it changes: this runs on every frame, a scroll included,
+  // and a same-value `setAttribute` is still a mutation — the ribbon observes
+  // these buttons, and it re-synced on every frame of a scroll (UX-SHELL-22).
+  const setPressed = (el, v) => { if (el.getAttribute("aria-pressed") !== v) el.setAttribute("aria-pressed", v); };
   const press = (id, on, key) =>
-    byId(id).setAttribute("aria-pressed", mixed(key) ? "mixed" : on ? "true" : "false");
+    setPressed(byId(id), mixed(key) ? "mixed" : on ? "true" : "false");
   press("tb-bold", f.b, "b");
   press("tb-italic", f.i, "i");
   press("tb-underline", f.u, "u");
@@ -300,10 +304,7 @@ export function refreshFormulaBar() {
   // Alignment is a radio group, not three toggles: a mixed selection lights
   // none of them rather than marking all three indeterminate.
   for (const b of qsa(".tb-align")) {
-    b.setAttribute(
-      "aria-pressed",
-      !mixed("al") && b.dataset.al === f.al ? "true" : "false",
-    );
+    setPressed(b, !mixed("al") && b.dataset.al === f.al ? "true" : "false");
   }
   // Everything else a cell can be formatted with lives behind #tb-numfmt, so
   // that button carries the rest: an accent underline when the selection has a
