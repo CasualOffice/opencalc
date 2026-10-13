@@ -13,6 +13,12 @@
 
 .oc-ribbon { display: none; }
 
+/* A filled accent surface carries white text in both themes. The dark theme's
+ * accent is a light blue meant for text and outlines, and its paired text
+ * colour is near-black — black on blue, which read badly. Deepened a quarter
+ * toward black, the accent holds white at about 5:1 in dark and well above in
+ * light, the same treatment `.oc-btn.primary` uses. Tokens: ribbon.tokens.css. */
+
 /* The menu bar and the toolbar stay in the DOM and stop being drawn.
  *
  * Not `display: none` on the menu bar: `menuModel()` is wired to
@@ -65,11 +71,11 @@
 
 .rb-share {
   height: 30px; display: inline-flex; align-items: center; gap: 6px; padding: 0 12px;
-  border: 0; border-radius: 6px; background: var(--oc-accent-color); color: var(--oc-accent-contrast-color);
+  border: 0; border-radius: 6px; background: var(--rb-accent-fill); color: var(--rb-on-accent);
   font: inherit; font-size: 13px; font-weight: 600; cursor: pointer;
 }
 .rb-share[hidden] { display: none; }
-.rb-share:hover { background: var(--oc-accent-hover-color); }
+.rb-share:hover { background: color-mix(in srgb, var(--oc-accent-color), #000 35%); }
 .rb-share:focus-visible { outline: 2px solid var(--oc-accent-color); outline-offset: 2px; }
 
 /* ── Tab strip ─────────────────────────────────────────────────────────── */
@@ -235,32 +241,46 @@
 .rb-pop-key { color: var(--oc-muted-text-color); font-size: 12px; }
 .rb-pop-empty { padding: 8px 10px; color: var(--oc-muted-text-color); font-size: 13px; }
 
-/* ── File page ─────────────────────────────────────────────────────────── */
-
+/* ── File page ─────────────────────────────────────────────────────────
+ * Excel's Backstage: a rail of destinations and a page of described choices.
+ * The rail is a soft tint of the accent over the surface, not a slab of it —
+ * a full-strength accent rail read as a glaring block in dark mode and left
+ * its labels and Back arrow at poor contrast. The accent marks only the page
+ * that is open. */
 .rb-backstage {
   position: fixed; inset: 0; z-index: 70; display: flex;
   background: var(--oc-background-color); color: var(--oc-text-color);
 }
 .rb-backstage[hidden] { display: none; }
 .rb-rail {
-  width: 220px; flex: none; display: flex; flex-direction: column; gap: 2px; padding: 12px 8px;
-  background: var(--oc-accent-color); color: var(--oc-accent-contrast-color);
+  width: 232px; flex: none; display: flex; flex-direction: column; gap: 2px; padding: 12px 10px;
+  background: color-mix(in srgb, var(--oc-accent-color) 9%, var(--oc-surface-color));
+  border-right: 1px solid var(--oc-border-color); color: var(--oc-text-color);
 }
 .rb-back {
-  width: 36px; height: 36px; margin-bottom: 12px; display: flex; align-items: center; justify-content: center;
-  border: 0; border-radius: 50%; background: transparent; color: inherit; cursor: pointer;
+  width: 36px; height: 36px; margin: 0 0 12px 2px; display: flex; align-items: center; justify-content: center;
+  border: 0; border-radius: 50%; background: transparent; color: var(--oc-text-color); cursor: pointer;
 }
-.rb-back:hover, .rb-rail-item:hover { background: color-mix(in srgb, var(--oc-accent-contrast-color) 14%, transparent); }
+.rb-back:hover, .rb-rail-item:hover { background: color-mix(in srgb, var(--oc-accent-color) 14%, transparent); }
 .rb-rail-item {
-  height: 38px; display: flex; align-items: center; gap: 10px; padding: 0 14px;
-  border: 0; border-radius: 6px; background: transparent; color: inherit;
+  height: 40px; display: flex; align-items: center; gap: 12px; padding: 0 14px;
+  border: 0; border-radius: 6px; background: transparent; color: var(--oc-text-color);
   font: inherit; font-size: 14px; text-align: left; cursor: pointer;
 }
-.rb-rail-item.is-on { background: color-mix(in srgb, var(--oc-accent-contrast-color) 20%, transparent); font-weight: 600; }
-.rb-back:focus-visible, .rb-rail-item:focus-visible { outline: 2px solid var(--oc-accent-contrast-color); outline-offset: -2px; }
-.rb-pane { flex: 1; min-width: 0; padding: 32px 48px; overflow: auto; }
+.rb-rail-item .rb-ico { color: var(--oc-muted-text-color); }
+.rb-rail-item.is-on { background: var(--rb-accent-fill); color: var(--rb-on-accent); font-weight: 600; }
+.rb-rail-item.is-on .rb-ico { color: inherit; }
+.rb-back:focus-visible, .rb-rail-item:focus-visible { outline: 2px solid var(--oc-accent-color); outline-offset: 1px; }
+
+.rb-pane { flex: 1; min-width: 0; padding: 36px 56px; overflow: auto; }
+.rb-page { max-width: 720px; }
 .rb-page[hidden] { display: none; }
-.rb-page-title { margin: 0 0 20px; font-size: 26px; font-weight: 600; }
+.rb-page-title { margin: 0 0 24px; font-size: 28px; font-weight: 600; letter-spacing: -0.01em; }
+.rb-section { display: flex; flex-direction: column; gap: 8px; }
+.rb-section + .rb-section { margin-top: 28px; }
+.rb-section-title { margin: 0 0 2px; font-size: 13px; font-weight: 600; color: var(--oc-muted-text-color); }
+
+/* New: template tiles. */
 .rb-tiles { display: flex; flex-wrap: wrap; gap: 16px; }
 .rb-tile {
   width: 168px; display: flex; flex-direction: column; gap: 8px; padding: 0;
@@ -268,21 +288,54 @@
 }
 .rb-tile-art {
   width: 168px; height: 118px; display: flex; align-items: center; justify-content: center;
-  border: 1px solid var(--oc-control-border-color); border-radius: 6px; color: var(--oc-accent-color);
-  background: var(--oc-background-color);
+  border: 1px solid var(--oc-control-border-color); border-radius: 8px; color: var(--oc-accent-color);
+  background: var(--oc-surface-color);
 }
 .rb-tile:hover .rb-tile-art { border-color: var(--oc-accent-color); }
 .rb-tile:focus-visible .rb-tile-art { outline: 2px solid var(--oc-accent-color); outline-offset: 2px; }
 .rb-tile-label { font-size: 13px; }
-.rb-page-list { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; max-width: 520px; }
-.rb-page-item {
-  min-height: 36px; padding: 0 12px; border: 0; border-radius: 6px; background: transparent;
-  color: var(--oc-text-color); font: inherit; font-size: 14px; text-align: left; cursor: pointer;
+
+/* Described choices: icon, name, one line of what it does. */
+.rb-page-list {
+  display: flex; flex-direction: column; border: 1px solid var(--oc-border-color); border-radius: 8px;
+  background: var(--oc-background-color); overflow: hidden;
 }
+.rb-page-item {
+  min-height: 56px; display: flex; align-items: center; gap: 14px; padding: 10px 16px;
+  border: 0; background: transparent; color: var(--oc-text-color);
+  font: inherit; text-align: left; cursor: pointer;
+}
+.rb-page-item + .rb-page-item { border-top: 1px solid var(--oc-border-color); }
+.rb-page-item > .rb-ico { color: var(--oc-accent-color); }
 .rb-page-item:hover { background: var(--oc-surface-color); }
-.rb-page-item[aria-checked="true"] { color: var(--oc-accent-color); font-weight: 600; }
-.rb-choice { display: flex; flex-direction: column; gap: 2px; margin-top: 16px; }
-.rb-choice-title { font-size: 12px; color: var(--oc-muted-text-color); padding: 0 12px 4px; }
+.rb-page-item:focus-visible { outline: 2px solid var(--oc-accent-color); outline-offset: -2px; }
+.rb-item-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.rb-item-label { font-size: 14px; font-weight: 500; }
+.rb-item-desc { font-size: 12.5px; color: var(--oc-muted-text-color); }
+
+/* Options: a label and one control per row. */
+.rb-options { display: flex; flex-direction: column; }
+.rb-option {
+  display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap;
+  padding: 14px 16px; border: 1px solid var(--oc-border-color); border-radius: 8px; background: var(--oc-background-color);
+}
+.rb-option-label { font-size: 14px; font-weight: 500; }
+.rb-seg { display: inline-flex; padding: 2px; border-radius: 8px; background: var(--oc-surface-color); border: 1px solid var(--oc-border-color); }
+.rb-seg-btn {
+  height: 30px; padding: 0 14px; border: 0; border-radius: 6px; background: transparent;
+  color: var(--oc-text-color); font: inherit; font-size: 13px; cursor: pointer;
+}
+.rb-seg-btn:hover { background: color-mix(in srgb, var(--oc-accent-color) 10%, transparent); }
+.rb-seg-btn[aria-checked="true"] { background: var(--oc-background-color); color: var(--oc-accent-color); font-weight: 600; box-shadow: 0 1px 2px rgba(15, 18, 22, .12); }
+.rb-seg-btn:focus-visible { outline: 2px solid var(--oc-accent-color); outline-offset: 1px; }
+
+@media (max-width: 600px) {
+  .rb-backstage { flex-direction: column; }
+  .rb-rail { width: auto; flex-direction: row; overflow-x: auto; padding: 8px; border-right: 0; border-bottom: 1px solid var(--oc-border-color); }
+  .rb-back { margin: 0 4px 0 0; flex: none; }
+  .rb-rail-item { flex: none; }
+  .rb-pane { padding: 20px 16px; }
+}
 
 @media (prefers-reduced-motion: reduce) {
   .oc-chrome-ribbon .rb-layout svg { transition: none; }
@@ -324,7 +377,7 @@
   flex: none; height: 36px; padding: 0 14px; border: 1px solid var(--oc-control-border-color); border-radius: 18px;
   background: var(--oc-background-color); color: var(--oc-text-color); font: inherit; font-size: 13px; font-weight: 600; cursor: pointer;
 }
-.rb-mchip[aria-pressed="true"] { background: var(--oc-accent-color); border-color: var(--oc-accent-color); color: var(--oc-accent-contrast-color); }
+.rb-mchip[aria-pressed="true"] { background: var(--rb-accent-fill); border-color: var(--rb-accent-fill); color: var(--rb-on-accent); }
 .rb-mlist { display: flex; flex-direction: column; max-height: 300px; overflow-y: auto; }
 .rb-mitem {
   min-height: 48px; display: flex; align-items: center; gap: 14px; padding: 0 18px;

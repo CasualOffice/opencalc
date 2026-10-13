@@ -15,7 +15,7 @@
 // is clicked, and the popup it opens is re-anchored under the ribbon button.
 
 import { command, run, all as allCommands } from "./commands.js";
-import { TABS, FILE_RAIL } from "./ribbon.model.js";
+import { TABS, FILE_RAIL, OPTIONS_COMMANDS } from "./ribbon.model.js";
 
 const LAYOUT_KEY = "oc.ribbon.layout";
 const LABELS_KEY = "oc.ribbon.labels";
@@ -37,7 +37,12 @@ let spritePromise = null;
 function ensureSprite() {
   if (document.getElementById("oc-fluent-icons")) return Promise.resolve();
   if (spritePromise) return spritePromise;
-  spritePromise = fetch(new URL("./icons.fluent.svg", import.meta.url))
+  // Carries this module's own stamp, so a deploy that changes the sprite is a
+  // new URL rather than one a browser may still hold — including a cached 404.
+  const sprite = new URL("./icons.fluent.svg", import.meta.url);
+  const stamp = new URL(import.meta.url).searchParams.get("v");
+  if (stamp) sprite.searchParams.set("v", stamp);
+  spritePromise = fetch(sprite)
     .then((r) => (r.ok ? r.text() : Promise.reject(new Error(`sprite ${r.status}`))))
     .then((svg) => {
       if (document.getElementById("oc-fluent-icons")) return;
@@ -482,21 +487,31 @@ function buildBackstage() {
       if (command("file.new")) tile("grid", "Blank workbook", () => run("file.new"));
       if (command("file.open")) tile("folder_open", "Open a file", () => run("file.open"));
       page.appendChild(tiles);
+    } else if (entry.id === "options") {
+      page.appendChild(optionsPage());
     } else {
-      const list = h("div", "rb-page-list");
-      for (const id of entry.cmds || []) {
-        const c = command(id);
-        if (!c) continue;
-        const b = h("button", "rb-page-item", c.label || id);
-        b.type = "button";
-        b.dataset.ocProxy = id;
-        if (c.checked && c.checked()) b.setAttribute("aria-checked", "true");
-        b.addEventListener("click", () => { closeBackstage(); run(id); });
-        list.appendChild(b);
+      let any = false;
+      for (const sec of entry.sections || []) {
+        const items = sec.items.filter((it) => { const c = command(it.id); return c && !(c.hidden && c.hidden()); });
+        if (!items.length) continue;
+        any = true;
+        const block = h("div", "rb-section");
+        if (sec.title) block.appendChild(h("h2", "rb-section-title", sec.title));
+        const list = h("div", "rb-page-list");
+        for (const it of items) {
+          const b = h("button", "rb-page-item");
+          b.type = "button";
+          b.dataset.ocProxy = it.id;
+          const text = h("span", "rb-item-text");
+          text.append(h("span", "rb-item-label", it.label), h("span", "rb-item-desc", it.desc));
+          b.append(icon(it.icon, 20), text);
+          b.addEventListener("click", () => { closeBackstage(); run(it.id); });
+          list.appendChild(b);
+        }
+        block.appendChild(list);
+        page.appendChild(block);
       }
-      if (entry.id === "options") list.appendChild(labelsChoice());
-      if (!list.children.length) continue;
-      page.appendChild(list);
+      if (!any) continue;
     }
     const item = h("button", "rb-rail-item");
     item.type = "button";
@@ -511,24 +526,65 @@ function buildBackstage() {
   return bs;
 }
 
-/// File > Options > Ribbon labels. Excel draws group names and large-button
-/// labels; the owner's default is icons only (docs/95 rule 1).
-function labelsChoice() {
-  const box = h("div", "rb-choice");
-  box.setAttribute("role", "radiogroup");
-  box.setAttribute("aria-label", "Ribbon labels");
-  box.appendChild(h("span", "rb-choice-title", "Ribbon labels"));
-  for (const [v, label] of [["none", "Icons only"], ["captions", "Group names"], ["full", "Group names and button labels"]]) {
-    const b = h("button", "rb-page-item", label);
+/// A segmented choice — Excel's Options rows are a label and one control.
+function segmented(label, options) {
+  const row = h("div", "rb-option");
+  const name = h("span", "rb-option-label", label);
+  const seg = h("div", "rb-seg");
+  seg.setAttribute("role", "radiogroup");
+  seg.setAttribute("aria-label", label);
+  const paintAll = () => { for (const [b, isOn] of buttons) b.setAttribute("aria-checked", isOn() ? "true" : "false"); };
+  const buttons = [];
+  for (const o of options) {
+    const b = h("button", "rb-seg-btn", o.label);
     b.type = "button";
     b.setAttribute("role", "radio");
-    const paint = () => b.setAttribute("aria-checked", store.get(LABELS_KEY, "none") === v ? "true" : "false");
-    paint();
-    b.addEventListener("click", () => { applyLabels(v); for (const x of box.querySelectorAll("[role=radio]")) x.dispatchEvent(new Event("oc-paint")); });
-    b.addEventListener("oc-paint", paint);
-    box.appendChild(b);
+    if (o.proxy) b.dataset.ocProxy = o.proxy;
+    b.addEventListener("click", () => { o.pick(); paintAll(); });
+    buttons.push([b, o.on]);
+    seg.appendChild(b);
   }
-  return box;
+  paintAll();
+  row.append(name, seg);
+  return row;
+}
+
+/// File > Options: Appearance and Ribbon, then the rest of the settings.
+/// Excel keeps the theme here (File ▸ Options ▸ General ▸ Office Theme).
+function optionsPage() {
+  const wrap = h("div", "rb-options");
+  const appearance = h("div", "rb-section");
+  appearance.appendChild(h("h2", "rb-section-title", "Appearance"));
+  const theme = [["view.theme.auto", "Automatic"], ["view.theme.light", "Light"], ["view.theme.dark", "Dark"]]
+    .filter(([id]) => command(id))
+    // The menu draws its checkmarks only when opened, so the current theme is
+    // read from the editor rather than from a menu node.
+    .map(([id, label]) => ({ label, proxy: id, pick: () => run(id),
+      on: () => (window.opencalcEditor?.currentTheme?.() ?? "auto") === id.split(".").pop() }));
+  if (theme.length) appearance.appendChild(segmented("Theme", theme));
+  wrap.appendChild(appearance);
+
+  const ribbon = h("div", "rb-section");
+  ribbon.appendChild(h("h2", "rb-section-title", "Ribbon"));
+  ribbon.appendChild(segmented("Labels", [["none", "Icons only"], ["captions", "Group names"], ["full", "Names and labels"]]
+    .map(([v, label]) => ({ label, pick: () => applyLabels(v), on: () => store.get(LABELS_KEY, "none") === v }))));
+  wrap.appendChild(ribbon);
+
+  if (command("tools.settings")) {
+    const more = h("div", "rb-section");
+    const list = h("div", "rb-page-list");
+    const b = h("button", "rb-page-item");
+    b.type = "button";
+    b.dataset.ocProxy = "tools.settings";
+    const text = h("span", "rb-item-text");
+    text.append(h("span", "rb-item-label", "More settings"), h("span", "rb-item-desc", "Scroll speed, accent colour and other editor preferences"));
+    b.append(icon("settings", 20), text);
+    b.addEventListener("click", () => { closeBackstage(); run("tools.settings"); });
+    list.appendChild(b);
+    more.appendChild(list);
+    wrap.appendChild(more);
+  }
+  return wrap;
 }
 
 function applyLabels(v) {
@@ -857,6 +913,7 @@ export function missingCommandsForTest() {
     for (const m of it.menu || []) if (!command(m)) out.push(m);
   };
   for (const t of TABS) for (const g of t.groups) { g.items.forEach(walk); if (g.launcher && !command(g.launcher)) out.push(g.launcher); }
-  for (const r of FILE_RAIL) for (const c of r.cmds || []) if (!command(c)) out.push(c);
+  for (const r of FILE_RAIL) for (const sec of r.sections || []) for (const it of sec.items) if (!command(it.id)) out.push(it.id);
+  for (const c of OPTIONS_COMMANDS) if (!command(c)) out.push(c);
   return [...new Set(out)];
 }
