@@ -234,11 +234,12 @@ test("the branding strip is gone and Settings still opens from the menu", async 
   // to `View ▸ Theme` (`UX-CHR-01`), so the panel is exercised through a
   // setting it still owns — the claim is that a dialog opened from a menu with
   // no gear on screen is a working dialog, not that any one control is in it.
-  await page.locator('#set-accent button[data-c="#16a34a"]').click();
+  // Blue: any swatch other than the default green, so the change is visible.
+  await page.locator('#set-accent button[data-c="#2f6df6"]').click();
   await expect
     .poll(() => page.evaluate(() =>
       getComputedStyle(document.documentElement).getPropertyValue("--oc-accent-color").trim()))
-    .toBe("#16a34a");
+    .toBe("#2f6df6");
 });
 
 /// The same panel, in the page, must not have moved to look at.

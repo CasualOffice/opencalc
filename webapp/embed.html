@@ -8,7 +8,7 @@
     <style>
       :root {
         --ink: #0b0d12; --dim: #5b6270; --line: #e4e7ec; --paper: #fff;
-        --wash: #f7f8fa; --brand: #2f6df6; --code-bg: #0f1216; --code-fg: #d7dee9;
+        --wash: #f7f8fa; --brand: #0e7a55; --code-bg: #0f1216; --code-fg: #d7dee9;
       }
       * { box-sizing: border-box; }
       body {
@@ -242,7 +242,7 @@
       for (const name of Object.keys(THEMES)) {
         const b = el("button", "chip");
         const swatch = el("span", "sw");
-        swatch.style.background = THEMES[name]?.swatch ?? "#2f6df6";
+        swatch.style.background = THEMES[name]?.swatch ?? "#0e7a55";
         b.append(swatch, document.createTextNode(name));
         b.addEventListener("click", () => {
           state.theme = name;

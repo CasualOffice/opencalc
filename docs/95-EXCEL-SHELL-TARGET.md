@@ -26,7 +26,7 @@ This overrides three earlier decisions:
 
 | Adopted from Excel | Ours |
 | --- | --- |
-| Title bar with Quick Access Toolbar, Alt+Q search, Comments, Share | Logo, name, Studio blue `#3355c4` accent |
+| Title bar with Quick Access Toolbar, Alt+Q search, Comments, Share | Logo, name, OpenCalc green `#0e7a55` accent (owner, 2026-10-14; deliberately not Excel's `#217346`/`#107C41`) |
 | Tab set and per-tab group set and order; contextual tabs; collapse order | Icon artwork: Fluent UI System Icons (`@fluentui/svg-icons`, MIT) |
 | File page: Home/New, Open, Info, Save As, Print, Share, Export, Options | Templates and help content |
 | Every shortcut, two-level KeyTips, Ready/Enter/Edit/Point modes | — |

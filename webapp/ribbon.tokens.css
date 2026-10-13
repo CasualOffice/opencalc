@@ -191,6 +191,6 @@
  * toward black: the dark theme's accent is a light blue meant for text, and
  * its paired text colour is near-black, which read as black on blue. */
 :root, :host {
-  --rb-accent-fill: color-mix(in srgb, var(--oc-accent-color), #000 25%);
+  --rb-accent-fill: var(--oc-accent-fill-color, color-mix(in srgb, var(--oc-accent-color), #000 25%));
   --rb-on-accent: #fff;
 }
