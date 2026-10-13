@@ -63,6 +63,7 @@ import {
   customFormatDialog,
   deleteSheetWithConfirm,
   formatCellsDialog,
+  insertDeleteDialog,
   headerMenu,
   hyperlinkDialog,
   manageCfRules,
@@ -474,6 +475,7 @@ export {
   customFormatDialog,
   deleteSheetWithConfirm,
   formatCellsDialog,
+  insertDeleteDialog,
   headerMenu,
   hyperlinkDialog,
   manageCfRules,
@@ -8583,8 +8585,16 @@ function wireEvents() {
       if (k === "v") { return; }
       // Ctrl+Shift+"+" inserts rows/columns, Ctrl+"-" deletes them (Excel).
       // "+" arrives as key "+" or as "=" with Shift depending on the layout.
-      if ((e.key === "+" || (k === "=" && e.shiftKey))) { insertLines(); e.preventDefault(); return; }
-      if (e.key === "-" || e.key === "_") { deleteLines(); e.preventDefault(); return; }
+      // Whole rows or columns go straight through; a cell selection asks how,
+      // as Excel does (fit-gap XL-UX-002/005).
+      if ((e.key === "+" || (k === "=" && e.shiftKey))) {
+        if (state.selKind === "cells") insertDeleteDialog(true); else insertLines();
+        e.preventDefault(); return;
+      }
+      if (e.key === "-" || e.key === "_") {
+        if (state.selKind === "cells") insertDeleteDialog(false); else deleteLines();
+        e.preventDefault(); return;
+      }
       // Ctrl+Backspace — scroll the view back to the active cell (Excel).
       //
       // This is the one binding in the file that had to be added rather than
@@ -8748,10 +8758,20 @@ function wireEvents() {
         if (e.key === "Enter" || e.key === "Tab") { acceptAutocomplete(); e.preventDefault(); return; }
         if (e.key === "Escape") { hideAutocomplete(); e.preventDefault(); return; }
       }
+      // F2 toggles Enter/Point and Edit mode, as in Excel (fit-gap XL-UX-003):
+      // in Edit mode the arrows move the caret through the text instead of
+      // inserting references into the middle of the formula.
+      if (e.key === "F2" && !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey) {
+        editMode = editMode === "Edit" ? "Enter" : "Edit";
+        pointMode = null;
+        updateCellMode();
+        e.preventDefault();
+        return;
+      }
       // Arrow keys build a reference when the caret sits where one may go
       // (point mode); everywhere else they move the text caret as usual.
       const step = { ArrowUp: [-1, 0], ArrowDown: [1, 0], ArrowLeft: [0, -1], ArrowRight: [0, 1] }[e.key];
-      if (step && (pointMode || refAcceptable())) {
+      if (step && editMode !== "Edit" && (pointMode || refAcceptable())) {
         if (pointStep(step[0], step[1], e.shiftKey)) { e.preventDefault(); return; }
       }
       if (e.key === "F4") { if (cycleAnchors()) e.preventDefault(); }

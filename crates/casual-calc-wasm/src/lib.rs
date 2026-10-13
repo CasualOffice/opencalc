@@ -219,11 +219,16 @@ pub(crate) fn with_session_mut<R>(
 /// A cell's editable content: `=formula` for a formula cell, otherwise the
 /// value as it would be typed. Find & Replace operate on this (Excel's default
 /// "Formulas" look-in) so a match is always something Replace can rewrite.
-pub(crate) fn cell_input_text(wb: &Workbook, cell: &Cell) -> String {
+///
+/// Printed **at `at`**: a stored formula's references are offsets from the cell
+/// that holds it (`PERF-11`), so printing without the origin turned every
+/// relative reference into `#REF!` — Show Formulas read `=SUM(#REF!:#REF!)` and
+/// Find could not match a reference inside a formula (fit-gap XL-UX-001).
+pub(crate) fn cell_input_text(wb: &Workbook, cell: &Cell, at: CellRef) -> String {
     if let Some(handle) = cell.formula
         && let Some(expr) = wb.formula(handle)
     {
-        return format!("={expr}");
+        return format!("={}", casual_calc_formula::print_at(expr, Origin::at(at.row, at.col)));
     }
     value_text(wb, &cell.value)
 }

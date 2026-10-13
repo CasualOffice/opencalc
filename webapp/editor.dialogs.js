@@ -5,6 +5,7 @@
 // function below only *reads* it, which is what made the move safe to do
 // without touching a single body.
 
+import { run as runRegistered } from "./commands.js";
 import {
   A1,
   A1range,
@@ -3113,4 +3114,81 @@ export function documentPropertiesDialog() {
   save.addEventListener("click", commitProps);
   first.focus();
   first.select();
+}
+
+/// Excel's Insert / Delete dialog for a cell selection (fit-gap XL-UX-002/005).
+///
+/// Ctrl+Shift+= and Ctrl+− used to insert or delete the **entire row** with no
+/// question when a single cell was selected. Excel asks: shift cells
+/// down/right (up/left), entire row, entire column. Each choice runs the same
+/// command the right-click menu does, so the formula-reference warning and the
+/// undo step are shared.
+export function insertDeleteDialog(insert) {
+  const modal = byId("oc-modal");
+  const body = byId("oc-modal-body");
+  byId("oc-modal-title").textContent = insert ? "Insert" : "Delete";
+  body.textContent = "";
+  const choices = insert
+    ? [["right", "Shift cells right", "insert.cells-right"], ["down", "Shift cells down", "insert.cells-down"],
+       ["row", "Entire row", "insert.rows-above"], ["col", "Entire column", "insert.columns-left"]]
+    : [["left", "Shift cells left", "insert.delete-cells-left"], ["up", "Shift cells up", "insert.delete-cells-up"],
+       ["row", "Entire row", "insert.delete-rows"], ["col", "Entire column", "insert.delete-columns"]];
+  const preset = insert ? "down" : "up";
+  const group = el("div", "oc-radio-group");
+  group.setAttribute("role", "radiogroup");
+  group.setAttribute("aria-label", insert ? "Insert" : "Delete");
+  for (const [value, label] of choices) {
+    const row = el("label", "oc-radio");
+    const radio = document.createElement("input");
+    radio.type = "radio";
+    radio.name = "oc-insdel";
+    radio.value = value;
+    radio.checked = value === preset;
+    row.append(radio, el("span", null, label));
+    group.appendChild(row);
+  }
+  const actions = el("div", "oc-confirm-actions");
+  const ok = el("button", "oc-btn primary", "OK");
+  const cancel = el("button", "oc-btn", "Cancel");
+  actions.append(ok, cancel);
+  body.append(group, actions);
+  modal.hidden = false;
+
+  const x = byId("oc-modal-x");
+  const close = () => {
+    modal.hidden = true;
+    body.textContent = "";
+    document.removeEventListener("keydown", onKey, true);
+    x.removeEventListener("click", onCancel);
+    modal.removeEventListener("click", onBackdrop);
+  };
+  const onCancel = () => { close(); canvas.focus(); };
+  const onBackdrop = (e) => { if (e.target === modal) onCancel(); };
+  const apply = () => {
+    const picked = group.querySelector("input:checked")?.value ?? preset;
+    const id = choices.find((c) => c[0] === picked)[2];
+    close();
+    canvas.focus();
+    runRegistered(id);
+  };
+  const focusables = () => [...modal.querySelectorAll("input:checked, button")].filter((n) => n.offsetParent !== null);
+  const onKey = (e) => {
+    if (!group.isConnected) { document.removeEventListener("keydown", onKey, true); return; }
+    if (e.key === "Escape") { e.stopPropagation(); e.preventDefault(); onCancel(); }
+    else if (e.key === "Enter") {
+      e.stopPropagation(); e.preventDefault();
+      if (document.activeElement === cancel) onCancel(); else apply();
+    } else if (e.key === "Tab") {
+      const f = focusables();
+      const i = f.indexOf(document.activeElement);
+      e.preventDefault();
+      f[(i + (e.shiftKey ? -1 : 1) + f.length) % f.length].focus();
+    }
+  };
+  ok.addEventListener("click", apply);
+  cancel.addEventListener("click", onCancel);
+  x.addEventListener("click", onCancel);
+  modal.addEventListener("click", onBackdrop);
+  document.addEventListener("keydown", onKey, true);
+  group.querySelector("input:checked").focus();
 }
