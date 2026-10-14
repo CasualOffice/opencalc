@@ -299,6 +299,8 @@ import {
   autofillToNeighbour,
   autofitColumn,
   autofitColumnForTest,
+  undoMark,
+  widenForEntry,
   autofitRow,
   autofitRowForTest,
   callAtCaret,
@@ -709,6 +711,8 @@ export {
   autofillToNeighbour,
   autofitColumn,
   autofitColumnForTest,
+  undoMark,
+  widenForEntry,
   autofitRow,
   autofitRowForTest,
   callAtCaret,
@@ -1809,6 +1813,11 @@ export function tableTextAt(r, c) {
 }
 let errorCells = new Set();
 let numericTextCells = new Set(); // "r,c" of cells holding a number stored as text
+/// Excel's corner marks (`XL-UX-016`): green top-left for an error-checking
+/// flag, red top-right for a note. Fixed colours, not theme tokens — Excel
+/// keeps them in its dark mode too, and they are what a user already reads.
+const ERROR_FLAG_COLOR = "#2f9e44";
+const NOTE_MARK_COLOR = "#e5484d";
 
 // What each spreadsheet error actually means, in the terms that caused it.
 // "#VALUE!" alone tells you something broke; it does not tell you what to look
@@ -3347,47 +3356,37 @@ export function draw() {
   // without ever being shown.
   refreshValidationPrompt();
 
-  // Error indicators — a small marker in the top-left of any cell holding an
-  // error value, so a broken formula is findable by eye instead of only by
-  // reading every cell. Hovering explains it (see the mousemove handler).
+  // **Error-checking flags** (`XL-UX-016`). Excel's convention, kept exactly:
+  // a *green* triangle in the *top-left* marks an error-checking flag — a
+  // formula whose result is an error (#DIV/0!, #NAME?, …) and a number stored
+  // as text (`DATA-NT-01`) alike — and the *top-right* belongs to a note, in
+  // red (drawn below). The two kinds never share a corner, so a flagged cell
+  // with a note shows both marks rather than one hiding the other.
+  //
+  // This used to be the other way round: a red mark top-left on an error and a
+  // green one top-right on a text number, so an error read as "has a comment"
+  // at a glance and a text number with a note lost its flag under the red.
+  //
+  // Hovering explains either flag (see the mousemove handler); the hover keys
+  // on the cell, not the corner, so nothing there depends on where this sits.
+  //
+  // `SUM` over a column of text returns 0, which is what Excel returns too, and
+  // a person reading that zero had no way to tell a correct empty sum from a
+  // column an importer turned into strings — this mark is that cue.
   errorCells = new Set();
+  numericTextCells = new Set();
   for (const it of items) {
-    if (!it.er) continue;
-    errorCells.add(it.r + "," + it.c);
+    if (!it.er && !it.nt) continue;
+    if (it.er) errorCells.add(it.r + "," + it.c);
+    if (it.nt) numericTextCells.add(it.r + "," + it.c);
     const ex = colXAt(it.c), ey = rowYAt(it.r);
     if (ex === undefined || ey === undefined) continue;
     withQuad(it.r, it.c, () => {
-      ctx.fillStyle = "#e5484d";
+      ctx.fillStyle = ERROR_FLAG_COLOR;
       ctx.beginPath();
-      ctx.moveTo(ex + 1, ey + 1);
-      ctx.lineTo(ex + 8, ey + 1);
-      ctx.lineTo(ex + 1, ey + 8);
-      ctx.closePath();
-      ctx.fill();
-    });
-  }
-
-  // **Numbers stored as text** (`DATA-NT-01`). A green triangle in the
-  // top-right, which is Excel's convention and deliberately not the top-left
-  // where the red error marker sits — a cell can be neither, and putting them
-  // in the same corner would make one hide the other.
-  //
-  // This is the cue that was missing. `SUM` over a column of text returns 0,
-  // which is what Excel returns too, and a person reading that zero had no way
-  // to tell a correct empty sum from a column an importer turned into strings.
-  numericTextCells = new Set();
-  for (const it of items) {
-    if (!it.nt) continue;
-    numericTextCells.add(it.r + "," + it.c);
-    const nx = colXAt(it.c), ny = rowYAt(it.r);
-    if (nx === undefined || ny === undefined) continue;
-    const nw = colWAt(it.c);
-    withQuad(it.r, it.c, () => {
-      ctx.fillStyle = "#2f9e44";
-      ctx.beginPath();
-      ctx.moveTo(nx + nw - 8, ny + 1);
-      ctx.lineTo(nx + nw - 1, ny + 1);
-      ctx.lineTo(nx + nw - 1, ny + 8);
+      ctx.moveTo(ex, ey);
+      ctx.lineTo(ex + 7, ey);
+      ctx.lineTo(ex, ey + 7);
       ctx.closePath();
       ctx.fill();
     });
@@ -3423,7 +3422,9 @@ export function draw() {
     }
   }
 
-  // Comment indicators — a small red triangle in each commented cell's corner.
+  // Note / comment indicators — a small red triangle in the top-right corner,
+  // Excel's convention (`XL-UX-016`). The model keeps notes and threaded
+  // comments as one type (`CellComment`), so one mark serves both.
   commentCells = new Set();
   if (wasm) {
     const r0 = geo.rowIdx[0] ?? state.firstRow, c0 = geo.colIdx[0] ?? state.firstCol;
@@ -3436,7 +3437,7 @@ export function draw() {
       if (cx === undefined || cy === undefined) continue;
       const cw = colWAt(cm.c);
       withQuad(cm.r, cm.c, () => {
-        ctx.fillStyle = "#e5484d";
+        ctx.fillStyle = NOTE_MARK_COLOR;
         ctx.beginPath();
         ctx.moveTo(cx + cw - 7, cy); ctx.lineTo(cx + cw, cy); ctx.lineTo(cx + cw, cy + 7);
         ctx.closePath(); ctx.fill();
@@ -6415,6 +6416,8 @@ export function beginEdit(surface, initial, caretAtEnd = false) {
 export function endEdit(refocus = true) {
   const was = editSurface;
   editSurface = null;
+  // The next edit reads the cell's font afresh: it may have changed between.
+  inline._fontKey = null;
   reportEditing(false);
   state.editing = false;
   // The range-finder outlines are painted into the canvas, so dropping them
@@ -6928,10 +6931,7 @@ function registerShellCommands() {
   } });
   R("formulas.autosum", { label: "AutoSum", shortcut: "Alt+=", run: () => autoSum() });
   R("formulas.insert-function", { label: "Insert Function…", shortcut: "Shift+F3", run: () => insertFunctionDialog() });
-  R("formulas.define-name", { label: "Define Name…", run: () => {
-    const r = canvas.getBoundingClientRect();
-    openNameManager(r.left + 120, r.top + 90);
-  } });
+  R("formulas.define-name", { label: "Define Name…", run: () => openNameManager() });
   R("edit.replace", { label: "Replace…", shortcut: "Ctrl+H", run: () => openReplace() });
   R("edit.go-to", { label: "Go To…", shortcut: "Ctrl+G", run: () => goToDialog() });
   R("edit.go-to-special", { label: "Go To Special…", run: () => goToSpecialDialog() });
@@ -7782,8 +7782,8 @@ function wireEvents() {
       // **Who last changed this cell** (`HIST-02`).
       //
       // On the hover rather than as a marker on the cell: the grid already
-      // draws a red corner for an error and a green one for a number stored as
-      // text, and a third would make a shared sheet read as a defect list. This
+      // draws a green corner for an error-checking flag and a red one for a
+      // note, and a third would make a shared sheet read as a defect list. This
       // is information worth having on ask, which is what a tooltip is.
       //
       // **"since this file was opened" is not a hedge.** Attribution does not
@@ -8563,7 +8563,13 @@ function wireEvents() {
         const text = e.shiftKey
           ? `${now.getHours()}:${String(now.getMinutes()).padStart(2, "0")}`
           : `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
-        tryEdit(() => wasm.session_set_cell(state.sheet, state.sel.row, state.sel.col, text));
+        // Excel widens a default-width column for the stamp rather than
+        // showing ##### (`XL-UX-036`), in the same undo step.
+        tryEdit(() => {
+          const mark = undoMark();
+          wasm.session_set_cell(state.sheet, state.sel.row, state.sel.col, text);
+          widenForEntry(mark, [{ r0: state.sel.row, c0: state.sel.col, r1: state.sel.row, c1: state.sel.col }]);
+        });
         e.preventDefault(); return;
       }
       // Ctrl+1 — Format Cells, the shortcut every spreadsheet user already has
@@ -8621,7 +8627,7 @@ function wireEvents() {
       // by opening Find and tabbing across, which is not the shortcut.
       if (k === "h") { openReplace(); e.preventDefault(); return; }
       if (k === "g") { goToDialog(); e.preventDefault(); return; } // Go To dialog (XL-UX-019)
-      if (e.key === "F3") { const r = canvas.getBoundingClientRect(); openNameManager(r.left + 120, r.top + 90); e.preventDefault(); return; } // Name Manager
+      if (e.key === "F3") { openNameManager(); e.preventDefault(); return; } // Name Manager (XL-UX-021)
       if (k === "z" && !e.shiftKey) { doUndo(); e.preventDefault(); return; }
       if (k === "y" || (k === "z" && e.shiftKey)) { doRedo(); e.preventDefault(); return; }
       // The document's own format, not `.xlsx` regardless. `doSave` is the raw
@@ -10137,7 +10143,7 @@ function wireEvents() {
         // (`UX-DESK-01`). `openSettings()` is the one entry point and picks
         // its own presentation.
         ["Settings…", () => openSettings()],
-        ["Name manager…", () => openNameManager(160, 120)],
+        ["Name manager…", () => openNameManager()],
         "sep",
         // Excel's Formulas ▸ Calculation Options. A workbook saved with
         // calculation off opens that way, so the state has to be visible and

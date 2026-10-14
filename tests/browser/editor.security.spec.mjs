@@ -67,7 +67,7 @@ test("a hostile defined name cannot create DOM in the Name Manager", async ({ pa
 
   // And it is still *shown* — escaping into oblivion would be a different bug.
   const shown = await page.evaluate(() =>
-    [...document.querySelectorAll(".nm-row")].map((r) => r.textContent).join(" "),
+    [...document.querySelectorAll(".oc-nm-row")].map((r) => r.textContent).join(" "),
   );
   expect(shown, "the name is displayed as text").toContain("<img");
   expect(problems).toEqual([]);

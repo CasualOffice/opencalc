@@ -1708,13 +1708,17 @@ pub fn parse_retained_refs(xml: &[u8]) -> Result<Vec<RetainedRef>, ImportError> 
     Ok(out)
 }
 
-pub fn parse_defined_names(xml: &[u8]) -> Result<Vec<(String, Option<u32>, String)>, ImportError> {
+/// One `<definedName>` as read: its name, `localSheetId`, the text it refers
+/// to, and its `comment`.
+pub type RawDefinedName = (String, Option<u32>, String, Option<String>);
+
+pub fn parse_defined_names(xml: &[u8]) -> Result<Vec<RawDefinedName>, ImportError> {
     let mut reader = Reader::from_reader(xml);
     let mut buf = Vec::new();
     let mut bounds = Bounds::new();
 
     let mut names = Vec::new();
-    let mut current: Option<(String, Option<u32>, String)> = None;
+    let mut current: Option<RawDefinedName> = None;
 
     loop {
         match reader.read_event_into(&mut buf).map_err(xml_err)? {
@@ -1723,16 +1727,17 @@ pub fn parse_defined_names(xml: &[u8]) -> Result<Vec<(String, Option<u32>, Strin
                 if e.local_name().as_ref() == b"definedName" {
                     let name = read_attr(&e, b"name")?.unwrap_or_default();
                     let local = read_attr(&e, b"localSheetId")?.and_then(|s| s.parse().ok());
-                    current = Some((name, local, String::new()));
+                    let comment = read_attr(&e, b"comment")?.filter(|c| !c.is_empty());
+                    current = Some((name, local, String::new(), comment));
                 }
             }
             Event::Text(e) => {
-                if let Some((_, _, text)) = current.as_mut() {
+                if let Some((_, _, text, _)) = current.as_mut() {
                     text.push_str(&text_of(&e)?);
                 }
             }
             Event::GeneralRef(e) => {
-                if let Some((_, _, text)) = current.as_mut() {
+                if let Some((_, _, text, _)) = current.as_mut() {
                     text.push_str(&ref_of(&e)?);
                 }
             }

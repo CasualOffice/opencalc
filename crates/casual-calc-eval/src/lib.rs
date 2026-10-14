@@ -35,8 +35,9 @@ pub use graph::{dependents_of, precedents_of};
 mod value;
 
 pub use eval::Evaluator;
-pub use functions::FUNCTIONS;
+pub use functions::{FUNCTIONS, is_builtin};
 pub use value::Value;
+pub use value::number_to_text;
 
 use casual_calc_model::{CellFlags, CellRef, CellValue, ErrorValue, Workbook};
 

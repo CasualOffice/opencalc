@@ -3938,6 +3938,7 @@ fn lambda_applies_inline_and_by_name() {
             name: name.to_owned(),
             sheet: None,
             formula: parse(text).unwrap(),
+            comment: None,
         });
     }
     recalculate(&mut wb);
@@ -3967,6 +3968,7 @@ fn runaway_recursion_is_an_error_not_a_crash() {
         name: "FOREVER".to_owned(),
         sheet: None,
         formula: parse("LAMBDA(n,FOREVER(n+1))").unwrap(),
+        comment: None,
     });
     recalculate(&mut wb);
     assert_eq!(
@@ -3988,6 +3990,7 @@ fn a_lambda_cannot_take_over_a_builtin_name() {
         name: "SUM".to_owned(),
         sheet: None,
         formula: parse("LAMBDA(x,999)").unwrap(),
+        comment: None,
     });
     recalculate(&mut wb);
     assert_eq!(value_at(&wb, 0, 2), CellValue::Number(5.0));
@@ -4972,4 +4975,68 @@ fn array_lifting_unary_if_and_sumproduct() {
         }
     }
     assert!(failures.is_empty(), "\n{}", failures.join("\n"));
+}
+
+/// A sheet-scoped name is seen only from its own sheet, where it shadows a
+/// workbook name of the same spelling; and names match case-insensitively
+/// (`XL-UX-022`, Excel's New Name scope).
+#[test]
+fn a_sheet_scoped_name_wins_on_its_sheet_and_is_invisible_elsewhere() {
+    use casual_calc_model::DefinedName;
+    let mut wb = Workbook::new(Id::from_parts(1, 1));
+    let s1 = Sheet::new(SheetId(Id::from_parts(2, 1)), "Sheet1");
+    let s2 = Sheet::new(SheetId(Id::from_parts(2, 2)), "Sheet2");
+    let s2_id = s2.id;
+    wb.sheets.push(s1);
+    wb.sheets.push(s2);
+    for (sheet, at, text) in [
+        (0, 0, "Rate"),
+        (1, 0, "Rate"),
+        (0, 1, "rate*2"),
+        (0, 2, "Local"),
+    ] {
+        let handle = wb.store_formula(parse(text).unwrap());
+        let mut c = Cell::value(CellValue::Empty);
+        c.formula = Some(handle);
+        wb.sheets[sheet].cells.set(CellRef::new(0, at), c);
+    }
+    let name = |n: &str, sheet, text: &str| DefinedName {
+        name: n.to_owned(),
+        sheet,
+        formula: parse(text).unwrap(),
+        comment: None,
+    };
+    // The local one first, so a lookup that ignores scope finds it everywhere.
+    wb.defined_names.push(name("Rate", Some(s2_id), "5"));
+    wb.defined_names.push(name("Rate", None, "3"));
+    wb.defined_names.push(name("Local", Some(s2_id), "9"));
+    recalculate(&mut wb);
+    let at = |sheet: usize, col: u32| {
+        wb.sheets[sheet]
+            .cells
+            .get(CellRef::new(0, col))
+            .unwrap()
+            .value
+            .clone()
+    };
+    assert_eq!(
+        at(0, 0),
+        CellValue::Number(3.0),
+        "Sheet1 sees the workbook Rate"
+    );
+    assert_eq!(
+        at(1, 0),
+        CellValue::Number(5.0),
+        "Sheet2's own Rate shadows it"
+    );
+    assert_eq!(
+        at(0, 1),
+        CellValue::Number(6.0),
+        "names are case-insensitive"
+    );
+    assert_eq!(
+        at(0, 2),
+        CellValue::Error(casual_calc_model::ErrorValue::Name),
+        "a name scoped to Sheet2 is not visible from Sheet1"
+    );
 }

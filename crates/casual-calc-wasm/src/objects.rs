@@ -1379,9 +1379,201 @@ pub fn session_comments(sheet: usize, r0: u32, c0: u32, r1: u32, c1: u32) -> Str
     .unwrap_or_else(|| "[]".to_owned())
 }
 
-/// Define (or replace) a workbook-scoped named range. `refers_to` is a formula
-/// such as `Sheet1!A1:B2` or `A1`. Rejects empty names and names that collide
-/// with a cell reference. Recalculates so name-using formulas update.
+/// Excel's message for a name it will not accept, word for word.
+pub(crate) const INVALID_NAME: &str = "The name that you entered is not valid.\n\n\
+Reasons for this can include:\n\
+- The name does not begin with a letter or an underscore\n\
+- The name contains a space or other invalid characters\n\
+- The name conflicts with an Excel built-in name or the name of another object in the workbook";
+
+/// Excel's message for a name already defined in the same scope.
+pub(crate) const DUPLICATE_NAME: &str =
+    "The name that you entered already exists. Enter a unique name.";
+
+/// Whether Excel accepts `name` as a defined name.
+///
+/// Excel's rules: 1–255 characters; the first a letter, an underscore or a
+/// backslash; the rest letters, digits, periods, underscores or backslashes;
+/// and not something Excel would read as a reference instead — `A1`, `XFD9`,
+/// and the R1C1 shapes `R`, `C`, `RC`, `R1C1`, `R2C`, `C3`.
+pub(crate) fn name_is_valid(name: &str) -> bool {
+    let mut chars = name.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if name.chars().count() > 255 {
+        return false;
+    }
+    if !(first.is_alphabetic() || first == '_' || first == '\\') {
+        return false;
+    }
+    if !chars.all(|c| c.is_alphanumeric() || matches!(c, '_' | '.' | '\\')) {
+        return false;
+    }
+    if casual_calc_formula::parse_a1(name).is_some() {
+        return false;
+    }
+    // R1C1: an optional R with optional digits, then a C with optional digits;
+    // or an R with optional digits alone.
+    let up = name.to_ascii_uppercase();
+    let (has_r, rest) = match up.strip_prefix('R') {
+        Some(rest) => (true, rest),
+        None => (false, up.as_str()),
+    };
+    let digits = rest.chars().take_while(char::is_ascii_digit).count();
+    let rest = &rest[digits..];
+    let r1c1 = match rest.strip_prefix('C') {
+        Some(tail) => (has_r || digits == 0) && tail.chars().all(|c| c.is_ascii_digit()),
+        None => has_r && rest.is_empty(),
+    };
+    !r1c1
+}
+
+/// The sheet a JS scope argument names: `-1` (or any out-of-range index) is
+/// the workbook.
+fn scope_id(wb: &Workbook, sheet: i32) -> Option<SheetId> {
+    usize::try_from(sheet)
+        .ok()
+        .and_then(|i| wb.sheets.get(i))
+        .map(|s| s.id)
+}
+
+/// A name's new list of names and the formulas that follow a rename.
+pub(crate) type NamePlan = (Vec<DefinedName>, Vec<(usize, CellRef, Expr)>);
+
+/// The edit a New Name / Edit Name OK makes, worked out without touching the
+/// session: the workbook's new list of names, and every formula that has to
+/// follow a renamed name. `Err` carries Excel's message.
+///
+/// `editing` is the name being changed — its spelling and scope — or `None`
+/// for a new one. Excel does not let Edit Name change a name's scope, so an
+/// edited name keeps `editing`'s.
+pub(crate) fn plan_set_name(
+    wb: &Workbook,
+    editing: Option<(&str, Option<SheetId>)>,
+    name: &str,
+    scope: Option<SheetId>,
+    formula: Expr,
+    comment: Option<String>,
+) -> Result<NamePlan, &'static str> {
+    let name = name.trim();
+    if !name_is_valid(name) {
+        return Err(INVALID_NAME);
+    }
+    let scope = editing.map_or(scope, |(_, s)| s);
+    let same = |d: &DefinedName, n: &str, s: Option<SheetId>| {
+        d.sheet == s && d.name.eq_ignore_ascii_case(n)
+    };
+    let clash = wb
+        .defined_names
+        .iter()
+        .any(|d| same(d, name, scope) && !editing.is_some_and(|(old, s)| same(d, old, s)));
+    if clash {
+        return Err(DUPLICATE_NAME);
+    }
+    let entry = DefinedName {
+        name: name.to_owned(),
+        sheet: scope,
+        formula,
+        comment: comment.filter(|c| !c.trim().is_empty()),
+    };
+    let mut names = wb.defined_names.clone();
+    let mut rewrites = Vec::new();
+    let at = editing.and_then(|(old, s)| names.iter().position(|d| same(d, old, s)));
+    let (Some(at), Some((old, _))) = (at, editing) else {
+        names.push(entry);
+        return Ok((names, rewrites));
+    };
+    names[at] = entry;
+    if old != name {
+        // The formulas that used the old spelling follow it, as in Excel — on
+        // the name's own sheet for a sheet-scoped name, and wherever no
+        // same-named local shadows it for a workbook one.
+        let shadowed = |id: SheetId| {
+            wb.defined_names
+                .iter()
+                .any(|d| d.sheet == Some(id) && d.name.eq_ignore_ascii_case(old))
+        };
+        let reaches = |id: &SheetId| match scope {
+            Some(own) => own == *id,
+            None => !shadowed(*id),
+        };
+        for (idx, sheet) in wb.sheets.iter().enumerate() {
+            if !reaches(&sheet.id) {
+                continue;
+            }
+            for (addr, cell) in sheet.cells.iter() {
+                if let Some(expr) = cell.formula.and_then(|h| wb.formula(h)) {
+                    let mut e = expr.clone();
+                    if casual_calc_formula::rename_name_references(&mut e, old, name) {
+                        rewrites.push((idx, addr, e));
+                    }
+                }
+            }
+        }
+        for (i, d) in names.iter_mut().enumerate() {
+            if i != at && d.sheet.as_ref().is_none_or(reaches) {
+                casual_calc_formula::rename_name_references(&mut d.formula, old, name);
+            }
+        }
+    }
+    Ok((names, rewrites))
+}
+
+/// Create or change a defined name — Excel's New Name and Edit Name.
+///
+/// `old_name` is the name being edited (empty for a new one) and `old_sheet`
+/// its scope; `sheet` is the scope of a new name; `-1` is the workbook.
+/// Refuses, in Excel's words, an invalid name or one already defined in that
+/// scope. A rename carries every formula that used the old spelling, in the
+/// same undo step.
+#[wasm_bindgen]
+pub fn session_set_name(
+    old_name: &str,
+    old_sheet: i32,
+    name: &str,
+    sheet: i32,
+    refers_to: &str,
+    comment: &str,
+) -> Result<(), JsError> {
+    let expr = parse(refers_to.trim().trim_start_matches('='))
+        .map_err(|e| JsError::new(&e.to_string()))?;
+    SESSION.with(|cell| {
+        let mut guard = cell.borrow_mut();
+        let session = guard.as_mut().ok_or_else(|| JsError::new("no session"))?;
+        let wb = session.workbook();
+        let editing = (!old_name.is_empty()).then(|| (old_name, scope_id(wb, old_sheet)));
+        let scope = scope_id(wb, sheet);
+        let comment = (!comment.is_empty()).then(|| comment.to_owned());
+        let (names, rewrites) =
+            plan_set_name(wb, editing, name, scope, expr, comment).map_err(JsError::new)?;
+        let mut ops = Vec::with_capacity(rewrites.len() + 1);
+        for (sheet, at, expr) in rewrites {
+            let Some(mut out) = session
+                .workbook()
+                .sheets
+                .get(sheet)
+                .and_then(|s| s.cells.get(at))
+                .cloned()
+            else {
+                continue;
+            };
+            out.formula = Some(session.workbook_mut().store_formula(expr));
+            ops.push(EditOperation::SetCell {
+                sheet,
+                at,
+                cell: Some(out),
+            });
+        }
+        ops.push(EditOperation::SetDefinedNames(names));
+        session.edit(EditOperation::Batch(ops)).map_err(js)
+    })
+}
+
+/// Define (or replace) a workbook-scoped named range — the name box's verb.
+/// `refers_to` is a formula such as `Sheet1!A1:B2` or `A1`. Rejects empty
+/// names and names that collide with a cell reference. Recalculates so
+/// name-using formulas update.
 #[wasm_bindgen]
 pub fn session_define_name(name: &str, refers_to: &str) -> Result<(), JsError> {
     let name = name.trim();
@@ -1397,11 +1589,18 @@ pub fn session_define_name(name: &str, refers_to: &str) -> Result<(), JsError> {
         let mut guard = cell.borrow_mut();
         let session = guard.as_mut().ok_or_else(|| JsError::new("no session"))?;
         let mut names = session.workbook().defined_names.clone();
-        names.retain(|d| d.name != name);
+        let mine = |d: &DefinedName| d.sheet.is_none() && d.name.eq_ignore_ascii_case(name);
+        // Redefining a name keeps its comment; only the target changes.
+        let comment = names
+            .iter()
+            .find(|d| mine(d))
+            .and_then(|d| d.comment.clone());
+        names.retain(|d| !mine(d));
         names.push(DefinedName {
             name: name.to_owned(),
             sheet: None,
             formula: expr,
+            comment,
         });
         // Undoable, dirties the doc, and recalculates (a new/changed name can
         // resolve previously-#NAME? formulas or change what they resolve to).
@@ -1411,39 +1610,156 @@ pub fn session_define_name(name: &str, refers_to: &str) -> Result<(), JsError> {
     })
 }
 
-/// Delete a defined name (undoable); recalculates so dependents become `#NAME?`.
+/// Delete a defined name in every scope (undoable); recalculates so dependents
+/// become `#NAME?`.
 #[wasm_bindgen]
 pub fn session_delete_name(name: &str) -> Result<(), JsError> {
+    delete_names(|d| d.name == name)
+}
+
+/// Delete the one defined name `name` of scope `sheet` (`-1` the workbook) —
+/// the Name Manager's Delete, which acts on a row, not on every same-spelled
+/// name in the file.
+#[wasm_bindgen]
+pub fn session_delete_name_in(name: &str, sheet: i32) -> Result<(), JsError> {
+    let scope = with_session(|s| scope_id(s.workbook(), sheet)).flatten();
+    delete_names(|d| d.sheet == scope && d.name.eq_ignore_ascii_case(name))
+}
+
+fn delete_names(doomed: impl Fn(&DefinedName) -> bool) -> Result<(), JsError> {
     SESSION.with(|cell| {
         let mut guard = cell.borrow_mut();
         let session = guard.as_mut().ok_or_else(|| JsError::new("no session"))?;
         let mut names = session.workbook().defined_names.clone();
-        names.retain(|d| d.name != name);
+        names.retain(|d| !doomed(d));
         session
             .edit(EditOperation::SetDefinedNames(names))
             .map_err(js)
     })
 }
 
-/// All defined names as JSON `[{name, refersTo}, …]`.
+/// All defined names as JSON `[{name, refersTo, sheet, scope, comment}, …]`:
+/// `sheet` is the scope's sheet index (`-1` for the workbook) and `scope` what
+/// Excel's Scope column shows — the sheet's name, or `Workbook`.
 #[wasm_bindgen]
 pub fn session_names() -> String {
     with_session(|s| {
-        let items: Vec<String> = s
-            .workbook()
+        let wb = s.workbook();
+        let items: Vec<String> = wb
             .defined_names
             .iter()
             .map(|d| {
+                let at = d
+                    .sheet
+                    .and_then(|id| wb.sheets.iter().position(|sh| sh.id == id));
+                let scope = at.map_or("Workbook", |i| wb.sheets[i].name.as_str());
                 format!(
-                    "{{\"name\":{},\"refersTo\":{}}}",
+                    "{{\"name\":{},\"refersTo\":{},\"sheet\":{},\"scope\":{},\"comment\":{}}}",
                     json_string(&d.name),
-                    json_string(&d.formula.to_string())
+                    json_string(&d.formula.to_string()),
+                    at.map_or(-1, |i| i as i64),
+                    json_string(scope),
+                    json_string(d.comment.as_deref().unwrap_or("")),
                 )
             })
             .collect();
         format!("[{}]", items.join(","))
     })
     .unwrap_or_else(|| "[]".to_owned())
+}
+
+/// What `text` evaluates to on `sheet`, written the way Excel's Name Manager
+/// and Function Arguments show a value: `12`, `"abc"`, `TRUE`, `#DIV/0!`, an
+/// array as `{1,2;3,4}`. Nothing is stored and nothing recalculates. Text that
+/// does not parse answers the empty string — the dialogs show no value while
+/// an argument is half typed, as Excel's do.
+#[wasm_bindgen]
+pub fn session_evaluate(sheet: usize, text: &str) -> String {
+    let body = text.trim().trim_start_matches('=').trim();
+    if body.is_empty() {
+        return String::new();
+    }
+    let Ok(expr) = parse(body) else {
+        return String::new();
+    };
+    let expr = clipped_for_display(expr);
+    with_session(|s| {
+        let wb = s.workbook();
+        if sheet >= wb.sheets.len() {
+            return String::new();
+        }
+        let mut ev = casual_calc_eval::Evaluator::new(wb);
+        shown_value(&ev.eval_expr_array(sheet, &expr))
+    })
+    .unwrap_or_default()
+}
+
+/// A bare range cut down to the corner [`shown_value`] can show, plus one
+/// cell so it still writes its `…`.
+///
+/// A name over `Sheet1!$A:$A` is a million cells; evaluating it whole to print
+/// the first few dozen made opening the Name Manager cost a million values per
+/// such name. Only a range that *is* the expression is cut: inside a function
+/// the whole range is the argument and changes the answer.
+fn clipped_for_display(expr: Expr) -> Expr {
+    const SHOWN: i64 = 49;
+    const ROWS: i64 = 1_048_576;
+    const COLS: i64 = 16_384;
+    let Expr::Range(mut a, mut b) = expr else {
+        return expr;
+    };
+    if a.row_implicit || b.row_implicit {
+        (a.row, b.row) = (0, ROWS - 1);
+        (a.row_implicit, b.row_implicit) = (false, false);
+    }
+    if a.col_implicit || b.col_implicit {
+        (a.col, b.col) = (0, COLS - 1);
+        (a.col_implicit, b.col_implicit) = (false, false);
+    }
+    let (r0, r1) = (a.row.min(b.row), a.row.max(b.row));
+    let (c0, c1) = (a.col.min(b.col), a.col.max(b.col));
+    let cols = (c1 - c0 + 1).min(SHOWN);
+    let rows = (r1 - r0 + 1).min((SHOWN + cols - 1) / cols);
+    (a.row, b.row, a.col, b.col) = (r0, r0 + rows - 1, c0, c0 + cols - 1);
+    Expr::Range(a, b)
+}
+
+/// One value as the evaluate dialogs write it. An array stops after a few
+/// dozen elements: the box is one line, and a whole column would be megabytes
+/// of text nobody can read.
+pub(crate) fn shown_value(v: &casual_calc_eval::Value) -> String {
+    use casual_calc_eval::Value;
+    const MAX: usize = 48;
+    match v {
+        Value::Empty => "0".to_owned(),
+        Value::Number(n) => casual_calc_eval::number_to_text(*n),
+        Value::Bool(b) => if *b { "TRUE" } else { "FALSE" }.to_owned(),
+        Value::Text(t) => format!("\"{t}\""),
+        Value::Error(e) => e.to_string(),
+        Value::Lambda(_) => String::new(),
+        Value::Array { rows, cols, cells } => {
+            let mut out = String::from("{");
+            'grid: for r in 0..*rows {
+                if r > 0 {
+                    out.push(';');
+                }
+                for c in 0..*cols {
+                    if r * cols + c >= MAX {
+                        out.push('…');
+                        break 'grid;
+                    }
+                    if c > 0 {
+                        out.push(',');
+                    }
+                    out.push_str(&shown_value(
+                        cells.get(r * cols + c).unwrap_or(&Value::Empty),
+                    ));
+                }
+            }
+            out.push('}');
+            out
+        }
+    }
 }
 
 /// The target range of a defined name as JSON `{r0,c0,r1,c1}`, or `null` if the
@@ -2364,5 +2680,123 @@ mod retunable_tests {
                  and nothing here can rewrite it"
             );
         }
+    }
+}
+
+/// Excel's New Name / Edit Name rules (`XL-UX-022`).
+#[cfg(test)]
+mod defined_name_tests {
+    use super::*;
+
+    #[test]
+    fn excel_refuses_what_it_would_read_as_something_else() {
+        for ok in [
+            "Rate", "_tax", "\\back", "Q1.Total", "Net_2024", "TaxRate", "RCX", "Ra",
+        ] {
+            assert!(name_is_valid(ok), "{ok} is a name Excel accepts");
+        }
+        for bad in [
+            "",
+            "1st",
+            "my name",
+            "A1",
+            "xfd1048576",
+            "R",
+            "C",
+            "r",
+            "RC",
+            "R1C1",
+            "R2C",
+            "RC3",
+            "C12",
+            "R7",
+            "Sales-Tax",
+            "a$b",
+        ] {
+            assert!(!name_is_valid(bad), "{bad:?} is a name Excel refuses");
+        }
+    }
+
+    #[test]
+    fn a_name_must_be_unique_in_its_scope_only() {
+        crate::session_new();
+        crate::session_add_sheet().unwrap();
+        session_set_name("", -1, "Rate", -1, "Sheet1!$A$1", "").unwrap();
+        with_session(|s| {
+            let wb = s.workbook();
+            let sheet2 = Some(wb.sheets[1].id);
+            let f = || parse("1").unwrap();
+            assert_eq!(
+                plan_set_name(wb, None, "rate", None, f(), None).err(),
+                Some(DUPLICATE_NAME),
+                "a second workbook Rate, in any case, is a duplicate"
+            );
+            assert!(
+                plan_set_name(wb, None, "Rate", sheet2, f(), None).is_ok(),
+                "the same spelling scoped to a sheet is a different name"
+            );
+            assert_eq!(
+                plan_set_name(wb, None, "B2", None, f(), None).err(),
+                Some(INVALID_NAME)
+            );
+            assert!(
+                plan_set_name(wb, None, "Total", None, f(), None).is_ok(),
+                "a function's spelling is still a name — `Rate` is the textbook one"
+            );
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn scope_and_comment_are_kept_and_a_rename_carries_its_formulas() {
+        crate::session_new();
+        crate::session_add_sheet().unwrap();
+        crate::session_set_cell(0, 0, 0, "4").unwrap();
+        session_set_name("", -1, "Rate", 1, "Sheet1!$A$1", "VAT, 2024").unwrap();
+        crate::session_set_cell(1, 0, 1, "=Rate*2").unwrap();
+        crate::session_set_cell(0, 0, 1, "=Rate*2").unwrap();
+        let names = session_names();
+        assert!(names.contains("\"scope\":\"Sheet2\""), "{names}");
+        assert!(names.contains("\"comment\":\"VAT, 2024\""), "{names}");
+
+        // Edit Name: rename it. Sheet2's formula follows; Sheet1's never saw
+        // the name (it is scoped to Sheet2) and is left as it was.
+        session_set_name("Rate", 1, "Vat", -1, "Sheet1!$A$1", "VAT, 2024").unwrap();
+        assert_eq!(crate::session_cell_input(1, 0, 1), "=Vat*2");
+        assert_eq!(crate::session_cell_input(0, 0, 1), "=Rate*2");
+        assert!(
+            session_names().contains("\"scope\":\"Sheet2\""),
+            "Edit Name keeps the scope"
+        );
+        assert_eq!(session_evaluate(1, "Vat*2"), "8");
+        assert_eq!(session_evaluate(0, "Vat"), "#NAME?");
+
+        // One undo puts the old spelling back everywhere.
+        crate::session_undo().unwrap();
+        assert_eq!(crate::session_cell_input(1, 0, 1), "=Rate*2");
+
+        session_delete_name_in("rate", 1).unwrap();
+        assert_eq!(session_names(), "[]");
+    }
+
+    #[test]
+    fn evaluate_writes_values_the_way_the_dialogs_show_them() {
+        crate::session_new();
+        crate::session_set_cell(0, 0, 0, "1").unwrap();
+        crate::session_set_cell(0, 1, 0, "2").unwrap();
+        crate::session_set_cell(0, 2, 0, "hi").unwrap();
+        assert_eq!(session_evaluate(0, "A1:A3"), "{1;2;\"hi\"}");
+        assert_eq!(session_evaluate(0, "=SUM(A1:A2)"), "3");
+        assert_eq!(session_evaluate(0, "1/0"), "#DIV/0!");
+        assert_eq!(session_evaluate(0, "SUM(("), "");
+        // A whole column is shown by its first few dozen cells, not read whole.
+        let col = session_evaluate(0, "A:A");
+        assert!(col.starts_with("{1;2;\"hi\";0;"), "{col}");
+        assert!(col.ends_with("…}"), "{col}");
+        assert_eq!(
+            session_evaluate(0, "SUM(A:A)"),
+            "3",
+            "inside a function the range is whole"
+        );
     }
 }

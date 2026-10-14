@@ -387,7 +387,7 @@ impl<'a> Evaluator<'a> {
                 // A defined name bound to a LAMBDA is called like a builtin,
                 // which is the whole point of naming one.
                 if !crate::functions::is_builtin(name)
-                    && let Some(body) = self.lambda_named(name)
+                    && let Some(body) = self.lambda_named(sheet_index, name)
                 {
                     return self.apply_lambda(sheet_index, &body, args);
                 }
@@ -456,12 +456,8 @@ impl<'a> Evaluator<'a> {
     }
 
     /// The LAMBDA a defined name is bound to, if it is bound to one.
-    fn lambda_named(&self, name: &str) -> Option<Expr> {
-        let defined = self
-            .workbook
-            .defined_names
-            .iter()
-            .find(|d| d.name.eq_ignore_ascii_case(name))?;
+    fn lambda_named(&self, sheet_index: usize, name: &str) -> Option<Expr> {
+        let defined = defined_name_in_scope(self.workbook, sheet_index, name)?;
         match &defined.formula {
             Expr::Function { name, .. } if name == "LAMBDA" => Some(defined.formula.clone()),
             _ => None,
@@ -496,7 +492,7 @@ impl<'a> Evaluator<'a> {
         // A bare name is resolved as a lambda first, so `MYFN(1)` works whether
         // written as a call or as a function.
         if let Expr::Name(name) = callee
-            && let Some(body) = self.lambda_named(name)
+            && let Some(body) = self.lambda_named(sheet_index, name)
         {
             return self.apply_lambda(sheet_index, &body, args);
         }
@@ -607,7 +603,7 @@ impl<'a> Evaluator<'a> {
         {
             return value.clone();
         }
-        let defined = self.workbook.defined_names.iter().find(|d| d.name == name);
+        let defined = defined_name_in_scope(self.workbook, sheet_index, name);
         match defined {
             Some(dn) => {
                 let scope = dn
@@ -787,6 +783,30 @@ impl<'a> Evaluator<'a> {
             },
         }
     }
+}
+
+/// The defined name `name` as seen from sheet `sheet_index`: Excel's lookup.
+///
+/// A name scoped to the sheet the formula is on wins over a workbook-scoped
+/// name of the same spelling, and a name scoped to any *other* sheet is not
+/// visible at all. Names compare case-insensitively, as Excel's do.
+///
+/// The lookup used to take the first name in the list whatever its scope and
+/// compare it case-sensitively, so a `Local` defined on Sheet2 answered for a
+/// formula on Sheet1, and `=total` was `#NAME?` beside a name called `Total`.
+pub(crate) fn defined_name_in_scope<'w>(
+    workbook: &'w Workbook,
+    sheet_index: usize,
+    name: &str,
+) -> Option<&'w casual_calc_model::DefinedName> {
+    let here = workbook.sheets.get(sheet_index).map(|s| s.id);
+    let named = |d: &&casual_calc_model::DefinedName| d.name.eq_ignore_ascii_case(name);
+    let names = &workbook.defined_names;
+    names
+        .iter()
+        .filter(named)
+        .find(|d| d.sheet.is_some() && d.sheet == here)
+        .or_else(|| names.iter().filter(named).find(|d| d.sheet.is_none()))
 }
 
 fn arithmetic(op: BinaryOp, lv: &Value, rv: &Value) -> Value {

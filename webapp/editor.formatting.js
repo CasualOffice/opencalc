@@ -38,7 +38,9 @@ import {
   statusError,
   t,
   tryEdit,
+  undoMark,
   wasm,
+  widenForEntry,
 } from "./editor.core.js";
 
 export function mergeInSel(m) {
@@ -214,7 +216,14 @@ export function stepFontSize(dir) {
   setFontSize(next);
 }
 
-export function setNumberFormat(code) { formatSel((s) => wasm.session_set_number_format(state.sheet, s.r0, s.c0, s.r1, s.c1, code)); }
+export function setNumberFormat(code) {
+  // A format that lengthens the display (scientific, a date, currency) widens a
+  // default-width column rather than showing #####, as Excel does — one undo
+  // step with the format (`XL-UX-036`).
+  const mark = undoMark();
+  formatSel((s) => wasm.session_set_number_format(state.sheet, s.r0, s.c0, s.r1, s.c1, code));
+  if (widenForEntry(mark, allRanges())) draw();
+}
 
 export function adjustDecimals(delta) { formatSel((s) => wasm.session_adjust_decimals(state.sheet, s.r0, s.c0, s.r1, s.c1, delta)); }
 

@@ -12,8 +12,9 @@ async function boot(page) {
   await expect(page.locator("#tb-status")).toHaveAttribute("data-engine", /^\d/, { timeout: 30_000 });
 }
 
+// The Name Manager was a third `#sheet-ctx` until XL-UX-021 made it Excel's
+// dialog; its Escape is held in `editor.name-manager.spec.mjs`.
 for (const [what, open] of [
-  ["the Name Manager", (page) => page.evaluate(() => window.opencalcEditor.runCommand("tools.name-manager"))],
   ["the cell's right-click menu", (page) => page.evaluate(() => window.opencalcEditor.cellMenu(300, 300))],
 ]) {
   test(`Escape closes ${what} and gives the grid the keyboard back`, async ({ page }) => {

@@ -18,4 +18,10 @@ pub struct DefinedName {
     pub sheet: Option<SheetId>,
     /// The parsed formula the name refers to.
     pub formula: Expr,
+    /// The author's note on the name — OOXML `<definedName comment=…>`, the
+    /// Comment box of Excel's New Name dialog. Absent is written by omission,
+    /// so a name without one serializes exactly as it did before the field
+    /// existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub comment: Option<String>,
 }

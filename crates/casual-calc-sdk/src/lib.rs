@@ -1374,6 +1374,21 @@ impl WorkbookSession {
         self.history.can_undo()
     }
 
+    /// A mark for [`Self::group_undo_since`], taken before the edits of one
+    /// gesture.
+    #[must_use]
+    pub fn undo_mark(&self) -> u64 {
+        self.history.undo_mark()
+    }
+
+    /// Make every edit applied since `mark` one undo step. Each edit was
+    /// applied and queued for collaborators on its own; only the local history
+    /// is regrouped. `false` when the history moved in a way that makes the
+    /// mark meaningless (an undo or redo since), in which case nothing changes.
+    pub fn group_undo_since(&mut self, mark: u64) -> bool {
+        self.history.group_since(mark)
+    }
+
     /// What undo would reverse, for a menu label.
     pub fn undo_label(&self) -> Option<&'static str> {
         self.history.undo_label()

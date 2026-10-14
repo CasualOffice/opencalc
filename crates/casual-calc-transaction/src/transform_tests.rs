@@ -91,6 +91,7 @@ fn seed() -> Workbook {
         name: "Anchor".to_owned(),
         sheet: None,
         formula: casual_calc_formula::parse("S!$C$3").expect("a defined name parses"),
+        comment: None,
     });
     workbook
 }
@@ -161,6 +162,7 @@ fn candidates(base: &mut Workbook) -> Vec<Operation> {
                 name: "Anchor".to_owned(),
                 sheet: None,
                 formula: casual_calc_formula::parse(text).expect("a defined name parses"),
+                comment: None,
             },
         ]));
     }

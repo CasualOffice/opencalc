@@ -255,6 +255,7 @@ pub(crate) fn set_sheet_name(
                 name: name.to_owned(),
                 sheet: Some(id),
                 formula: expr,
+                comment: None,
             });
         }
         session

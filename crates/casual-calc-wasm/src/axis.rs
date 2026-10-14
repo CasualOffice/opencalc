@@ -428,6 +428,23 @@ pub fn session_col_width(sheet: usize, col: u32) -> f64 {
     .unwrap_or(0.0)
 }
 
+/// Whether a column carries its own width rather than the sheet default.
+///
+/// The model does not keep OOXML's `customWidth` apart from an autofit width,
+/// so an explicit width is treated as one the user chose: the editor's
+/// widen-on-entry (`XL-UX-036`) leaves such a column alone.
+#[wasm_bindgen]
+#[must_use]
+pub fn session_col_has_width(sheet: usize, col: u32) -> bool {
+    with_session(|s| {
+        s.workbook()
+            .sheets
+            .get(sheet)
+            .is_some_and(|sh| sh.columns.sizes.contains_key(&col))
+    })
+    .unwrap_or(false)
+}
+
 /// Twips to pixels at 96 dpi, the inverse of [`resize_px_to_twips`].
 pub(crate) fn twips_to_px_f64(twips: i64) -> f64 {
     twips as f64 * 96.0 / 1440.0

@@ -1330,6 +1330,14 @@ pub struct History {
     /// as having edited, so the warning appears when it need not have. A
     /// needless warning costs a click; the other mistake costs the document.
     applied: u64,
+    /// A count of entries pushed by [`Self::apply`], for [`Self::group_since`].
+    ///
+    /// Undo, redo and clear also advance it, and record where they did in
+    /// `sealed`, so a mark taken before any of them can no longer group: the
+    /// top of the stack is then not the edits made since the mark.
+    pushes: u64,
+    /// The value of `pushes` after the last undo, redo or clear.
+    sealed: u64,
 }
 
 impl History {
@@ -1366,6 +1374,7 @@ impl History {
             return Ok(());
         }
         self.applied += 1;
+        self.pushes += 1;
         self.undo.push(inverse);
         // Oldest first: the entry least likely to be wanted is the one furthest
         // back. A depth of zero means no undo at all, which is a legitimate
@@ -1387,6 +1396,54 @@ impl History {
     pub fn clear(&mut self) {
         self.undo.clear();
         self.redo.clear();
+        self.seal();
+    }
+
+    fn seal(&mut self) {
+        self.pushes += 1;
+        self.sealed = self.pushes;
+    }
+
+    /// A mark to pass to [`Self::group_since`] once the edits that make up one
+    /// gesture have been applied.
+    #[must_use]
+    pub fn undo_mark(&self) -> u64 {
+        self.pushes
+    }
+
+    /// Fold every undo entry pushed since `mark` into one, so a single undo
+    /// takes back the whole gesture (`XL-UX-036`: a value and the column
+    /// widening it caused).
+    ///
+    /// Only the *history* is regrouped: each edit was already applied, and
+    /// already sent to collaborators, on its own — exactly as it would have
+    /// been without grouping. Refuses (returns `false`) when an undo, redo or
+    /// clear happened since the mark, or the bounded stack has already dropped
+    /// one of the entries, because the top of the stack is then not the edits
+    /// the caller means.
+    pub fn group_since(&mut self, mark: u64) -> bool {
+        if self.sealed > mark || mark > self.pushes {
+            return false;
+        }
+        let Ok(n) = usize::try_from(self.pushes - mark) else {
+            return false;
+        };
+        if n > self.undo.len() {
+            return false;
+        }
+        if n < 2 {
+            return true;
+        }
+        // Inverses run newest first, which is the order they sit in from the
+        // top of the stack down.
+        let mut members = self.undo.split_off(self.undo.len() - n);
+        members.reverse();
+        self.undo.push(Operation::Batch(members));
+        // The merged entry replaces `n` pushes with one; a mark taken now must
+        // still count from here.
+        self.pushes -= n as u64 - 1;
+        self.sealed = self.sealed.min(self.pushes);
+        true
     }
 
     /// How many edits have ever been applied, counting up and never down.
@@ -1472,6 +1529,7 @@ impl History {
         // a host must transmit is the operation that ran.
         let applied = op.clone();
         let inverse = apply(workbook, op)?;
+        self.seal();
         // An undo is an edit (`FID-39`). `edits_applied`'s doc comment always
         // said so and reasoned from it — that this counter "can only err the
         // other way" — while this line was missing, so the mistake it rules out
@@ -1493,6 +1551,7 @@ impl History {
         };
         let applied = op.clone();
         let inverse = apply(workbook, op)?;
+        self.seal();
         self.applied += 1;
         self.undo.push(inverse);
         Ok(Some(applied))

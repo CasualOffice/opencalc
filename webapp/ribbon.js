@@ -18,6 +18,9 @@ import { command, run, all as allCommands } from "./commands.js";
 import { TABS, FILE_RAIL, OPTIONS_COMMANDS } from "./ribbon.model.js";
 
 const LAYOUT_KEY = "oc.ribbon.layout";
+// Excel's Ribbon Display Options (XL-UX-093): "always" shows the band, "tabs"
+// shows only the tabs and floats the band over the grid when one is clicked.
+const DISPLAY_KEY = "oc.ribbon.display";
 const LABELS_KEY = "oc.ribbon.labels";
 // Group names on, button labels off (owner, 2026-10-14; XL-UX-006/007/010):
 // Excel's captions and dialog launchers, without a word under every icon.
@@ -820,15 +823,83 @@ export async function start() {
 
   const applyLayout = (v) => {
     el.classList.toggle("rb-simplified", v === "simplified");
-    layout.title = v === "simplified" ? "Show the full ribbon" : "Show a simplified ribbon";
-    layout.setAttribute("aria-label", layout.title);
     store.set(LAYOUT_KEY, v);
-  };
-  layout.addEventListener("click", () => {
-    applyLayout(el.classList.contains("rb-simplified") ? "classic" : "simplified");
     fit(el.querySelector(".rb-panel:not([hidden])"));
-  });
+  };
   applyLayout(store.get(LAYOUT_KEY, "classic"));
+
+  // ── Ribbon Display Options (XL-UX-093) ──
+  // The chevron is Excel's: it collapses the ribbon, it does not change its
+  // layout. Its menu carries both, as Excel's does.
+  layout.title = "Ribbon Display Options (Ctrl+F1 to show or hide the ribbon)";
+  layout.setAttribute("aria-label", "Ribbon Display Options");
+  layout.setAttribute("aria-haspopup", "true");
+  const tabsOnly = () => el.classList.contains("rb-tabs-only");
+  const peek = (on) => el.classList.toggle("rb-peek", !!on && tabsOnly());
+  const applyDisplay = (v) => {
+    el.classList.toggle("rb-tabs-only", v === "tabs");
+    peek(false);
+    store.set(DISPLAY_KEY, v);
+    // The grid sizes itself on resize; the band's height just moved to it.
+    window.dispatchEvent(new Event("resize"));
+  };
+  el._toggleDisplay = () => applyDisplay(tabsOnly() ? "always" : "tabs");
+  applyDisplay(store.get(DISPLAY_KEY, "always"));
+  layout.addEventListener("click", (e) => {
+    e.stopPropagation();
+    if (openPop?.owner === layout) { closePop(); return; }
+    const items = [
+      ["Always show Ribbon", () => !tabsOnly(), () => applyDisplay("always")],
+      ["Show tabs only", tabsOnly, () => applyDisplay("tabs")],
+      null,
+      ["Classic ribbon", () => !el.classList.contains("rb-simplified"), () => applyLayout("classic")],
+      ["Simplified ribbon", () => el.classList.contains("rb-simplified"), () => applyLayout("simplified")],
+    ];
+    popover(layout, (pop) => {
+      pop.classList.add("rb-display-pop");
+      for (const it of items) {
+        if (!it) { pop.appendChild(h("div", "rb-pop-sep")); continue; }
+        const [label, on, pick] = it;
+        const b = h("button", "rb-pop-item", label);
+        b.type = "button";
+        b.setAttribute("role", "menuitemradio");
+        b.setAttribute("aria-checked", on() ? "true" : "false");
+        b.addEventListener("click", (ev) => { ev.stopPropagation(); closePop(); pick(); refocusGrid(); });
+        pop.appendChild(b);
+      }
+    });
+  });
+  // With tabs only, a tab floats its band over the grid; a second click on
+  // the same tab puts it away. A double-click pins or unpins, as in Excel.
+  for (const t of tablist.querySelectorAll(".rb-tab")) {
+    t.addEventListener("click", () => {
+      if (!tabsOnly()) return;
+      const same = t.classList.contains("is-on") && el.classList.contains("rb-peek");
+      peek(!same);
+    });
+    t.addEventListener("dblclick", () => {
+      applyDisplay(tabsOnly() ? "always" : "tabs");
+      select(t.id.replace("rb-tab-", ""));
+    });
+  }
+  // A command run from the floating band puts it away; opening a menu or
+  // typing into a box does not (Excel's behaviour).
+  band.addEventListener("click", (e) => {
+    if (!el.classList.contains("rb-peek")) return;
+    const b = e.target.closest("button");
+    if (!b || b === layout || b.getAttribute("aria-haspopup") === "true" || b.classList.contains("rb-folded")) return;
+    setTimeout(() => peek(false), 0);
+  });
+  const onPeekOutside = (e) => {
+    if (!el.classList.contains("rb-peek")) return;
+    const t = e.target;
+    if (t.closest?.(".rb-display-pop")) return;
+    if (t.closest?.(".rb-pop")) { setTimeout(() => peek(false), 0); return; }   // a menu item ran
+    if (t.closest?.(".oc-ribbon")) return;
+    peek(false);
+  };
+  document.addEventListener("click", onPeekOutside, true);
+  cleanups.push(() => document.removeEventListener("click", onPeekOutside, true));
   applyLabels(store.get(LABELS_KEY, LABELS_DEFAULT));
 
   // Arrow keys move between tabs; the band is reached with Tab.
@@ -863,9 +934,15 @@ export async function start() {
   const onKey = (e) => {
     if (e.key === "Alt") { if (!e.repeat) altAlone = true; return; }
     altAlone = false;
+    if (e.key === "F1" && (e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey) {
+      e.preventDefault();
+      el?._toggleDisplay?.();
+      return;
+    }
     if (e.key === "Escape") {
       if (tips) { showTips(false); return; }
       if (openPop) { e.preventDefault(); closePop(); refocusGrid(); return; }
+      if (el?.classList.contains("rb-peek")) { e.preventDefault(); el.classList.remove("rb-peek"); refocusGrid(); return; }
       // The editor's own context, sheet-tab and Name Manager menus open as
       // `#sheet-ctx` and only an outside click closed them (UX-SHELL-09).
       const ctx = document.getElementById("sheet-ctx");
