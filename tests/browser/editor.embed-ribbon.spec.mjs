@@ -123,6 +123,21 @@ test("a ribbon command runs in the embed, and its popovers open inside it, on sc
 
   const borders = await placed('.oc-ribbon [data-cmd="toolbar.border"]', ".toolbar .popmenu");
   expect(borders, "the Borders popup did not open under its ribbon button").toMatchObject({ found: true, onScreen: true, nearTrigger: true });
+  await page.keyboard.press("Escape");
+
+  // The File page covers the editor it belongs to, not the host's page.
+  await s.locator(".oc-ribbon .rb-file").click();
+  const backstage = s.locator(".rb-backstage");
+  await expect(backstage).toBeVisible();
+  const fit = await page.evaluate(() => {
+    const el = document.getElementById("a");
+    const bs = el.shadowRoot.querySelector(".rb-backstage").getBoundingClientRect();
+    const box = el.getBoundingClientRect();
+    return { left: bs.left - box.left, top: bs.top - box.top, width: bs.width - box.width, height: bs.height - box.height };
+  });
+  expect(fit, "the File page is not the element's size and place").toEqual({ left: 0, top: 0, width: 0, height: 0 });
+  await page.keyboard.press("Escape");
+  await expect(backstage).toBeHidden();
 });
 
 test("an embed answers its own keystrokes, not the host page's", async ({ page }) => {
@@ -211,6 +226,19 @@ test("chrome regions map onto the shell: toolbar is the band, menubar the tab ro
 
   await page.evaluate(() => document.getElementById("a").configure({ access: "edit" }));
   await expect(s.locator(".oc-ribbon .rb-band"), "leaving preview did not bring the ribbon back").toBeVisible();
+});
+
+test("view access keeps the ribbon and takes the editing commands off it", async ({ page }) => {
+  await host(page);
+  const s = sheet(page);
+  const bold = s.locator('.oc-ribbon [data-cmd="toolbar.bold"]');
+  await expect(bold).toBeEnabled();
+  await page.evaluate(() => document.getElementById("a").configure({ access: "view" }));
+  await expect(s.locator(".oc-ribbon .rb-band"), "a viewer lost the ribbon, which is preview's job").toBeVisible();
+  // The command policy decides; the ribbon shows what it says, either way.
+  await expect.poll(() => bold.evaluate((b) => b.hidden || b.disabled), { message: "Bold is still live for a viewer" }).toBe(true);
+  await page.evaluate(() => document.getElementById("a").configure({ access: "edit" }));
+  await expect(bold).toBeEnabled();
 });
 
 test("a narrow embed in a wide window uses the phone bar", async ({ page }) => {
