@@ -136,28 +136,38 @@ const cssVar = (name) => "--oc-" + name.replace(/[A-Z]/g, (c) => "-" + c.toLower
 /// How many elements have mounted, so each gets a distinct module instance.
 let instances = 0;
 
-/// The one stylesheet object every mount adopts. Null where constructable
-/// stylesheets are unavailable, in which case each root gets its own `<style>`.
-let sharedSheet = null;
+/// The editor's stylesheets, in the order `editor.html` links them: the editor,
+/// then the shell's tokens, then the shell (the ribbon, the title bar, the File
+/// page, the phone bar). An embed that loaded only the first drew the editor
+/// with no shell styles at all, so it showed the legacy menu bar and toolbar.
+const STYLESHEETS = ["editor.css", "ribbon.tokens.css", "ribbon.css"];
 
-/// Fetch the editor's markup and stylesheet once per asset base.
+/// Fetch the editor's markup and stylesheets once per asset base.
 ///
 /// Keyed by base rather than global: two elements pointed at different builds
 /// is unusual but not incoherent, and a single cache would serve one of them
 /// the other's markup.
+///
+/// `sheets` are the stylesheet objects every mount from this base adopts, or
+/// null where constructable stylesheets are unavailable, in which case each root
+/// gets its own `<style>`s.
 const assets = new Map();
 function loadAssets(base) {
   const key = String(base);
   if (!assets.has(key)) {
     assets.set(key, verifyAssets(base).then(() => Promise.all([
       fetch(new URL(`editor.html?v=${BUILD}`, base)).then((r) => r.text()),
-      fetch(new URL(`editor.css?v=${BUILD}`, base)).then((r) => r.text()),
-    ])).then(([html, css]) => {
+      ...STYLESHEETS.map((name) => fetch(new URL(`${name}?v=${BUILD}`, base)).then((r) => r.text())),
+    ])).then(([html, ...css]) => {
+      let sheets = null;
       if (typeof CSSStyleSheet === "function" && "replaceSync" in CSSStyleSheet.prototype) {
-        sharedSheet = new CSSStyleSheet();
-        sharedSheet.replaceSync(css);
+        sheets = css.map((text) => {
+          const sheet = new CSSStyleSheet();
+          sheet.replaceSync(text);
+          return sheet;
+        });
       }
-      return { markup: bodyOf(html), css };
+      return { markup: bodyOf(html), css, sheets };
     }));
   }
   return assets.get(key);
@@ -168,6 +178,10 @@ function loadAssets(base) {
 /// Taken from the page rather than duplicated here so the two cannot drift:
 /// a control added to the editor appears in an embed without anyone
 /// remembering to copy it across.
+///
+/// The scripts go because they are the *page's* bootstrap — and one of them
+/// starts the Excel shell. That one is replaced, not lost: `#startShell` starts
+/// the same shell against this element's root.
 function bodyOf(html) {
   const open = html.indexOf("<body");
   const start = html.indexOf(">", open) + 1;
@@ -202,25 +216,27 @@ class OpenCalcSheet extends HTMLElement {
   async #mount() {
     const root = this.attachShadow({ mode: "open" });
     const base = assetBase(this);
-    const { markup, css } = await loadAssets(base);
+    const { markup, css, sheets } = await loadAssets(base);
 
     // `@font-face` inside a shadow root is ignored by the CSS engine — font
     // faces resolve against the document, not the tree. The rules are hoisted
     // once into the page so the bundled metric-compatible faces (Carlito for
     // Calibri, and the rest) are available to the canvas, which is what makes a
     // cell's font render the same on a machine that has none of them.
-    hoistFontFaces(css, base, this.getAttribute("nonce") || this.nonce || "");
+    hoistFontFaces(css.join("\n"), base, this.getAttribute("nonce") || this.nonce || "");
 
-    // One `CSSStyleSheet` shared by every mount rather than a `<style>` each.
-    // This is the duplication AG Grid warns about in shadow DOM: four editors on
-    // a page would otherwise parse the whole stylesheet four times. Adopting a
-    // single sheet also means a change to it reaches every instance at once.
-    if (sharedSheet) {
-      root.adoptedStyleSheets = [sharedSheet];
+    // One set of `CSSStyleSheet`s shared by every mount rather than `<style>`s
+    // each. This is the duplication AG Grid warns about in shadow DOM: four
+    // editors on a page would otherwise parse every stylesheet four times.
+    // Adopting shared sheets also means a change to one reaches every instance.
+    if (sheets) {
+      root.adoptedStyleSheets = sheets;
     } else {
-      const style = document.createElement("style");
-      style.textContent = css;
-      root.append(style);
+      for (const text of css) {
+        const style = document.createElement("style");
+        style.textContent = text;
+        root.append(style);
+      }
     }
 
     const shell = document.createElement("div");
@@ -244,8 +260,34 @@ class OpenCalcSheet extends HTMLElement {
     editor.setMountRoot(root);
     await editor.start(key);
     this.#editor = editor;
+    await this.#startShell(root, shell, base, editor);
     this.dispatchEvent(new CustomEvent("ready"));
     return editor;
+  }
+
+  /// Draw the Excel shell — tabs, ribbon, File page, phone bar — in this root.
+  ///
+  /// `editor.html` starts it from an inline module, and `bodyOf` strips every
+  /// script from the markup, so an embed never ran that and showed the legacy
+  /// menu bar and toolbar instead. It is started here, against this element's
+  /// shadow root and with the shell element as the host for its chrome classes,
+  /// so its queries, popovers, icon sprite and phone layout stay inside it.
+  ///
+  /// The wait is the page's own: for the *command layer*, not for the engine.
+  /// Toolbar controls are stamped with `data-oc-command` after boot, and a shell
+  /// drawn before them would draw the half of the editor it found.
+  async #startShell(root, shell, base, editor) {
+    for (let tries = 0; !root.querySelector('[data-oc-command="toolbar.bold"]'); tries++) {
+      if (tries > 200) { console.warn("[opencalc] command layer never appeared"); return; }
+      await new Promise((r) => setTimeout(r, 25));
+    }
+    // One module for every element, unlike `editor.js`: the shell is an
+    // instance per root inside it, and the shells on a page have to see each
+    // other to know whose keystroke is whose.
+    const ribbon = await import(/* @vite-ignore */ new URL(`ribbon.js?v=${BUILD}`, base).href);
+    await ribbon.start({ root, host: shell, editor });
+    // The chrome changed height, so the grid's box did too.
+    editor.relayout?.();
   }
 
   /// Resolves once the engine is up and the grid is on screen.
@@ -258,6 +300,28 @@ class OpenCalcSheet extends HTMLElement {
   /// Named regions rather than CSS: a host reaching into the shadow root to
   /// hide `.toolbar` would break the moment that markup moved, and this is a
   /// contract the editor can keep.
+  ///
+  /// The names predate the Excel shell, and are kept because hosts already
+  /// call them. On the shell they mean (`ribbon.css`, "Host chrome regions"):
+  ///
+  ///   | region       | in the Excel shell                                      |
+  ///   | ------------ | ------------------------------------------------------- |
+  ///   | header       | the title bar: Quick Access Toolbar, search, Share      |
+  ///   | menubar      | the tab row: File and the ribbon tabs (phone: the tab   |
+  ///   |              | picker and its chips)                                   |
+  ///   | toolbar      | the ribbon band under the tabs (phone: the command bar) |
+  ///   | formulabar   | the formula bar                                         |
+  ///   | tabs         | the sheet tabs                                          |
+  ///   | statusbar    | the status bar                                          |
+  ///   | localePicker | the language picker                                     |
+  ///
+  /// So `{ toolbar: false }` leaves the tabs and takes the band away, and
+  /// `{ menubar: false, toolbar: false }` leaves no ribbon at all. The
+  /// collaborator roster is not chrome and survives all three (`UX-CHROME-01`):
+  /// with the title bar off it sits at the end of the tab row, and with the tab
+  /// row off too that row keeps the roster alone, at no height when nobody else
+  /// is present. `preview` access hides every region; `view` keeps the shell
+  /// and takes away, or disables, what the command policy says it must.
   chrome(regions) {
     for (const [name, show] of Object.entries(regions)) {
       if (!CHROME.includes(name)) {
