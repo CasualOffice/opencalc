@@ -2551,3 +2551,8 @@ html, .editor-body { overscroll-behavior: none; }
 .oc-nm-row:focus-visible { outline: 2px solid var(--oc-accent-color); outline-offset: -2px; }
 .oc-nm-row [data-col="refers"], .oc-nm-row [data-col="value"] { font-family: var(--oc-mono-font-family); }
 .oc-nm-empty { padding: 8px; }
+/* New Name / Edit Name (XL-UX-022): Excel's label column beside its fields. */
+.oc-name-form { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 10px 12px; align-items: center; }
+.oc-name-form .oc-form-label { align-self: start; padding-top: 7px; }
+.oc-name-form textarea { resize: vertical; min-height: 64px; }
+.oc-name-form select { width: 60%; }

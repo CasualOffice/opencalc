@@ -73,6 +73,7 @@ import {
   openColumnFilterForTest,
   openNameBoxList,
   openNameManager,
+  nameDialog,
   openValidationMenu,
   panelActions,
   panelLabel,
@@ -489,6 +490,7 @@ export {
   openColumnFilterForTest,
   openNameBoxList,
   openNameManager,
+  nameDialog,
   openValidationMenu,
   panelActions,
   panelLabel,
@@ -6931,7 +6933,7 @@ function registerShellCommands() {
   } });
   R("formulas.autosum", { label: "AutoSum", shortcut: "Alt+=", run: () => autoSum() });
   R("formulas.insert-function", { label: "Insert Function…", shortcut: "Shift+F3", run: () => insertFunctionDialog() });
-  R("formulas.define-name", { label: "Define Name…", run: () => openNameManager() });
+  R("formulas.define-name", { label: "Define Name…", run: () => nameDialog() });
   R("edit.replace", { label: "Replace…", shortcut: "Ctrl+H", run: () => openReplace() });
   R("edit.go-to", { label: "Go To…", shortcut: "Ctrl+G", run: () => goToDialog() });
   R("edit.go-to-special", { label: "Go To Special…", run: () => goToSpecialDialog() });

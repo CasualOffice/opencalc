@@ -2745,7 +2745,7 @@ export function cellMenu(x, y, fromKeyboard = false) {
       draw();
     });
   })();
-  item("Define name…", false, () => openNameManager());
+  item("Define name…", false, () => nameDialog());
   item("Filter", false, () => toggleFilter());
   positionMenu(menu, x, y);
   menuKeyboard(menu, fromKeyboard);
@@ -3718,10 +3718,6 @@ export function openNameManager() {
   edit.id = "oc-nm-edit";
   const del = el("button", "oc-btn", "Delete");
   del.id = "oc-nm-delete";
-  // New and Edit open the New Name / Edit Name dialog, which arrives with
-  // XL-UX-022; until then they are shown in place but not offered.
-  neu.disabled = true;
-  edit.disabled = true;
   const filterLabel = el("label", "oc-form-label oc-nm-filter-label", "Filter");
   const filter = document.createElement("select");
   filter.id = "oc-nm-filter";
@@ -3783,6 +3779,7 @@ export function openNameManager() {
   };
   const syncButtons = () => {
     del.disabled = !selected();
+    edit.disabled = !selected();
   };
   const render = () => {
     all = nameRows();
@@ -3868,6 +3865,14 @@ export function openNameManager() {
       canvas.focus();
     });
   });
+  neu.addEventListener("click", () => { frame.close(); nameDialog(null, true); });
+  edit.addEventListener("click", () => {
+    const n = selected();
+    if (!n) return;
+    frame.close();
+    nameDialog(n, true);
+  });
+  rowsEl.addEventListener("dblclick", () => edit.click());
   del.addEventListener("click", () => {
     const n = selected();
     if (!n) return;
@@ -3884,4 +3889,130 @@ export function openNameManager() {
 
   render();
   (rowsEl.querySelector(".oc-nm-row.on") ?? rowsEl.querySelector(".oc-nm-row") ?? closeBtn).focus();
+}
+
+// ---- New Name / Edit Name (Formulas ▸ Define Name, fit-gap XL-UX-022) ---------
+
+/// The selection as Excel writes it into New Name's Refers to: absolute,
+/// sheet-qualified, every area of a multi-area selection — `=Sheet1!$B$2:$C$4`.
+function selectionRefersTo() {
+  let sheetName = "";
+  try { sheetName = JSON.parse(wasm.session_sheet_names())[state.sheet] ?? ""; } catch {}
+  const q = quoteSheet(sheetName);
+  return "=" + allRanges().map((r) => `${q}!${absRef(r)}`).join(",");
+}
+
+/// Excel's New Name dialog, or Edit Name when `editing` is a row of the Name
+/// Manager. Name, Scope, Comment, Refers to; OK refuses an invalid or
+/// duplicate name in Excel's words and stays open. `fromManager` returns to
+/// the Name Manager afterwards — on OK and on Cancel, as Excel does.
+export function nameDialog(editing = null, fromManager = false) {
+  const after = (picked) => {
+    if (fromManager) {
+      if (picked) nmState.selected = picked;
+      openNameManager();
+    } else canvas.focus();
+  };
+  const frame = modalFrame(editing ? "Edit Name" : "New Name", {
+    onEnter: () => (document.activeElement === comment ? null : apply()),
+    onCancel: () => { frame.close(); after(null); },
+    onKey: (e) => {
+      // Enter in the Comment box is a new line there, as in Excel.
+      if (e.key === "Enter" && document.activeElement === comment && !e.ctrlKey && !e.metaKey) {
+        e.stopPropagation();
+        return true;
+      }
+      return false;
+    },
+  });
+  const { body } = frame;
+
+  const form = el("div", "oc-name-form");
+  const label = (text, id) => {
+    const l = el("label", "oc-form-label", text);
+    l.htmlFor = id;
+    return l;
+  };
+  const name = document.createElement("input");
+  name.type = "text";
+  name.id = "oc-name-name";
+  name.className = "oc-form-field";
+  name.spellcheck = false;
+  name.autocomplete = "off";
+  name.maxLength = 255;
+  const err = el("div", "oc-form-error");
+  err.id = "oc-name-error";
+  err.setAttribute("role", "alert");
+  err.hidden = true;
+  const nameCell = el("div", "oc-form-cell");
+  nameCell.append(name, err);
+
+  const scope = document.createElement("select");
+  scope.id = "oc-name-scope";
+  let sheets = [];
+  try { sheets = JSON.parse(wasm.session_sheet_names()); } catch {}
+  for (const [value, text] of [[-1, "Workbook"], ...sheets.map((s, i) => [i, s])]) {
+    const o = document.createElement("option");
+    o.value = String(value);
+    o.textContent = text;
+    scope.appendChild(o);
+  }
+  // Excel does not let Edit Name move a name to another scope.
+  scope.value = String(editing ? editing.sheet : -1);
+  scope.disabled = !!editing;
+
+  const comment = document.createElement("textarea");
+  comment.id = "oc-name-comment";
+  comment.rows = 3;
+  comment.spellcheck = true;
+
+  const ref = document.createElement("input");
+  ref.type = "text";
+  ref.id = "oc-name-ref";
+  ref.className = "oc-form-field mono";
+  ref.spellcheck = false;
+  ref.autocomplete = "off";
+
+  name.value = editing ? editing.name : "";
+  comment.value = editing ? editing.comment || "" : "";
+  ref.value = editing ? "=" + editing.refersTo : selectionRefersTo();
+
+  form.append(
+    label("Name:", name.id), nameCell,
+    label("Scope:", scope.id), scope,
+    label("Comment:", comment.id), comment,
+    label("Refers to:", ref.id), ref,
+  );
+  const actions = el("div", "oc-confirm-actions");
+  const ok = el("button", "oc-btn primary", "OK");
+  const cancel = el("button", "oc-btn", "Cancel");
+  actions.append(ok, cancel);
+  body.append(form, actions);
+
+  const clearError = () => { err.hidden = true; err.textContent = ""; name.classList.remove("bad"); name.removeAttribute("aria-invalid"); };
+  name.addEventListener("input", clearError);
+  ref.addEventListener("input", clearError);
+
+  function apply() {
+    const want = name.value.trim();
+    const at = Number(scope.value);
+    try {
+      wasm.session_set_name(editing ? editing.name : "", editing ? editing.sheet : -1, want, at, ref.value, comment.value);
+    } catch (e) {
+      err.textContent = errText(e);
+      err.hidden = false;
+      name.classList.add("bad");
+      name.setAttribute("aria-invalid", "true");
+      name.focus();
+      name.select();
+      return;
+    }
+    frame.close();
+    draw();
+    status.textContent = editing ? `name ${want} changed` : `name ${want} defined`;
+    after({ name: want, sheet: editing ? editing.sheet : at });
+  }
+  ok.addEventListener("click", apply);
+  cancel.addEventListener("click", () => { frame.close(); after(null); });
+  name.focus();
 }
