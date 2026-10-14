@@ -695,6 +695,18 @@ jobs:
         run: |
           npm ci
           npx playwright install --with-deps chromium
+      # The published `@opencalc/sheet`, installed from its own tarball into an
+      # app with nothing else in it, and booted (`SDK-012`). The package had
+      # been missing the editor's own modules since they were split, and every
+      # other gate passed because they all run the editor out of `webapp/`.
+      # Here rather than in `sdk-types` because this job already has the
+      # engine and a browser; it adds seconds, where its own job would rebuild
+      # the wasm for minutes.
+      - name: The packaged element installs and boots
+        working-directory: tests/browser
+        env:
+          OPENCALC_WASM_DIR: webapp/pkg
+        run: npx playwright test -c sdk-install/playwright.config.mjs
       - name: Run the smoke suite
         working-directory: tests/browser
         run: npm test

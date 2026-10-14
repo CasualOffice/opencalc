@@ -15,6 +15,8 @@ const PORT = Number(process.env.OPENCALC_SDK_INSTALL_PORT ?? 8321);
 export default defineConfig({
   testDir: ".",
   testMatch: "*.spec.mjs",
+  // Beside the browser suite's, so CI's failure upload carries both.
+  outputDir: "../test-results/sdk-install",
   timeout: 90_000,
   expect: { timeout: 30_000 },
   workers: 1,
