@@ -19,6 +19,9 @@ import { TABS, FILE_RAIL, OPTIONS_COMMANDS } from "./ribbon.model.js";
 
 const LAYOUT_KEY = "oc.ribbon.layout";
 const LABELS_KEY = "oc.ribbon.labels";
+// Group names on, button labels off (owner, 2026-10-14; XL-UX-006/007/010):
+// Excel's captions and dialog launchers, without a word under every icon.
+const LABELS_DEFAULT = "captions";
 
 /// One shell (UX-SHELL-08). The toolbar and Sheets chromes are retired; these
 /// stay exported because the page bootstrap and the embed API call them.
@@ -605,7 +608,7 @@ function optionsPage() {
   const ribbon = h("div", "rb-section");
   ribbon.appendChild(h("h2", "rb-section-title", "Ribbon"));
   ribbon.appendChild(segmented("Labels", [["none", "Icons only"], ["captions", "Group names"], ["full", "Names and labels"]]
-    .map(([v, label]) => ({ label, pick: () => applyLabels(v), on: () => store.get(LABELS_KEY, "none") === v }))));
+    .map(([v, label]) => ({ label, pick: () => applyLabels(v), on: () => store.get(LABELS_KEY, LABELS_DEFAULT) === v }))));
   wrap.appendChild(ribbon);
 
   if (command("tools.settings")) {
@@ -826,7 +829,7 @@ export async function start() {
     fit(el.querySelector(".rb-panel:not([hidden])"));
   });
   applyLayout(store.get(LAYOUT_KEY, "classic"));
-  applyLabels(store.get(LABELS_KEY, "none"));
+  applyLabels(store.get(LABELS_KEY, LABELS_DEFAULT));
 
   // Arrow keys move between tabs; the band is reached with Tab.
   tablist.addEventListener("keydown", (e) => {

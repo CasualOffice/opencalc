@@ -205,6 +205,9 @@
 .oc-chrome-ribbon .rb-group.is-folded > .rb-cap,
 .oc-chrome-ribbon .rb-group.is-folded > .rb-launch { display: none; }
 .oc-chrome-ribbon .rb-group.is-folded > .rb-folded { display: inline-flex; }
+/* A folded group is named, as in Excel: the name is a group's, not a button
+ * label, so it shows whenever group names do. */
+.oc-chrome-ribbon .oc-ribbon.rb-labels-captions .rb-folded .rb-label { display: block; }
 .rb-fold-pop { padding: 8px; }
 .rb-fold-pop .rb-items { display: flex; align-items: center; gap: 4px; }
 
