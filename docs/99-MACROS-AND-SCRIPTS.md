@@ -1,8 +1,7 @@
 # 99 — Macros and scripts
 
-**Status: Proposed, 2026-10-15** — owner asked for macros (*"lets also add macros
-… with UX"*). One decision below (§2) needs the owner before building. Tracker
-row `XL-FEAT-038`; phases `MACRO-01..`.
+**Status: Accepted, 2026-10-15** — owner: *"for macros choose what onlyoffice is
+doing"*. §2 is decided as below. Tracker row `XL-FEAT-038`; phases `MACRO-01..`.
 
 ## 1. What Excel users mean by "macros"
 
@@ -15,38 +14,47 @@ Three different things, and an alternative has to answer each:
 | My own worksheet function | VBA UDFs, LAMBDA, JS custom functions | LAMBDA works |
 | Open a colleague's `.xlsm` | Runs its VBA (after a trust prompt) | Opens, keeps `vbaProject.bin` byte-for-byte, never runs it |
 
-## 2. The decision: scripts, not a VBA runtime
+## 2. The decision: OnlyOffice's model — JavaScript macros, VBA converted, not run
 
-**Recommended: OpenCalc Scripts — JavaScript/TypeScript in a sandbox, over one
-workbook API — and VBA kept, shown and convertible, but not executed.**
+Decided by the owner: do what OnlyOffice does. OnlyOffice runs **JavaScript
+macros** against its **Office API** — an object model shaped like Excel's
+(`Api.GetActiveSheet().GetRange("A1").SetValue(…)`), so a VBA user recognises
+`Worksheet` and `Range` — runs them from **View ▸ Macros** with an **autostart**
+option, keeps them **in the document**, adds **custom functions** through
+`Api.AddCustomFunction` (a JSDoc `@customfunction` comment declares the
+signature; the function may be async and sees its own cell as `this.address`),
+and handles **VBA by conversion, not execution** (its AI plugin, or a rewrite
+against the API). References: ONLYOFFICE API docs on converting VBA macros and
+on adding custom functions; the 2023 blog post on transforming Microsoft Office
+macros.
 
-- **Why not run VBA.** VBA is a full language with a COM object model (`Range`,
-  `Worksheets`, `Application`, `ActiveX`, file and shell access, Windows APIs).
-  An interpreter faithful enough to run real-world macros is a multi-year
-  project, and the macros that matter most are exactly the ones that reach
-  outside the workbook — the part that is both hardest to emulate and most
-  dangerous to run in a browser or on a shared server. Microsoft made the same
-  call: Excel for the web does not run VBA; it runs Office Scripts.
-- **Why scripts.** A sandboxed script over a typed workbook API covers
-  "automate", "record and replay" and "custom function" with one engine, runs
-  the same in the browser, the desktop app and the agent server, and can be
-  made safe by construction (no network, no DOM, time and memory limits).
-- **One API.** The script API is the same tool set as agent access
-  ([docs/97](97-AGENT-ACCESS.md)): read/write ranges, formulas, formats,
-  sheets, structural edits, recalculate. A recorded macro, an agent and a
-  script are three callers of one surface, not three surfaces.
+**What OpenCalc adds to that model:**
 
-**The alternative** — a VBA interpreter for a subset (cell reads/writes,
-loops, `MsgBox`) — would run simple recorded macros as they are, at the cost of
-a second language to secure and a long tail of "this macro almost works".
-Not recommended; recorded here so the choice is explicit.
+- **The same API names.** We implement an OnlyOffice-compatible subset of the
+  spreadsheet Office API (`Api`, `ApiWorksheet`, `ApiRange`, …, starting with
+  what recorded macros use) so a macro written for OnlyOffice runs here
+  unchanged, and ours runs there. Compatibility is a tested claim: a corpus of
+  OnlyOffice's own published macro samples runs against both
+  (`MACRO-01` acceptance).
+- **One engine underneath.** The Office API is a thin layer over the same
+  workbook operations the agent server uses ([docs/97](97-AGENT-ACCESS.md)), so
+  a macro, a recorded action and an agent produce the same operations.
+- **VBA conversion through our own agent path**: a Convert VBA command hands the
+  module text (read from `vbaProject.bin`, MACRO-05) to the AI assistant the
+  user configures, with the API reference as context, and shows the result as
+  an editable macro — never run without the user choosing Run.
+
+**Not doing:** a VBA interpreter. VBA reaches outside the workbook (COM,
+files, shell, Windows APIs); a faithful runtime is years of work and unsafe in a
+browser or on a shared server. Neither OnlyOffice nor Excel for the web runs it.
 
 ## 3. UX — Excel's shape, our engine
 
-- **Developer / Automate.** A ribbon tab (Excel's *Automate* tab on the web):
-  Record Actions, Scripts (list), New Script, Run, and View VBA for `.xlsm`.
-- **Macros dialog (Alt+F8).** Excel's list: Run, Step Into (later), Edit,
-  Delete, with the workbook's scripts.
+- **View ▸ Macros** (OnlyOffice's place) and **Alt+F8** (Excel's key) open the
+  Macros window: the workbook's macros and custom functions, New, Rename,
+  Delete, Run, **Autostart** per macro, and an editor beside the list.
+- **Developer tab** (Excel's name) carries Macros, Record Macro, Convert VBA
+  and View VBA for `.xlsm`.
 - **Recorder.** Record Actions captures what the user does as script lines —
   every editor command already has an id in one registry
   (`webapp/commands.js`), and cell edits are operations — then shows the
@@ -82,8 +90,8 @@ displayed.
 
 | Row | Scope |
 |---|---|
-| `MACRO-01` | Script engine: sandboxed worker, the workbook API (shared with docs/97 tools), run → one undo step, limits |
-| `MACRO-02` | Scripts panel + editor, Macros dialog (Alt+F8), Automate tab; scripts stored in the workbook |
+| `MACRO-01` | Macro engine: sandboxed worker running JavaScript against an OnlyOffice-compatible Office API subset (over the docs/97 operations); a run is one undo step; limits |
+| `MACRO-02` | Macros window (View ▸ Macros, Alt+F8) with editor, autostart; macros stored in the workbook (read OnlyOffice's storage too, if documented) |
 | `MACRO-03` | Record Actions → script |
-| `MACRO-04` | Custom functions from scripts (`=MYFN(...)`), recalc-safe (pure, sandboxed) |
-| `MACRO-05` | Read-only VBA viewer for `.xlsm`; later, a VBA → script converter for recorded-style macros |
+| `MACRO-04` | Custom functions via `Api.AddCustomFunction` with JSDoc `@customfunction` (async allowed), recalc-safe and sandboxed |
+| `MACRO-05` | Read-only VBA viewer for `.xlsm`, and Convert VBA → macro through the user's AI assistant |

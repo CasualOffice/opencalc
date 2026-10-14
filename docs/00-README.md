@@ -146,7 +146,7 @@ the other way around. This index is the map.
 | 95 | [The Excel shell](95-EXCEL-SHELL-TARGET.md) | Owner-approved target: Excel's shell with our identity and lowest cognitive load; prototype in `prototypes/excel-shell-2026/`; rows `UX-SHELL-01..18` |
 | 96 | [Excel fit-gap](96-EXCEL-FIT-GAP.md) | Features and UX against Excel, prioritised, every row in the tracker as `XL-FEAT-*` / `XL-UX-*` |
 | 97 | [Agent access](97-AGENT-ACCESS.md) | Owner-accepted design: one set of tools over the SDK, exposed as an MCP server, a CLI and a live-session participant; rows `AGENT-01..04` (`XL-FEAT-122`) |
-| 99 | [Macros and scripts](99-MACROS-AND-SCRIPTS.md) | Proposed: sandboxed JS/TS scripts over one workbook API (shared with docs/97), recorder, Macros dialog, Automate tab; VBA kept, viewable, not executed; rows `MACRO-01..05` (`XL-FEAT-038`) |
+| 99 | [Macros and scripts](99-MACROS-AND-SCRIPTS.md) | Accepted: OnlyOffice's model — JavaScript macros against an OnlyOffice-compatible Office API, View ▸ Macros with autostart, stored in the workbook, `Api.AddCustomFunction`, VBA converted not run; rows `MACRO-01..05` (`XL-FEAT-038`) |
 | 100 | [Several embeds on one page](100-MULTI-EMBED.md) | Proposed: why two `<opencalc-sheet>` share one editor since `MNT-005`, and the options — an instance object, a multi-session engine, a same-origin iframe per element — with the engine's one-session model, memory and risk (`UX-SHELL-24`) |
 
 ### Measured gap trackers (50–53, 73)
