@@ -5,52 +5,86 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Download OpenCalc for desktop</title>
     <meta name="description" content="OpenCalc desktop builds for macOS, Windows and Linux. Alpha, unsigned, and the one-time step each operating system needs before it will open them." />
-    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%232f6df6'/%3E%3Cg fill='none' stroke='%23fff' stroke-width='2.4'%3E%3Crect x='7' y='7' width='18' height='18' rx='2'/%3E%3Cpath d='M7 13h18M13 7v18'/%3E%3C/g%3E%3C/svg%3E" />
-    <link rel="stylesheet" href="./style.css?v=6" />
+    <meta name="theme-color" content="#0e7a55" />
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230e7a55'/%3E%3Cg fill='none' stroke='%23fff' stroke-width='2.4'%3E%3Crect x='7' y='7' width='18' height='18' rx='2'/%3E%3Cpath d='M7 13h18M13 7v18'/%3E%3C/g%3E%3C/svg%3E" />
+    <link rel="preload" href="./fonts/inter-latin-400-700.woff2" as="font" type="font/woff2" crossorigin />
+    <link rel="stylesheet" href="./style.css?v=7" />
+    <script type="module" src="./site.js"></script>
   </head>
   <body>
-    <header class="nav">
-      <div class="wrap nav-inner">
+    <a class="skip" href="#main">Skip to content</a>
+
+    <header class="site-header">
+      <div class="wrap">
         <a class="brand" href="./index.html" aria-label="OpenCalc home">
-          <span class="logo" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18M9 3v18"/></svg></span>
+          <svg class="mark" viewBox="0 0 32 32" aria-hidden="true" focusable="false"><rect class="m-bg" width="32" height="32" rx="7"/><rect class="m-ln" x="7.5" y="7.5" width="17" height="17" rx="2"/><path class="m-ln" d="M7.5 13.5h17M13.5 7.5v17"/></svg>
           OpenCalc
         </a>
         <nav class="nav-links">
-          <a href="./index.html#product">Product</a>
-          <a href="./index.html#today">What works</a>
-          <a href="./docs.html">SDK docs</a>
+          <a href="./index.html#product">Features</a>
+          <a href="./docs.html">Docs</a>
+          <a href="./embed.html">Embed demo</a>
           <a href="./deploy.html">Self-host</a>
+          <a href="./download.html" aria-current="page">Download</a>
           <a href="https://github.com/CasualOffice/opencalc">GitHub</a>
-          <a class="btn btn-ink btn-sm" href="./editor.html">Open the editor</a>
         </nav>
+        <div class="header-actions">
+          <a class="btn btn-primary btn-sm" href="./editor.html"><span class="btn-cta-label">Open the editor</span><span class="sr-only"> (OpenCalc in your browser)</span><svg viewBox="0 0 20 20" aria-hidden="true" focusable="false"><path fill="currentColor" d="M11.3 4.3a1 1 0 0 1 1.4 0l5 5a1 1 0 0 1 0 1.4l-5 5a1 1 0 0 1-1.4-1.4L14.6 11H3a1 1 0 1 1 0-2h11.6l-3.3-3.3a1 1 0 0 1 0-1.4Z"/></svg></a>
+          <details class="menu">
+            <summary aria-label="Menu"><svg viewBox="0 0 20 20" aria-hidden="true" focusable="false"><path fill="currentColor" d="M3 5.5a.75.75 0 0 1 .75-.75h12.5a.75.75 0 0 1 0 1.5H3.75A.75.75 0 0 1 3 5.5Zm0 4.5a.75.75 0 0 1 .75-.75h12.5a.75.75 0 0 1 0 1.5H3.75A.75.75 0 0 1 3 10Zm.75 3.75a.75.75 0 0 0 0 1.5h12.5a.75.75 0 0 0 0-1.5H3.75Z"/></svg></summary>
+            <nav class="menu-panel" aria-label="Main (mobile)">
+              <a href="./index.html#product">Features</a>
+              <a href="./docs.html">Docs</a>
+              <a href="./embed.html">Embed demo</a>
+              <a href="./deploy.html">Self-host</a>
+              <a href="./download.html" aria-current="page">Download</a>
+              <a href="https://github.com/CasualOffice/opencalc">GitHub</a>
+              <a href="./editor.html">Open the editor</a>
+            </nav>
+          </details>
+        </div>
       </div>
     </header>
 
-    <section id="top" class="hero">
+    <main id="main">
+    <header id="top" class="page-head">
       <div class="wrap">
-        <div class="hero-grid">
-          <div>
-            <h1>OpenCalc on your desktop.</h1>
-            <p class="lede">
+        <div class="head-copy">
+          <p class="eyebrow">Desktop · macOS · Windows · Linux</p>
+          <h1>OpenCalc on your desktop.</h1>
+          <p class="lede">
               The same engine as the web editor, in a native window: your files
               stay on your machine, it opens <code>.xlsx</code> by double-click,
               and it works with no network at all.
             </p>
-            <p class="note">
+          <div class="cta-row"><a class="btn btn-primary" href="#downloads">Get the download</a><a class="btn btn-secondary" href="#bypass">Before you open it</a></div>
+          <p class="small muted">
               <strong>This is an alpha.</strong> The builds are unsigned, which
               means every operating system will stop you the first time. Each
               one takes a single step, below — and the messages they show are
               misleading enough to be worth reading first.
             </p>
-          </div>
         </div>
+        <div class="head-art il-wrap"><svg class="il" viewBox="0 0 320 200" role="img" aria-label="A desktop monitor running OpenCalc in a native window, a spreadsheet file being opened with a double-click, and a badge saying it works offline." focusable="false">
+                  <rect class="sh" x="44" y="18" width="240" height="140" rx="10"/><rect class="pp" x="40" y="14" width="240" height="140" rx="10"/>
+                  <path class="k" d="M140 154l-8 22h56l-8-22"/><path class="k" d="M118 177h84"/>
+                  <rect class="ps" x="56" y="28" width="208" height="112" rx="5"/>
+                  <rect class="pp" x="56" y="28" width="208" height="16" rx="5"/>
+                  <circle class="ln" cx="66" cy="36" r="2.5"/><circle class="ln" cx="74" cy="36" r="2.5"/><circle class="ln" cx="82" cy="36" r="2.5"/>
+                  <text class="t" x="160" y="39" font-size="7.5" font-weight="650" text-anchor="middle">Q3 budget.xlsx — OpenCalc</text>
+                  <path class="gr" d="M120 44v96M168 44v96M216 44v96M56 60h208M56 76h208M56 92h208M56 108h208M56 124h208" style="stroke: var(--il-line)"/>
+                  <rect class="bk" x="168" y="76" width="48" height="16"/>
+                  <g class="pop" style="--d:1"><rect class="sh" x="73" y="94" width="30" height="36" rx="3"/><rect class="pp" x="70" y="91" width="30" height="36" rx="3"/><rect class="br" x="70" y="91" width="30" height="10" rx="3"/><text class="tw mono" x="85" y="99" font-size="6.5" font-weight="700" text-anchor="middle">xlsx</text><rect class="ln" x="75" y="106" width="20" height="3" rx="1.5"/><rect class="ln" x="75" y="112" width="14" height="3" rx="1.5"/></g>
+                  <circle class="bk ring" cx="85" cy="109" r="22" stroke-width="1.5"/>
+                  <g class="pop" style="--d:3"><rect class="bs" x="214" y="2" width="84" height="20" rx="10"/><circle class="br" cx="226" cy="12" r="3.5"/><text class="tb" x="234" y="15.5" font-size="8.5" font-weight="650">Works offline</text></g>
+                </svg></div>
       </div>
-    </section>
+    </header>
 
-    <section id="downloads" class="section">
+    <section id="downloads" class="section" aria-labelledby="downloads-h">
       <div class="wrap">
-        <h2>Downloads</h2>
-        <p class="sub">Version 0.0.1. Checksums for every file are in <a href="https://github.com/CasualOffice/opencalc/releases/download/desktop-v0.0.3/SHA256SUMS.txt">SHA256SUMS.txt</a>.</p>
+        <h2 id="downloads-h" class="h2">Downloads</h2>
+        <p class="sub muted" style="margin-top:.5rem">Version 0.0.3. Checksums for every file are in <a href="https://github.com/CasualOffice/opencalc/releases/download/desktop-v0.0.3/SHA256SUMS.txt">SHA256SUMS.txt</a>.</p>
         <!-- **The visitor's own platform, resolved before they read anything**
              (`REL-06`). Three cards is the right *reference*, and it is the
              wrong first thing to meet: somebody who came to download does not
@@ -92,10 +126,10 @@
       </div>
     </section>
 
-    <section id="bypass" class="section alt">
+    <section id="bypass" class="section tint prose" aria-labelledby="bypass-h">
       <div class="wrap">
-        <h2>Your computer will stop you once. Here is why, and what to do.</h2>
-        <p class="sub">
+        <h2 id="bypass-h" class="h2">Your computer will stop you once. Here is why, and what to do.</h2>
+        <p class="sub" style="margin-top:1rem">
           Signing an application means paying Apple or a certificate authority to
           vouch for it. This project has not done that yet, so each operating
           system treats these builds as being from an unknown source. That is a
@@ -200,24 +234,58 @@ sudo apt -f install                      # if it reports missing dependencies</c
       </div>
     </section>
 
-    <section class="cta-band">
-      <div class="wrap cta-grid">
-        <div>
-          <h2>Not ready to install anything?</h2>
-          <p>The web editor is the same engine, with no download and nothing uploaded — your file is opened and calculated in your own browser.</p>
-          <div class="cta">
-            <a class="btn btn-light btn-lg" href="./editor.html">Open the editor</a>
-            <a class="btn btn-ondark btn-lg" href="https://github.com/CasualOffice/opencalc/releases">All releases</a>
-          </div>
+    <section class="section band-dark final" aria-labelledby="web-h">
+      <div class="wrap">
+        <h2 id="web-h">Not ready to install anything?</h2>
+        <p class="lede" style="color:#b4c3bb">The web editor is the same engine, with no download and nothing uploaded — your file is opened and calculated in your own browser.</p>
+        <div class="cta-row" style="justify-content:center">
+          <a class="btn btn-light btn-lg" href="./editor.html">Open the editor</a>
+          <a class="btn btn-ondark btn-lg" href="https://github.com/CasualOffice/opencalc/releases">All releases</a>
         </div>
       </div>
     </section>
+    </main>
 
-    <footer class="foot">
-      <div class="wrap foot-grid">
-        <div>
-          <span class="brand"><span class="logo" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18M9 3v18"/></svg></span>OpenCalc</span>
-          <p class="foot-tag">The spreadsheet engine behind Casual Sheets, and an SDK others can embed.</p>
+    <footer class="site-footer">
+      <div class="wrap">
+        <div class="foot-grid">
+          <div>
+            <a class="brand" href="./index.html"><svg class="mark" viewBox="0 0 32 32" aria-hidden="true" focusable="false"><rect class="m-bg" width="32" height="32" rx="7"/><rect class="m-ln" x="7.5" y="7.5" width="17" height="17" rx="2"/><path class="m-ln" d="M7.5 13.5h17M13.5 7.5v17"/></svg>OpenCalc</a>
+            <p class="foot-tag">An open-source, Excel-compatible spreadsheet — and the engine behind it, for anyone to embed.</p>
+          </div>
+          <nav class="foot-col" aria-labelledby="f-product">
+            <h2 id="f-product">Product</h2>
+            <ul>
+              <li><a href="./editor.html">Open the editor</a></li>
+              <li><a href="./download.html">Download for desktop</a></li>
+              <li><a href="./index.html#today">What works today</a></li>
+              <li><a href="./index.html#roadmap">Roadmap</a></li>
+            </ul>
+          </nav>
+          <nav class="foot-col" aria-labelledby="f-dev">
+            <h2 id="f-dev">Developers</h2>
+            <ul>
+              <li><a href="./docs.html">SDK integration guide</a></li>
+              <li><a href="./docs.html#quick">Quick start</a></li>
+              <li><a href="./embed.html">Live embed demo</a></li>
+              <li><a href="./deploy.html">Self-hosting guide</a></li>
+              <li><a href="https://github.com/CasualOffice/opencalc/tree/main/server/casual-calc-mcp">MCP server</a></li>
+            </ul>
+          </nav>
+          <nav class="foot-col" aria-labelledby="f-project">
+            <h2 id="f-project">Project</h2>
+            <ul>
+              <li><a href="https://github.com/CasualOffice/opencalc">GitHub</a></li>
+              <li><a href="https://github.com/CasualOffice/opencalc/blob/main/docs/02-ARCHITECTURE.md">Architecture</a></li>
+              <li><a href="https://github.com/CasualOffice/opencalc/blob/main/docs/52-FIDELITY-TRACKER.md">Fidelity ledger</a></li>
+              <li><a href="https://github.com/CasualOffice/opencalc/blob/main/docs/14-EXECUTION-TRACKER.md">Execution tracker</a></li>
+              <li><a href="https://github.com/CasualOffice/opencalc/blob/main/LICENSE">License</a></li>
+            </ul>
+          </nav>
+        </div>
+        <div class="foot-bottom">
+          <span>© 2026 CasualOffice · Apache-2.0 · Alpha — the API is not yet stable.</span>
+          <span>Not affiliated with Microsoft. Excel is a trademark of Microsoft Corporation.</span>
         </div>
       </div>
     </footer>
