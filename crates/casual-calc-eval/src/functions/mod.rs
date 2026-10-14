@@ -14,6 +14,7 @@ use crate::value::{Value, number_to_text};
 // the comments had been asserting. Re-exported flat so the dispatch below —
 // and every sibling — names a function exactly as it always did.
 mod aggregate;
+mod arrays;
 mod datetime;
 mod engineering;
 mod financial;
@@ -26,6 +27,7 @@ mod stats;
 mod text;
 
 pub(crate) use aggregate::*;
+pub(crate) use arrays::*;
 pub(crate) use datetime::*;
 pub(crate) use engineering::*;
 pub(crate) use financial::*;
@@ -131,6 +133,7 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("AND", "AND(logical1, …)"),
     ("ARABIC", "ARABIC(text)"),
     ("AREAS", "AREAS(reference)"),
+    ("ARRAYTOTEXT", "ARRAYTOTEXT(array, [format])"),
     ("ASC", "ASC(text)"),
     ("ASIN", "ASIN(number)"),
     ("ASINH", "ASINH(number)"),
@@ -195,6 +198,8 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("CHISQ.TEST", "CHISQ.TEST(actual, expected)"),
     ("CHITEST", "CHITEST(actual, expected)"),
     ("CHOOSE", "CHOOSE(index, value1, …)"),
+    ("CHOOSECOLS", "CHOOSECOLS(array, col_num1, …)"),
+    ("CHOOSEROWS", "CHOOSEROWS(array, row_num1, …)"),
     ("CLEAN", "CLEAN(text)"),
     ("CODE", "CODE(text)"),
     ("COLUMN", "COLUMN([reference])"),
@@ -282,6 +287,7 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("DOLLARDE", "DOLLARDE(fractional_dollar, fraction)"),
     ("DOLLARFR", "DOLLARFR(decimal_dollar, fraction)"),
     ("DPRODUCT", "DPRODUCT(database, field, criteria)"),
+    ("DROP", "DROP(array, rows, [columns])"),
     ("DSTDEV", "DSTDEV(database, field, criteria)"),
     ("DSTDEVP", "DSTDEVP(database, field, criteria)"),
     ("DSUM", "DSUM(database, field, criteria)"),
@@ -304,6 +310,7 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("EVEN", "EVEN(number)"),
     ("EXACT", "EXACT(text1, text2)"),
     ("EXP", "EXP(number)"),
+    ("EXPAND", "EXPAND(array, rows, [columns], [pad_with])"),
     ("EXPON.DIST", "EXPON.DIST(x, lambda, cumulative)"),
     ("EXPONDIST", "EXPONDIST(x, lambda, cumulative)"),
     (
@@ -366,6 +373,7 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("HEX2OCT", "HEX2OCT(number, [places])"),
     ("HLOOKUP", "HLOOKUP(lookup, table, row, [exact])"),
     ("HOUR", "HOUR(serial_number)"),
+    ("HSTACK", "HSTACK(array1, …)"),
     ("HYPERLINK", "HYPERLINK(link, [friendly])"),
     (
         "HYPGEOM.DIST",
@@ -586,6 +594,10 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("QUOTIENT", "QUOTIENT(numerator, denominator)"),
     ("RADIANS", "RADIANS(angle)"),
     ("RAND", "RAND()"),
+    (
+        "RANDARRAY",
+        "RANDARRAY([rows], [columns], [min], [max], [whole_number])",
+    ),
     ("RANDBETWEEN", "RANDBETWEEN(bottom, top)"),
     ("RANK", "RANK(number, ref, [order])"),
     ("RANK.AVG", "RANK.AVG(number, ref, [order])"),
@@ -664,6 +676,7 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("T.INV", "T.INV(probability, deg_freedom)"),
     ("T.INV.2T", "T.INV.2T(probability, degrees_freedom)"),
     ("T.TEST", "T.TEST(array1, array2, tails, type)"),
+    ("TAKE", "TAKE(array, rows, [columns])"),
     ("TAN", "TAN(number)"),
     ("TANH", "TANH(number)"),
     ("TBILLEQ", "TBILLEQ(settlement, maturity, discount)"),
@@ -671,15 +684,30 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("TBILLYIELD", "TBILLYIELD(settlement, maturity, pr)"),
     ("TDIST", "TDIST(x, degrees_freedom, tails)"),
     ("TEXT", "TEXT(value, format_code)"),
+    (
+        "TEXTAFTER",
+        "TEXTAFTER(text, delimiter, [instance_num], [match_mode], [match_end], [if_not_found])",
+    ),
+    (
+        "TEXTBEFORE",
+        "TEXTBEFORE(text, delimiter, [instance_num], [match_mode], [match_end], [if_not_found])",
+    ),
     ("TEXTJOIN", "TEXTJOIN(delimiter, ignore_empty, text1, …)"),
+    (
+        "TEXTSPLIT",
+        "TEXTSPLIT(text, col_delimiter, [row_delimiter], [ignore_empty], [match_mode], [pad_with])",
+    ),
     ("TIME", "TIME(hour, minute, second)"),
     ("TIMEVALUE", "TIMEVALUE(time_text)"),
     ("TINV", "TINV(probability, degrees_freedom)"),
+    ("TOCOL", "TOCOL(array, [ignore], [scan_by_column])"),
     ("TODAY", "TODAY()"),
+    ("TOROW", "TOROW(array, [ignore], [scan_by_column])"),
     ("TRANSPOSE", "TRANSPOSE(array)"),
     ("TREND", "TREND(known_y, [known_x], [new_x], [const])"),
     ("TRIM", "TRIM(text)"),
     ("TRIMMEAN", "TRIMMEAN(array, percent)"),
+    ("TRIMRANGE", "TRIMRANGE(range, [trim_rows], [trim_cols])"),
     ("TRUE", "TRUE()"),
     ("TRUNC", "TRUNC(number, [num_digits])"),
     ("TTEST", "TTEST(array1, array2, tails, type)"),
@@ -690,6 +718,7 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("UPPER", "UPPER(text)"),
     ("USDOLLAR", "USDOLLAR(number, [decimals])"),
     ("VALUE", "VALUE(text)"),
+    ("VALUETOTEXT", "VALUETOTEXT(value, [format])"),
     ("VAR", "VAR(number1, …)"),
     ("VAR.P", "VAR.P(number1, …)"),
     ("VAR.S", "VAR.S(number1, …)"),
@@ -701,6 +730,7 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
         "VDB(cost, salvage, life, start_period, end_period, [factor], [no_switch])",
     ),
     ("VLOOKUP", "VLOOKUP(lookup, table, col, [exact])"),
+    ("VSTACK", "VSTACK(array1, …)"),
     ("WEEKDAY", "WEEKDAY(serial_number, [type])"),
     ("WEEKNUM", "WEEKNUM(serial, [type])"),
     ("WEIBULL", "WEIBULL(x, alpha, beta, cumulative)"),
@@ -710,6 +740,8 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
         "WORKDAY.INTL",
         "WORKDAY.INTL(start, days, [weekend], [holidays])",
     ),
+    ("WRAPCOLS", "WRAPCOLS(vector, wrap_count, [pad_with])"),
+    ("WRAPROWS", "WRAPROWS(vector, wrap_count, [pad_with])"),
     ("XIRR", "XIRR(values, dates, [guess])"),
     (
         "XLOOKUP",
@@ -1372,6 +1404,12 @@ pub fn call_function(ev: &mut Evaluator<'_>, sheet: usize, name: &str, args: &[E
         "SUMIFS" => eval_ifs_aggregate(ev, sheet, args, IfsKind::Sum),
         "MAXIFS" => eval_ifs_aggregate(ev, sheet, args, IfsKind::Max),
         "MINIFS" => eval_ifs_aggregate(ev, sheet, args, IfsKind::Min),
+        // The 2022 array shapers, which have a module of their own.
+        "VSTACK" | "HSTACK" | "TAKE" | "DROP" | "CHOOSECOLS" | "CHOOSEROWS" | "TOCOL" | "TOROW"
+        | "WRAPROWS" | "WRAPCOLS" | "EXPAND" | "RANDARRAY" | "TEXTSPLIT" | "TEXTBEFORE"
+        | "TEXTAFTER" | "ARRAYTOTEXT" | "VALUETOTEXT" | "TRIMRANGE" => {
+            eval_array_shape(ev, sheet, name, args)
+        }
         "XLOOKUP" | "XMATCH" | "FILTER" | "UNIQUE" | "SORT" | "SORTBY" | "SEQUENCE" => {
             eval_dynamic(ev, sheet, name, args)
         }

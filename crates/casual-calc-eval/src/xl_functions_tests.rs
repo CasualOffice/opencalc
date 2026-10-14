@@ -92,7 +92,6 @@ fn put_number(sheet: &mut Sheet, at: (u32, u32), n: f64) {
         .set(CellRef::new(at.0, at.1), Cell::value(CellValue::Number(n)));
 }
 
-#[allow(dead_code)] // used by the dynamic-array group
 fn put_text(wb: &mut Workbook, sheet: &mut Sheet, at: (u32, u32), s: &str) {
     let id = wb.intern_string(s);
     sheet.cells.set(
@@ -994,4 +993,276 @@ fn encodeurl_percent_encodes_utf8() {
     text("ENCODEURL(\"A-z_0.9~\")", "A-z_0.9~");
     text("ENCODEURL(12)", "12");
     error("ENCODEURL(1/0)", ErrorValue::Div0);
+}
+
+// --- Group 4: the 2022 dynamic-array functions ------------------------------
+
+#[test]
+fn vstack_and_hstack_pad_the_narrower_with_na() {
+    // LO: 5 rows; the fourth is D1 (10); a 2-wide over a 1-wide pads #N/A.
+    num("ROWS(VSTACK(C1:C3,D1:D2))", 5.0);
+    num("INDEX(VSTACK(C1:C3,D1:D2),4,1)", 10.0);
+    error("INDEX(VSTACK(C1:D2,E1:E2),3,2)", ErrorValue::Na);
+    num("COLUMNS(VSTACK(C1:D2,E1:E2))", 2.0);
+    error("INDEX(VSTACK(1,C1:D1),1,2)", ErrorValue::Na);
+    num("COLUMNS(HSTACK(C1:C3,D1:D2))", 2.0);
+    num("INDEX(HSTACK(C1:C3,D1:D2),2,2)", 20.0);
+    error("INDEX(HSTACK(C1:C3,D1:D2),3,2)", ErrorValue::Na);
+    spills(
+        "VSTACK(C1:D1,E1)",
+        |_, _| {},
+        &[&["1", "10"], &["\"alpha\"", "#N/A"]],
+    );
+    spills("HSTACK(C1:C2,7)", |_, _| {}, &[&["1", "7"], &["2", "#N/A"]]);
+}
+
+#[test]
+fn take_and_drop_count_from_either_end() {
+    // LO.
+    num("INDEX(TAKE(C1:D10,2),2,2)", 20.0);
+    num("ROWS(TAKE(C1:D10,2))", 2.0);
+    num("INDEX(TAKE(C1:D10,-2),1,1)", 9.0);
+    num("INDEX(TAKE(C1:D10,,-1),3,1)", 30.0);
+    num("COLUMNS(TAKE(C1:D10,,-1))", 1.0);
+    num("ROWS(TAKE(C1:D10,20))", 10.0);
+    num("INDEX(TAKE(C1:D10,-3,-1),1,1)", 80.0);
+    num("INDEX(DROP(C1:D10,2),1,1)", 3.0);
+    num("ROWS(DROP(C1:D10,2))", 8.0);
+    num("INDEX(DROP(C1:D10,-2,1),8,1)", 80.0);
+    num("INDEX(DROP(C1:D10,0,0),1,1)", 1.0);
+    // Nothing left is an empty array: #CALC!. (LibreOffice answers #N/A
+    // for the first and, wrongly, a value for the second.)
+    error("TAKE(C1:D10,0)", ErrorValue::Calc);
+    error("DROP(C1:D10,10)", ErrorValue::Calc);
+}
+
+#[test]
+fn choosecols_and_chooserows_pick_lines_by_index() {
+    // LO.
+    text("INDEX(CHOOSECOLS(C1:E3,3,1),1,1)", "alpha");
+    text("INDEX(CHOOSECOLS(C1:E3,-1),2,1)", "beta");
+    num("INDEX(CHOOSEROWS(C1:D10,10,-1),2,2)", 100.0);
+    num("INDEX(CHOOSEROWS(C1:D10,SEQUENCE(2,1,2)),2,1)", 3.0);
+    spills(
+        "CHOOSEROWS(C1:D10,2,2)",
+        |_, _| {},
+        &[&["2", "20"], &["2", "20"]],
+    );
+    // MS: an index of zero or past the array is #VALUE!.
+    error("CHOOSECOLS(C1:E3,4)", ErrorValue::Value);
+    error("CHOOSECOLS(C1:E3,0)", ErrorValue::Value);
+    error("CHOOSEROWS(C1:D10,11)", ErrorValue::Value);
+}
+
+#[test]
+fn tocol_and_torow_flatten_and_filter() {
+    // LO.
+    num("ROWS(TOCOL(C1:D3))", 6.0);
+    num("INDEX(TOCOL(C1:D3),2,1)", 10.0); // by row: 1, 10, 2, …
+    num("INDEX(TOCOL(C1:D3,0,TRUE),2,1)", 2.0); // by column: 1, 2, 3, …
+    num("ROWS(TOCOL(H1:H5,1))", 4.0); // the blank H4 left out
+    num("ROWS(TOCOL(H1:H5))", 5.0);
+    num("COLUMNS(TOROW(C1:D3))", 6.0);
+    num("INDEX(TOROW(C1:D3),1,2)", 10.0);
+    num("INDEX(TOROW(C1:D3,,TRUE),1,2)", 2.0);
+    // Errors skipped with 2.
+    num("ROWS(TOCOL(C1:C3/(C1:C3>1),2))", 2.0);
+    error("TOCOL(C1:C3,4)", ErrorValue::Value);
+}
+
+#[test]
+fn wraprows_and_wrapcols_fold_a_vector() {
+    // LO.
+    num("INDEX(WRAPROWS(C1:C10,4),3,2)", 10.0);
+    error("INDEX(WRAPROWS(C1:C10,4),3,3)", ErrorValue::Na);
+    num("INDEX(WRAPROWS(C1:C10,4,0),3,3)", 0.0);
+    num("ROWS(WRAPROWS(C1:C10,4))", 3.0);
+    num("INDEX(WRAPCOLS(C1:C10,4),2,3)", 10.0);
+    error("INDEX(WRAPCOLS(C1:C10,4),4,3)", ErrorValue::Na);
+    spills(
+        "WRAPCOLS(C1:C5,2)",
+        |_, _| {},
+        &[&["1", "3", "5"], &["2", "4", "#N/A"]],
+    );
+    // MS: a block is #VALUE!; a wrap count below 1 is #NUM!.
+    error("WRAPROWS(C1:D2,2)", ErrorValue::Value);
+    error("WRAPROWS(C1:C10,0)", ErrorValue::Num);
+}
+
+#[test]
+fn expand_pads_to_a_size() {
+    // LO.
+    num("ROWS(EXPAND(C1:D2,3,3))", 3.0);
+    error("INDEX(EXPAND(C1:D2,3,3),3,3)", ErrorValue::Na);
+    text("INDEX(EXPAND(C1:D2,3,3,\"-\"),3,3)", "-");
+    error("INDEX(EXPAND(C1:D2,3),3,1)", ErrorValue::Na);
+    num("INDEX(EXPAND(C1:D2,,4,0),1,4)", 0.0);
+    // MS: smaller than the array is #VALUE!.
+    error("EXPAND(C1:D2,1)", ErrorValue::Value);
+    // Bounded like every array result.
+    refused_quickly("EXPAND(C1,1E7,1E7)", ErrorValue::Num);
+}
+
+#[test]
+fn randarray_draws_within_its_bounds() {
+    num("ROWS(RANDARRAY(3,2))", 3.0);
+    num("COLUMNS(RANDARRAY(3,2))", 2.0);
+    num("RANDARRAY(1,1,3,3,TRUE)", 3.0); // LO
+    boolean(
+        "AND(RANDARRAY(5,5,1,2,TRUE)>=1,RANDARRAY(5,5,1,2,TRUE)<=2)",
+        true,
+    );
+    boolean("SUM(RANDARRAY(4,4,10,20))>=160", true);
+    let (_, v) = eval("RANDARRAY()");
+    match v {
+        CellValue::Number(n) => assert!((0.0..1.0).contains(&n), "{n}"),
+        other => panic!("RANDARRAY(): {other:?}"),
+    }
+    // MS: min above max is #VALUE!; an empty array is #CALC!.
+    error("RANDARRAY(2,2,5,1)", ErrorValue::Value);
+    error("RANDARRAY(0)", ErrorValue::Calc);
+    refused_quickly("RANDARRAY(1E6,1E6)", ErrorValue::Num);
+}
+
+/// RANDARRAY is volatile: a recalculation must redraw it even when nothing it
+/// reads has changed, exactly as RAND.
+#[test]
+fn randarray_is_volatile() {
+    let (mut wb, mut sheet) = fixture();
+    put_formula(&mut wb, &mut sheet, (0, 0), "RANDARRAY()");
+    wb.sheets.push(sheet);
+    wb.volatile_seed = 1;
+    recalculate(&mut wb);
+    let first = cell(&wb, 0, 0);
+    wb.volatile_seed = 2;
+    crate::recalculate_incremental(&mut wb, &[(0, CellRef::new(0, 7))]);
+    assert_ne!(
+        cell(&wb, 0, 0),
+        first,
+        "an unrelated edit did not redraw it"
+    );
+}
+
+#[test]
+fn textsplit_cuts_rows_and_columns() {
+    // LO.
+    text("INDEX(TEXTSPLIT(\"a,b,c\",\",\"),1,2)", "b");
+    num("COLUMNS(TEXTSPLIT(\"a,b,c\",\",\"))", 3.0);
+    text("INDEX(TEXTSPLIT(\"a,b;c,d\",\",\",\";\"),2,2)", "d");
+    error(
+        "INDEX(TEXTSPLIT(\"a,b;c\",\",\",\";\"),2,2)",
+        ErrorValue::Na,
+    );
+    text("INDEX(TEXTSPLIT(\"a,b;c\",\",\",\";\",,,\"x\"),2,2)", "x");
+    num("COLUMNS(TEXTSPLIT(\"a,,b\",\",\"))", 3.0);
+    num("COLUMNS(TEXTSPLIT(\"a,,b\",\",\",,TRUE))", 2.0);
+    text("INDEX(TEXTSPLIT(\"aXbxc\",\"x\",,,1),1,2)", "b");
+    num("COLUMNS(TEXTSPLIT(\"aXbxc\",\"x\"))", 2.0);
+    text("TEXTSPLIT(\"abc\",\",\")", "abc");
+    // MS: "Dakota Lennon Sanchez" split on a space.
+    spills(
+        "TEXTSPLIT(\"Dakota Lennon Sanchez\",\" \")",
+        |_, _| {},
+        &[&["\"Dakota\"", "\"Lennon\"", "\"Sanchez\""]],
+    );
+    // Several delimiters at once, from a range.
+    let two = |wb: &mut Workbook, sheet: &mut Sheet| {
+        put_text(wb, sheet, (0, 0), "-");
+        put_text(wb, sheet, (1, 0), " ");
+    };
+    let (wb, _) = eval_in("TEXTSPLIT(\"a-b c\",A1:A2)", two);
+    let row: Vec<String> = (0..3)
+        .map(|c| show(&wb, &cell(&wb, AT.0, AT.1 + c)))
+        .collect();
+    assert_eq!(row, ["\"a\"", "\"b\"", "\"c\""]);
+}
+
+#[test]
+fn textbefore_and_textafter() {
+    let red = "\"Red riding hood's, red hood\"";
+    // MS and LO.
+    text(&format!("TEXTBEFORE({red},\" hood\")"), "Red riding");
+    text(&format!("TEXTAFTER({red},\"hood\")"), "'s, red hood");
+    // LO.
+    text(
+        &format!("TEXTBEFORE({red},\"red\",-1)"),
+        "Red riding hood's, ",
+    );
+    text(&format!("TEXTBEFORE({red},\"RED\",1,1)"), "");
+    text(&format!("TEXTAFTER({red},\"hood\",-1)"), "");
+    error(&format!("TEXTBEFORE({red},\"red\",2)"), ErrorValue::Na);
+    error("TEXTBEFORE(\"abc\",\"x\")", ErrorValue::Na);
+    text("TEXTBEFORE(\"abc\",\"x\",,,,\"none\")", "none");
+    text("TEXTBEFORE(\"abc\",\"x\",,,1)", "abc");
+    text("TEXTAFTER(\"abc\",\"x\",,,1)", "abc");
+    error("TEXTBEFORE(\"a-b-c\",\"-\",3)", ErrorValue::Na);
+    text("TEXTBEFORE(\"a-b-c\",\"-\",3,,1)", "a-b-c");
+    text("TEXTBEFORE(\"a-b-c\",\"-\",-3,,1)", "a");
+    text("TEXTAFTER(\"a-b-c\",\"-\",3,,1)", "c");
+    text("TEXTAFTER(\"a-b-c\",\"-\",-3,,1)", "a-b-c");
+    text("TEXTAFTER(\"alpha-beta\",\"a\",2)", "-beta");
+    // MS: an empty delimiter matches at once — TEXTBEFORE gives "" forwards
+    // and the whole text backwards, TEXTAFTER the reverse. (LibreOffice: #N/A.)
+    text(&format!("TEXTBEFORE({red},\"\")"), "");
+    text(
+        &format!("TEXTBEFORE({red},\"\",-1)"),
+        "Red riding hood's, red hood",
+    );
+    text("TEXTAFTER(\"abc\",\"\")", "abc");
+    text("TEXTAFTER(\"abc\",\"\",-1)", "");
+    // MS: instance 0, or past the text's length, is #VALUE!.
+    error("TEXTBEFORE(\"abc\",\"b\",0)", ErrorValue::Value);
+    error("TEXTAFTER(\"abc\",\"b\",4)", ErrorValue::Value);
+}
+
+#[test]
+fn arraytotext_and_valuetotext() {
+    // MS's example block: TRUE, #VALUE!, 1234.01234, Seattle, Hello, "1,123".
+    let data = |wb: &mut Workbook, sheet: &mut Sheet| {
+        sheet
+            .cells
+            .set(CellRef::new(0, 0), Cell::value(CellValue::Bool(true)));
+        sheet.cells.set(
+            CellRef::new(0, 1),
+            Cell::value(CellValue::Error(ErrorValue::Value)),
+        );
+        put_number(sheet, (1, 0), 1234.01234);
+        put_text(wb, sheet, (1, 1), "Seattle");
+        put_text(wb, sheet, (2, 0), "Hello");
+        put_text(wb, sheet, (2, 1), "1,123");
+    };
+    let read = |f: &str| {
+        let (wb, v) = eval_in(f, data);
+        show(&wb, &v)
+    };
+    assert_eq!(
+        read("ARRAYTOTEXT(A1:B3)"),
+        "\"TRUE, #VALUE!, 1234.01234, Seattle, Hello, 1,123\""
+    );
+    assert_eq!(
+        read("ARRAYTOTEXT(A1:B3,1)"),
+        "\"{TRUE,#VALUE!;1234.01234,\\\"Seattle\\\";\\\"Hello\\\",\\\"1,123\\\"}\""
+    );
+    assert_eq!(read("ARRAYTOTEXT(A1:B3,2)"), "#VALUE!");
+    // MS: VALUETOTEXT quotes text only when strict, and writes an error as
+    // its text.
+    assert_eq!(read("VALUETOTEXT(A3)"), "\"Hello\"");
+    assert_eq!(read("VALUETOTEXT(A3,1)"), "\"\\\"Hello\\\"\"");
+    assert_eq!(read("VALUETOTEXT(A2,1)"), "\"1234.01234\"");
+    assert_eq!(read("VALUETOTEXT(A1,1)"), "\"TRUE\"");
+    assert_eq!(read("VALUETOTEXT(B1)"), "\"#VALUE!\"");
+    assert_eq!(read("VALUETOTEXT(1,2)"), "#VALUE!");
+}
+
+#[test]
+fn trimrange_drops_blank_edges() {
+    // C1:D10 holds data, rows 11–20 of it are blank.
+    num("ROWS(TRIMRANGE(C1:D20))", 10.0);
+    num("COLUMNS(TRIMRANGE(B1:E20))", 3.0); // C, D and E hold data; B none
+    num("COLUMNS(TRIMRANGE(A1:E20))", 3.0);
+    num("COLUMNS(TRIMRANGE(A1:E20,3,2))", 5.0); // leading columns kept
+    num("ROWS(TRIMRANGE(C1:D20,0))", 20.0);
+    num("SUM(TRIMRANGE(C1:C1000))", 55.0);
+    error("TRIMRANGE(Z1:Z9)", ErrorValue::Calc);
+    error("TRIMRANGE(C1:D2,4)", ErrorValue::Value);
 }
