@@ -16,7 +16,14 @@
 //    menu's own, never a second copy of it.
 //
 // Imported without a query string by both `editor.core.js` and `ribbon.js`, so
-// there is exactly one instance (the `MNT-005` rule `editor.js` documents).
+// there is exactly one instance per editor module graph (the `MNT-005` rule
+// `editor.js` documents). It is instanced *with* the editor and never apart from
+// it: a registered command's `run` is a closure over that editor's own state.
+//
+// **Node lookup is scoped to the editor's root**, which the editor sets with
+// `setRoot()` when it is mounted. An `<opencalc-sheet>` lives in a shadow root,
+// and `document.querySelector` cannot see into one: every node-owned command —
+// most of the ribbon — was absent there.
 
 const registered = new Map();
 
@@ -33,9 +40,15 @@ export function register(id, spec) {
   registered.set(id, { id, ...spec });
 }
 
+/// The `Document` or `ShadowRoot` the editor's menus and toolbar live in.
+let root = null;
+export function setRoot(r) { root = r; }
+const scope = () => root || (typeof document === "undefined" ? null : document);
+
 function nodeFor(id) {
-  if (typeof document === "undefined") return null;
-  return document.querySelector(`[data-oc-command="${CSS.escape(id)}"]:not(.oc-ribbon *):not(.rb-backstage *)`);
+  const r = scope();
+  if (!r) return null;
+  return r.querySelector(`[data-oc-command="${CSS.escape(id)}"]:not(.oc-ribbon *):not(.rb-backstage *)`);
 }
 
 /// The command, or `null` if this build has no such verb.
@@ -87,8 +100,9 @@ export function all() {
     const c = command(id);
     if (!c.hidden()) out.set(id, c);
   }
-  if (typeof document !== "undefined") {
-    for (const n of document.querySelectorAll("[data-oc-command]")) {
+  const r = scope();
+  if (r) {
+    for (const n of r.querySelectorAll("[data-oc-command]")) {
       const id = n.dataset.ocCommand;
       if (out.has(id) || !id.includes(".")) continue;
       if (n.closest(".oc-ribbon, .rb-backstage")) continue;

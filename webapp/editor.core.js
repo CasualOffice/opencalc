@@ -28,7 +28,7 @@ export const BUILD =
 // The imports below are what this file still calls; the re-exports keep the
 // module's public surface — `window.opencalcEditor` is this namespace — exactly
 // what it was.
-import { register as registerCommand } from "./commands.js";
+import { register as registerCommand, setRoot as setCommandRoot } from "./commands.js";
 import { paintList } from "./editor.paintlist.js";
 import {
   applyChart,
@@ -1476,6 +1476,9 @@ export let ocThemeHost = document.documentElement;
 /// ceiling.
 export function setMountRoot(root) {
   ocRoot = root;
+  // The command registry finds menu and toolbar nodes in this root, not in the
+  // page's document, which cannot see into a shadow root.
+  setCommandRoot(root);
   ocOverlayHost = root === document ? document.body : root;
   ocThemeHost = root === document ? document.documentElement : root.host;
   if (root !== document && explicitMode() === null) {
