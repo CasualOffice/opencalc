@@ -1348,3 +1348,38 @@ fn a_defined_name_field_an_older_reader_does_not_know_is_refused_not_dropped() {
         .unwrap();
     assert_eq!(reread, older);
 }
+
+/// `MACRO-02`: the macro library is additive by ADR-010. A workbook without
+/// macros serializes to exactly the bytes it did before the field existed (the
+/// literal is the pre-`MACRO-02` snapshot), and one with macros round-trips
+/// through a snapshot whole.
+#[test]
+fn macros_are_additive_in_the_snapshot() {
+    let mut wb = Workbook::new(wb_id());
+    wb.sheets
+        .push(Sheet::new(SheetId(Id::from_parts(1, 2)), "S"));
+    let before = String::from_utf8(wb.to_snapshot().unwrap()).unwrap();
+    assert_eq!(
+        before,
+        r#"{"schemaVersion":1,"workbookId":"00000000000000010000000000000001","sheets":[{"id":"00000000000000010000000000000002","name":"S"}]}"#,
+        "a workbook without macros must serialize to the bytes it always did"
+    );
+
+    wb.macros.macros.push(crate::Macro {
+        guid: "g1".into(),
+        name: "Fill".into(),
+        source: "Api.GetActiveSheet().GetRange(\"A1\").SetValue(1);".into(),
+        autostart: true,
+    });
+    let bytes = wb.to_snapshot().unwrap();
+    let back = Workbook::from_snapshot(&bytes).unwrap();
+    assert_eq!(back.macros, wb.macros, "macros survive a snapshot");
+
+    // Over the bounds, a snapshot is refused like an oversized part.
+    wb.macros.macros.push(wb.macros.macros[0].clone());
+    let twins = wb.to_snapshot().unwrap();
+    assert!(
+        Workbook::from_snapshot(&twins).is_err(),
+        "a repeated guid is refused"
+    );
+}

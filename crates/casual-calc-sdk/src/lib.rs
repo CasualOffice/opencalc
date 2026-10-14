@@ -2904,6 +2904,10 @@ fn delimited_loss(workbook: &Workbook, sheet_index: usize) -> CompatibilityRepor
 
     gone("other sheets", workbook.sheets.len().saturating_sub(1));
     gone("defined names", workbook.defined_names.len());
+    gone(
+        "macros",
+        workbook.macros.macros.len() + workbook.macros.custom_functions.len(),
+    );
 
     let Some(sheet) = workbook.sheets.get(sheet_index) else {
         return report;

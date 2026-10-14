@@ -20,6 +20,7 @@ mod defined_name;
 mod error;
 mod ids;
 pub mod int_keys;
+mod macros;
 mod pivot;
 pub mod protection_hash;
 mod sheet;
@@ -37,6 +38,11 @@ pub use defined_name::{DefinedName, NameAttributes};
 pub use error::ModelError;
 pub use ids::{
     DefinedNameId, FormulaHandle, Id, IdGenerator, NumberFormatId, SheetId, StringId, StyleId,
+};
+pub use macros::{
+    CustomFunctionSource, JSA_PROJECT_CONTENT_TYPE, JSA_PROJECT_PART, JSA_PROJECT_REL_TYPE,
+    MAX_LIBRARY_SOURCE_BYTES, MAX_MACRO_NAME_CHARS, MAX_MACRO_SOURCE_BYTES, MAX_MACROS, Macro,
+    MacroError, MacroLibrary,
 };
 pub use pivot::{
     PivotAggregate, PivotAxisField, PivotBaseItem, PivotCalculatedField, PivotFilterField,

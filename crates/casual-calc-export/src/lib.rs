@@ -339,6 +339,15 @@ fn write_unsigned(workbook: &Workbook, kind: PackageKind) -> Result<Vec<u8>, Exp
             shared_strings_xml(workbook, &strings),
         ));
     }
+    // The macros, where ONLYOFFICE keeps them (`MACRO-02`): regenerated from
+    // the model, so an edit reaches the file and a deleted last macro takes the
+    // part away.
+    if writes_macros(workbook) {
+        parts.push((
+            casual_calc_model::JSA_PROJECT_PART.to_owned(),
+            workbook.macros.to_jsa_project(),
+        ));
+    }
     if has_styles {
         parts.push(("xl/styles.xml".to_owned(), styles_xml(workbook, &dxfs)));
     }
@@ -610,6 +619,13 @@ fn content_types(
             "<Override PartName=\"/docProps/core.xml\" ContentType=\"application/vnd.openxmlformats-package.core-properties+xml\"/>",
         );
     }
+    if writes_macros(workbook) {
+        s.push_str(&format!(
+            "<Override PartName=\"/{}\" ContentType=\"{}\"/>",
+            casual_calc_model::JSA_PROJECT_PART,
+            casual_calc_model::JSA_PROJECT_CONTENT_TYPE
+        ));
+    }
     for built in pivots {
         for (path, _) in &built.parts {
             let ct = if path.contains("pivotCacheDefinition") {
@@ -646,7 +662,11 @@ fn content_types(
     // An Override also outranks whatever `<Default>` this writer emitted above,
     // so a retained `.vml` or `.xml` part with a specific type keeps it rather
     // than being flattened to `application/xml`.
-    for retained in &workbook.retained_parts {
+    for retained in workbook
+        .retained_parts
+        .iter()
+        .filter(|p| !(writes_macros(workbook) && p.path == casual_calc_model::JSA_PROJECT_PART))
+    {
         // `None` only when the source package declared no type for the part
         // either — it arrived undeclared and there is nothing to carry. It is
         // not the writer's place to invent one from the extension: the file
@@ -1096,6 +1116,9 @@ struct WorkbookRelIds {
     strings: String,
     theme: String,
     person: String,
+    /// ONLYOFFICE's macros part. Minted last, so a workbook without macros
+    /// numbers everything else exactly as before.
+    macros: String,
 }
 
 impl WorkbookRelIds {
@@ -1117,6 +1140,7 @@ impl WorkbookRelIds {
             strings: minter.mint(),
             theme: minter.mint(),
             person: minter.mint(),
+            macros: minter.mint(),
         }
     }
 }
@@ -1588,6 +1612,13 @@ fn workbook_rels(
             ids.person
         ));
     }
+    if writes_macros(workbook) {
+        s.push_str(&format!(
+            "<Relationship Id=\"{}\" Type=\"{}\" Target=\"jsaProject.bin\"/>",
+            ids.macros,
+            casual_calc_model::JSA_PROJECT_REL_TYPE
+        ));
+    }
     // Retained relationships keep their original ids: the element that names
     // one — `<externalReference r:id="rId4"/>` — travels verbatim too, and a
     // re-minted id would point at nothing.
@@ -1600,11 +1631,24 @@ fn workbook_rels(
         .retained_rels
         .iter()
         .filter(|r| is_workbook(&r.source))
+        .filter(|r| {
+            !(writes_macros(workbook) && r.rel_type == casual_calc_model::JSA_PROJECT_REL_TYPE)
+        })
     {
         s.push_str(&retained_rel_xml(rel));
     }
     s.push_str("</Relationships>");
     s
+}
+
+/// Whether this save writes ONLYOFFICE's macros part from the model.
+///
+/// When it does, a retained copy of the same part — one an earlier import
+/// could not read — gives way to it, relationship and declaration included:
+/// two relationships to one part, or one part declared twice, is a package
+/// Excel repairs.
+fn writes_macros(workbook: &Workbook) -> bool {
+    !workbook.macros.is_empty()
 }
 
 fn shared_strings_xml(workbook: &Workbook, strings: &SharedStrings) -> String {

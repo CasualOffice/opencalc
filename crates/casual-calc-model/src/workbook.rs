@@ -11,6 +11,7 @@ use crate::author::AuthorTable;
 use crate::defined_name::DefinedName;
 use crate::error::ModelError;
 use crate::ids::{FormulaHandle, Id, StringId, StyleId};
+use crate::macros::MacroLibrary;
 use crate::sheet::Sheet;
 use crate::store::CellRef;
 use crate::strings::StringTable;
@@ -413,6 +414,15 @@ pub struct Workbook {
     /// file permanently.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub date1904: bool,
+    /// The workbook's macros and custom-function sources (`MACRO-02`,
+    /// docs/99 §4), stored in the file the way ONLYOFFICE stores them — see
+    /// [`MacroLibrary`].
+    ///
+    /// Additive by ADR-010: defaulted on the way in and skipped when empty, so
+    /// a workbook without macros serializes to exactly the bytes it always did
+    /// and `SCHEMA_VERSION` does not move.
+    #[serde(default, skip_serializing_if = "MacroLibrary::is_empty")]
+    pub macros: MacroLibrary,
 }
 
 /// A named cell style: OOXML's `<cellStyle>` entry paired with the
@@ -559,6 +569,7 @@ impl Workbook {
             retained_refs: Vec::new(),
             cell_styles: Vec::new(),
             date1904: false,
+            macros: MacroLibrary::default(),
         }
     }
 
@@ -863,6 +874,11 @@ impl Workbook {
                     return Err(ModelError::Invariant("dangling style reference"));
                 }
             }
+        }
+        // A snapshot arrives from a host, a resumed session or a cluster peer,
+        // and the macros in it are bounded exactly as an imported part is.
+        if self.macros.check().is_err() {
+            return Err(ModelError::Invariant("macros over their bounds"));
         }
         Ok(())
     }

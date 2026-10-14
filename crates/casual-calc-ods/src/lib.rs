@@ -1313,6 +1313,13 @@ pub fn export_loss(workbook: &Workbook) -> CompatibilityReport {
     };
 
     gone("defined names", workbook.defined_names.len());
+    // `MACRO-02`: this writer has no place for the workbook's macros. (ONLYOFFICE
+    // itself puts a `jsaProject.bin` at the root of an ODF package; carrying it
+    // is a separate row, and until it lands the loss is named here.)
+    gone(
+        "macros",
+        workbook.macros.macros.len() + workbook.macros.custom_functions.len(),
+    );
 
     let mut formatted = 0usize;
     let mut untranslatable = 0usize;
@@ -2084,6 +2091,30 @@ mod tests {
             .sheets
             .push(Sheet::new(SheetId(Id::from_parts(2, 1)), "S"));
         assert!(export_loss(&plain).is_empty());
+    }
+
+    /// **Macros cannot travel in an `.ods` this writer produces, so the save
+    /// says so** (`MACRO-02`). Counted per macro and per function source.
+    #[test]
+    fn an_ods_save_names_the_macros_it_leaves_behind() {
+        let mut wb = Workbook::new(Id::from_parts(1, 1));
+        wb.sheets
+            .push(Sheet::new(SheetId(Id::from_parts(2, 1)), "S"));
+        let one = |guid: &str| casual_calc_model::Macro {
+            guid: guid.to_owned(),
+            name: guid.to_owned(),
+            source: "Api.GetActiveSheet();".to_owned(),
+            autostart: false,
+        };
+        wb.macros.macros = vec![one("a"), one("b")];
+        let report = export_loss(&wb);
+        let entry = report
+            .entries()
+            .into_iter()
+            .find(|e| e.feature == "macros")
+            .unwrap_or_else(|| panic!("macros are not named: {:?}", report.entries()));
+        assert_eq!(entry.count, 2);
+        assert_eq!(entry.retention, RetentionOutcome::NotRetained);
     }
 
     /// **Rubbish is refused, not half-read.**
