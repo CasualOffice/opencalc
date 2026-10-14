@@ -6415,6 +6415,8 @@ export function beginEdit(surface, initial, caretAtEnd = false) {
 export function endEdit(refocus = true) {
   const was = editSurface;
   editSurface = null;
+  // The next edit reads the cell's font afresh: it may have changed between.
+  inline._fontKey = null;
   reportEditing(false);
   state.editing = false;
   // The range-finder outlines are painted into the canvas, so dropping them

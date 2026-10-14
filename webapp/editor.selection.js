@@ -1491,7 +1491,19 @@ export function positionInline() {
   // Grid units → CSS pixels: the canvas is scaled, this element is not.
   inline.style.left = left * z + "px";
   inline.style.top = top * z + "px";
-  inline.style.fontSize = 13 * z + "px";
+  // The cell's own font at the cell's size, as Excel edits in place
+  // (XL-UX-018) — it was a fixed 13px monospace, so typing into a Calibri cell
+  // switched to a code font. Read once per cell: this runs every frame.
+  const key = `${state.sheet}:${row}:${col}`;
+  if (inline._fontKey !== key) {
+    let raw = {};
+    try { raw = JSON.parse(wasm.session_cell_format(state.sheet, row, col)) || {}; } catch {}
+    inline._fontKey = key;
+    inline._fontRaw = raw;
+  }
+  const fr = inline._fontRaw;
+  inline.style.font = `${fr.i ? "italic " : ""}${fr.b ? "600 " : ""}${cellPx(fr) * z}px ${cellFont(fr).replace(/^.*?\d+(\.\d+)?px /, "")}`;
+  inline.style.lineHeight = "1.35";
   // Grow rightward to fit the entry, as Excel's in-cell editor does, up to
   // the edge of the pane (UX-SHELL-14). The cell's own width is the floor, so
   // a short entry still sits exactly over its cell. Measured with the box at
