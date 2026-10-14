@@ -25,6 +25,20 @@ straight off disk — a build step between typing and seeing is a tax paid on
 every iteration. `build-packages.mjs` is the single place that knows the layout
 the element expects at runtime, which is everything flat beside `embed.js`.
 
+It does not keep a list of the files. It walks the element's own references
+from `embed.js` and `editor.js` — imports, `import()`, file names passed to
+`new URL` and `fetch`, stylesheet `url()`s — and ships what it finds, so a new
+module ships because something imports it (`SDK-012`: a hand-kept list had
+quietly stopped including the editor itself). The proof is an install, not a
+listing: [`tests/browser/sdk-install/`](../tests/browser/sdk-install) packs the
+tarball, installs it into an empty app with no bundler, and boots the element
+from `node_modules` in a browser. It runs in CI's `browser-smoke` and before
+every release:
+
+```sh
+cd tests/browser && npx playwright test -c sdk-install/playwright.config.mjs
+```
+
 ## Examples
 
 Runnable examples of embedding OpenCalc, one directory each. They are small
