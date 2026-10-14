@@ -256,6 +256,7 @@ pub(crate) fn set_sheet_name(
                 sheet: Some(id),
                 formula: expr,
                 comment: None,
+                attributes: Default::default(),
             });
         }
         session

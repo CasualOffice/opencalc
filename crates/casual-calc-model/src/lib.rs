@@ -33,7 +33,7 @@ pub use author::{Author, AuthorId, AuthorTable};
 pub use cancel::{CANCEL_CHECK_INTERVAL, Cancel, CancelFlag, Never, should_check};
 pub use cell::{Cell, CellFlags};
 pub use chart::{ChartGrouping, ChartKind, ChartSeries, ChartView, Emu, ImageView};
-pub use defined_name::DefinedName;
+pub use defined_name::{DefinedName, NameAttributes};
 pub use error::ModelError;
 pub use ids::{
     DefinedNameId, FormulaHandle, Id, IdGenerator, NumberFormatId, SheetId, StringId, StyleId,

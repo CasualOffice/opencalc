@@ -1709,8 +1709,39 @@ pub fn parse_retained_refs(xml: &[u8]) -> Result<Vec<RetainedRef>, ImportError> 
 }
 
 /// One `<definedName>` as read: its name, `localSheetId`, the text it refers
-/// to, and its `comment`.
-pub type RawDefinedName = (String, Option<u32>, String, Option<String>);
+/// to, its `comment`, and every other attribute ECMA-376 §18.2.5 gives it.
+pub type RawDefinedName = (
+    String,
+    Option<u32>,
+    String,
+    Option<String>,
+    casual_calc_model::NameAttributes,
+);
+
+/// `<definedName>`'s attributes beyond name, scope and comment (`XL-FEAT-124`).
+/// Reading only the three the editor shows made `hidden="1"` names come back
+/// visible, and macro names stop being macros, on the first save.
+fn read_name_attributes(
+    e: &BytesStart<'_>,
+) -> Result<casual_calc_model::NameAttributes, ImportError> {
+    let flag = |local: &[u8]| -> Result<bool, ImportError> {
+        Ok(read_bool_attr(e, local)?.unwrap_or(false))
+    };
+    Ok(casual_calc_model::NameAttributes {
+        hidden: flag(b"hidden")?,
+        function: flag(b"function")?,
+        vb_procedure: flag(b"vbProcedure")?,
+        xlm: flag(b"xlm")?,
+        function_group_id: read_attr(e, b"functionGroupId")?.and_then(|v| v.parse().ok()),
+        shortcut_key: read_attr(e, b"shortcutKey")?,
+        publish_to_server: flag(b"publishToServer")?,
+        workbook_parameter: flag(b"workbookParameter")?,
+        custom_menu: read_attr(e, b"customMenu")?,
+        description: read_attr(e, b"description")?,
+        help: read_attr(e, b"help")?,
+        status_bar: read_attr(e, b"statusBar")?,
+    })
+}
 
 pub fn parse_defined_names(xml: &[u8]) -> Result<Vec<RawDefinedName>, ImportError> {
     let mut reader = Reader::from_reader(xml);
@@ -1728,16 +1759,17 @@ pub fn parse_defined_names(xml: &[u8]) -> Result<Vec<RawDefinedName>, ImportErro
                     let name = read_attr(&e, b"name")?.unwrap_or_default();
                     let local = read_attr(&e, b"localSheetId")?.and_then(|s| s.parse().ok());
                     let comment = read_attr(&e, b"comment")?.filter(|c| !c.is_empty());
-                    current = Some((name, local, String::new(), comment));
+                    let attributes = read_name_attributes(&e)?;
+                    current = Some((name, local, String::new(), comment, attributes));
                 }
             }
             Event::Text(e) => {
-                if let Some((_, _, text, _)) = current.as_mut() {
+                if let Some((_, _, text, _, _)) = current.as_mut() {
                     text.push_str(&text_of(&e)?);
                 }
             }
             Event::GeneralRef(e) => {
-                if let Some((_, _, text, _)) = current.as_mut() {
+                if let Some((_, _, text, _, _)) = current.as_mut() {
                     text.push_str(&ref_of(&e)?);
                 }
             }

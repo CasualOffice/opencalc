@@ -1452,8 +1452,45 @@ fn workbook_xml(
                 .as_deref()
                 .map(|c| format!(" comment=\"{}\"", escape_attr(c)))
                 .unwrap_or_default();
+            // The rest of §18.2.5's attributes (`XL-FEAT-124`), each written
+            // only when set — in the schema's order around `localSheetId` — so
+            // a hidden name stays hidden and a macro name stays a macro.
+            let a = &name.attributes;
+            let text = |key: &str, value: &Option<String>| {
+                value
+                    .as_deref()
+                    .map(|v| format!(" {key}=\"{}\"", escape_attr(v)))
+                    .unwrap_or_default()
+            };
+            let flag = |key: &str, on: bool| {
+                if on {
+                    format!(" {key}=\"1\"")
+                } else {
+                    String::new()
+                }
+            };
+            let before_scope = [
+                text("customMenu", &a.custom_menu),
+                text("description", &a.description),
+                text("help", &a.help),
+                text("statusBar", &a.status_bar),
+            ]
+            .concat();
+            let after_scope = [
+                flag("hidden", a.hidden),
+                flag("function", a.function),
+                flag("vbProcedure", a.vb_procedure),
+                flag("xlm", a.xlm),
+                a.function_group_id
+                    .map(|id| format!(" functionGroupId=\"{id}\""))
+                    .unwrap_or_default(),
+                text("shortcutKey", &a.shortcut_key),
+                flag("publishToServer", a.publish_to_server),
+                flag("workbookParameter", a.workbook_parameter),
+            ]
+            .concat();
             s.push_str(&format!(
-                "<definedName name=\"{}\"{comment}{scope}>{}</definedName>",
+                "<definedName name=\"{}\"{comment}{before_scope}{scope}{after_scope}>{}</definedName>",
                 escape_attr(&name.name),
                 escape_text(&formula_text(&name.formula, ABSOLUTE))
             ));

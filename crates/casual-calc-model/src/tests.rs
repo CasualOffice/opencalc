@@ -1323,6 +1323,7 @@ fn a_defined_name_field_an_older_reader_does_not_know_is_refused_not_dropped() {
         sheet: None,
         formula: parse("S!$A$1").unwrap(),
         comment: Some("VAT".to_owned()),
+        attributes: Default::default(),
     });
     let json = String::from_utf8(wb.to_snapshot().unwrap()).unwrap();
 

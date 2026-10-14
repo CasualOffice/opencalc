@@ -1792,6 +1792,7 @@ fn set_defined_names_is_self_inverse() {
         sheet: None,
         formula: parse(f).unwrap(),
         comment: None,
+        attributes: Default::default(),
     };
 
     // Define "Total" over A1:A3.
@@ -1818,6 +1819,7 @@ fn defined_names_undo_redo_through_history() {
         sheet: None,
         formula: parse(f).unwrap(),
         comment: None,
+        attributes: Default::default(),
     };
 
     history
@@ -2564,6 +2566,7 @@ fn a_new_defined_name_field_is_a_protocol_change() {
         sheet: Some(wb.sheets[0].id),
         formula: parse("S!$A$1").unwrap(),
         comment: Some("VAT".to_owned()),
+        attributes: Default::default(),
     };
     let json = serde_json::to_string(&commented).expect("serialises");
 
@@ -2573,6 +2576,64 @@ fn a_new_defined_name_field_is_a_protocol_change() {
     assert!(
         refused.to_string().contains("unknown field `comment`"),
         "{refused}"
+    );
+
+    // The key set a defined name can put on the wire at protocol 9, built from
+    // a value with every field set. A key added later fails here — and the
+    // version has to move again, for the same reason it moved this time.
+    let full = DefinedName {
+        attributes: casual_calc_model::NameAttributes {
+            hidden: true,
+            function: true,
+            vb_procedure: true,
+            xlm: true,
+            function_group_id: Some(1),
+            shortcut_key: Some("K".to_owned()),
+            publish_to_server: true,
+            workbook_parameter: true,
+            custom_menu: Some("m".to_owned()),
+            description: Some("d".to_owned()),
+            help: Some("h".to_owned()),
+            status_bar: Some("s".to_owned()),
+        },
+        ..commented
+    };
+    let value = serde_json::to_value(&full).expect("serialises");
+    let mut keys: Vec<String> = value.as_object().unwrap().keys().cloned().collect();
+    keys.extend(
+        value["attributes"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(|k| format!("attributes.{k}")),
+    );
+    keys.sort();
+    let at_9 = [
+        "attributes",
+        "attributes.customMenu",
+        "attributes.description",
+        "attributes.function",
+        "attributes.functionGroupId",
+        "attributes.help",
+        "attributes.hidden",
+        "attributes.publishToServer",
+        "attributes.shortcutKey",
+        "attributes.statusBar",
+        "attributes.vbProcedure",
+        "attributes.workbookParameter",
+        "attributes.xlm",
+        "comment",
+        "formula",
+        "name",
+        "sheet",
+    ];
+    assert_eq!(
+        keys,
+        at_9,
+        "the keys a DefinedName can carry have changed. It is deny_unknown_fields, \
+         so an older peer refuses the whole SetDefinedNames batch mid-session: \
+         move PROTOCOL_VERSION (currently {}) and update this list.",
+        crate::protocol::PROTOCOL_VERSION,
     );
 
     // A runtime assertion on purpose: a `const` one would fail the *build* of
@@ -2603,6 +2664,14 @@ fn a_commented_defined_name_crosses_the_wire_and_lands_whole() {
         sheet: Some(sender.sheets[0].id),
         formula: parse("S!$A$1").unwrap(),
         comment: Some("VAT \"standard\" & <reduced>".to_owned()),
+        // `XL-FEAT-124`'s attributes ride the same bump and the same path.
+        attributes: casual_calc_model::NameAttributes {
+            hidden: true,
+            function: true,
+            function_group_id: Some(14),
+            shortcut_key: Some("K".to_owned()),
+            ..Default::default()
+        },
     }];
     let wire = WireOperation::of(Operation::SetDefinedNames(names.clone()), &sender);
     let json = serde_json::to_string(&wire).expect("serialises");
@@ -2628,6 +2697,7 @@ mod defined_names_shift {
             sheet: scoped.then_some(sheet),
             formula: parse(refers_to).expect("parses"),
             comment: None,
+            attributes: Default::default(),
         });
         wb
     }
@@ -3734,6 +3804,7 @@ fn a_defined_name_follows_a_moved_column() {
         sheet: None,
         formula: parse("S!$B$1").unwrap(),
         comment: None,
+        attributes: Default::default(),
     });
     apply(
         &mut wb,
@@ -3816,6 +3887,7 @@ fn moving_columns_undoes_exactly() {
         sheet: None,
         formula: parse("S!$B$1:$C$1").unwrap(),
         comment: None,
+        attributes: Default::default(),
     });
     let before = wb.clone();
 
@@ -4034,6 +4106,7 @@ fn moving_a_range_undoes_exactly() {
         sheet: None,
         formula: parse("S!$A$1").unwrap(),
         comment: None,
+        attributes: Default::default(),
     });
     let before = wb.clone();
 

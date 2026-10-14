@@ -60,7 +60,7 @@ test("OK defines the name with its scope and comment", async ({ page }) => {
   const q = await page.evaluate(() => window.__q);
   const sheets = await page.evaluate(() => window.__sheets);
   expect(await names(page)).toEqual([
-    { name: "TaxRate", refersTo: `${q[0]}!$B$2`, sheet: 1, scope: sheets[1], comment: "Standard VAT" },
+    { name: "TaxRate", refersTo: `${q[0]}!$B$2`, sheet: 1, scope: sheets[1], comment: "Standard VAT", hidden: false },
   ]);
   expect(await page.evaluate(() => document.activeElement?.id)).toBe("grid");
 });

@@ -3664,6 +3664,7 @@ mod future_functions {
             sheet: None,
             formula: parse("TEXTJOIN(\",\",TRUE,A1:A3)").unwrap(),
             comment: None,
+            attributes: Default::default(),
         });
 
         let bytes = write_workbook(&wb).unwrap();
@@ -5386,12 +5387,14 @@ fn a_defined_names_comment_and_scope_round_trip() {
         sheet: Some(t),
         formula: parse("S!$A$1").unwrap(),
         comment: Some("VAT \"standard\" & <reduced>".to_owned()),
+        attributes: Default::default(),
     });
     wb.defined_names.push(DefinedName {
         name: "Plain".to_owned(),
         sheet: None,
         formula: parse("S!$B$1").unwrap(),
         comment: None,
+        attributes: Default::default(),
     });
 
     let bytes = write_workbook(&wb).unwrap();
@@ -5413,4 +5416,93 @@ fn a_defined_names_comment_and_scope_round_trip() {
         .unwrap();
     assert_eq!(plain.comment, None);
     assert_eq!(plain.sheet, None);
+}
+
+/// Every `<definedName>` in a `workbook.xml`, as `name → {attribute → value}`
+/// with `name` itself left out — attribute order is not meaningful in XML, so
+/// a map is what "the same attributes" can be compared as.
+fn defined_name_attributes(
+    workbook_xml: &str,
+) -> std::collections::BTreeMap<String, std::collections::BTreeMap<String, String>> {
+    let mut out = std::collections::BTreeMap::new();
+    let mut rest = workbook_xml;
+    while let Some(at) = rest.find("<definedName ") {
+        let open = &rest[at + "<definedName ".len()..];
+        let end = open.find('>').expect("an unterminated <definedName>");
+        let mut attrs = std::collections::BTreeMap::new();
+        let mut text = &open[..end];
+        while let Some(eq) = text.find("=\"") {
+            let key = text[..eq].trim().to_owned();
+            let after = &text[eq + 2..];
+            let close = after.find('"').expect("an unterminated attribute");
+            attrs.insert(key, after[..close].to_owned());
+            text = &after[close + 1..];
+        }
+        let name = attrs.remove("name").expect("a <definedName> with no name");
+        let key = match attrs.get("localSheetId") {
+            Some(scope) => format!("{name}@{scope}"),
+            None => name,
+        };
+        out.insert(key, attrs);
+        rest = &open[end..];
+    }
+    out
+}
+
+/// **A hidden name stays hidden through a save, and so does every other
+/// attribute ECMA-376 §18.2.5 gives `<definedName>`** (`XL-FEAT-124`).
+///
+/// The importer read `name`, `localSheetId` and `comment` and nothing else, so
+/// `hidden="1"` — add-in plumbing, `_xlnm._FilterDatabase`, a macro's private
+/// names — came back visible in the user's file, and `function`/`vbProcedure`/
+/// `xlm`/`functionGroupId`/`shortcutKey` stopped a macro name being one. That
+/// is a silent change to a file nobody asked to change.
+///
+/// Compared as written attribute maps, so a value that is *re-spelled* (an
+/// escape changed, a `1` become `true`) is caught as surely as a dropped one,
+/// and a name that had no attributes must still have none.
+#[test]
+fn every_defined_name_attribute_survives_import_and_export() {
+    const NAMES: &str = concat!(
+        r#"<definedNames>"#,
+        r#"<definedName name="x" comment="Note &amp; more" customMenu="Menu" description="Desc" "#,
+        r#"help="Help topic" statusBar="Status text" hidden="1" function="1" vbProcedure="1" "#,
+        r#"xlm="1" functionGroupId="14" shortcutKey="K" publishToServer="1" "#,
+        r#"workbookParameter="1">Sheet1!$A$1</definedName>"#,
+        r#"<definedName name="_xlnm._FilterDatabase" localSheetId="0" hidden="1">Sheet1!$A$1:$C$3</definedName>"#,
+        r#"<definedName name="Rng">Sheet1!$A$1:$A$3</definedName>"#,
+        r#"</definedNames>"#,
+    );
+    let workbook = String::from_utf8(WORKBOOK.to_vec()).unwrap().replace(
+        r#"<definedNames><definedName name="Rng">Sheet1!$A$1:$A$3</definedName></definedNames>"#,
+        NAMES,
+    );
+    assert!(
+        workbook.contains("hidden=\"1\""),
+        "the substitution found nothing to do"
+    );
+    let package = zip_parts(&[
+        ("[Content_Types].xml", CONTENT_TYPES),
+        ("_rels/.rels", ROOT_RELS),
+        ("xl/workbook.xml", workbook.as_bytes()),
+        ("xl/_rels/workbook.xml.rels", WORKBOOK_RELS),
+        ("xl/sharedStrings.xml", SHARED),
+        ("xl/styles.xml", STYLES),
+        ("xl/worksheets/sheet1.xml", worksheet()),
+    ]);
+
+    let imported = import_package(package).unwrap().workbook;
+    let written = write_workbook(&imported).unwrap();
+    let before = defined_name_attributes(&workbook);
+    let after = defined_name_attributes(&xml_of(&written, "xl/workbook.xml"));
+    assert_eq!(before.len(), 3);
+    assert_eq!(
+        after, before,
+        "a defined name's attributes changed across import → export"
+    );
+
+    // And a second pass is a fixed point: what the model reads back from its
+    // own file is what it wrote.
+    let again = import_package(written).unwrap().workbook;
+    assert_eq!(again.defined_names, imported.defined_names);
 }

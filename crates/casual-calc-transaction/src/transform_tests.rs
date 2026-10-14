@@ -92,6 +92,7 @@ fn seed() -> Workbook {
         sheet: None,
         formula: casual_calc_formula::parse("S!$C$3").expect("a defined name parses"),
         comment: None,
+        attributes: Default::default(),
     });
     workbook
 }
@@ -163,6 +164,7 @@ fn candidates(base: &mut Workbook) -> Vec<Operation> {
                 sheet: None,
                 formula: casual_calc_formula::parse(text).expect("a defined name parses"),
                 comment: None,
+                attributes: Default::default(),
             },
         ]));
     }
