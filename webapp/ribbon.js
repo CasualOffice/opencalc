@@ -127,6 +127,27 @@ const shortLabel = (s) => s.replace(/\s*\(.*\)\s*$/, "");
 
 const shells = new Map();   // root -> shell
 
+/// The host of the embedded shell the pointer last went down in, or `null` for
+/// anywhere else. A keystroke whose target is `<body>` came from nowhere in
+/// particular — a click on something unfocusable inside an embed (a popover's
+/// padding, the ribbon's background) leaves focus there — so it belongs to
+/// whichever editor was last touched rather than to every one, or to none.
+let lastPointer = null;
+let pointerWatched = false;
+function watchPointer() {
+  if (pointerWatched) return;
+  pointerWatched = true;
+  document.addEventListener("pointerdown", (e) => {
+    const path = e.composedPath();
+    lastPointer = null;
+    for (const s of shells.values()) if (s.host !== document.documentElement && path.includes(s.host)) lastPointer = s.host;
+  }, true);
+}
+const fromNowhere = (e) => {
+  const t = e.composedPath?.()[0] || e.target;
+  return !t || t === document || t === document.body || t === document.documentElement;
+};
+
 function createShell({ root, host, editor }) {
   const page = root === document;
   // Where popovers and the File page live. Inside the shadow tree when
@@ -144,12 +165,13 @@ function createShell({ root, host, editor }) {
   /// when it came from inside this editor — two editors on one page must not
   /// both raise KeyTips on one Alt, and a host page's own Escape is not ours.
   /// The page's shell answers everything except what came from inside an
-  /// embedded editor, which has its own.
+  /// embedded editor, which has its own. A keystroke from nowhere (`<body>`)
+  /// goes to the editor last touched (`lastPointer`).
   const owns = (e) => {
     const path = e.composedPath?.() || [];
-    if (!page) return path.includes(host);
+    if (!page) return path.includes(host) || (fromNowhere(e) && lastPointer === host);
     for (const s of shells.values()) if (s.host !== host && path.includes(s.host)) return false;
-    return true;
+    return !(fromNowhere(e) && lastPointer);
   };
   /* ── Popovers ───────────────────────────────────────────────────────────── */
 
@@ -1140,6 +1162,7 @@ export async function start({ root = document, host, editor } = {}) {
     s = createShell({ root, host: host || (root === document ? document.documentElement : root.host), editor });
     shells.set(root, s);
   }
+  watchPointer();
   return s.start();
 }
 
