@@ -4422,7 +4422,7 @@ fn cell_display_applies_the_number_format() {
 #[test]
 fn typed_text_keeps_its_spaces_as_excel_does() {
     let mut s = session_with_formula();
-    let mut put = |s: &mut WorkbookSession, row: u32, text: &str| {
+    let put = |s: &mut WorkbookSession, row: u32, text: &str| {
         let op = s.input_edit(0, CellRef::new(row, 7), text);
         s.edit(op).unwrap();
         s.cell_input(0, CellRef::new(row, 7))
