@@ -66,7 +66,14 @@ use crate::wire::WireOperation;
 /// commented name, mid-session with work in flight. Moving the version moves
 /// that refusal to the handshake. Pinned by
 /// `a_new_defined_name_field_is_a_protocol_change`.
-pub const PROTOCOL_VERSION: u32 = 9;
+///
+/// **10 is the macro library** (`MACRO-02`). `Operation` gained `SetMacros`,
+/// a tag a protocol-9 peer cannot read, so its whole batch would fail to parse
+/// on the first macro edit — the loud break, moved to the handshake. The
+/// library is `deny_unknown_fields` and a whole-list replace, so its key set is
+/// pinned by `a_macro_library_on_the_wire_is_a_protocol_change` exactly as the
+/// defined name's is.
+pub const PROTOCOL_VERSION: u32 = 10;
 
 /// What somebody is typing, before they have decided to keep it.
 ///

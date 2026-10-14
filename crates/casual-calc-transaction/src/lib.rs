@@ -15,9 +15,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use casual_calc_formula::{Expr, rename_sheet_references};
 use casual_calc_model::{
     AutoFilter, AxisSizing, Cell, CellComment, CellRange, CellRef, CellValue, ChartView,
-    ConditionalFormat, DataValidation, DefinedName, Hyperlink, PivotTable, PrintSetup,
-    RetainedPart, RetainedRel, Sheet, SheetProtection, SheetView, SheetVisibility, SortState,
-    StyleId, Table, Workbook,
+    ConditionalFormat, DataValidation, DefinedName, Hyperlink, MacroLibrary, PivotTable,
+    PrintSetup, RetainedPart, RetainedRel, Sheet, SheetProtection, SheetView, SheetVisibility,
+    SortState, StyleId, Table, Workbook,
 };
 
 pub mod protocol;
@@ -47,12 +47,21 @@ pub enum TxnError {
         /// The sheet index.
         index: usize,
     },
+    /// The operation would leave the workbook violating an invariant — today,
+    /// a macro library over its bounds (`MACRO-02`).
+    Invariant {
+        /// What was refused.
+        reason: String,
+    },
 }
 
 impl TxnError {
     /// The stable diagnostic code (`docs/20`).
     pub fn code(&self) -> &'static str {
-        "OC-TXN-0001"
+        match self {
+            TxnError::SheetNotFound { .. } => "OC-TXN-0001",
+            TxnError::Invariant { .. } => "OC-TXN-0002",
+        }
     }
 }
 
@@ -62,6 +71,7 @@ impl core::fmt::Display for TxnError {
             TxnError::SheetNotFound { index } => {
                 write!(f, "[{}] sheet {index} not found", self.code())
             }
+            TxnError::Invariant { reason } => write!(f, "[{}] {reason}", self.code()),
         }
     }
 }
@@ -808,6 +818,12 @@ pub enum Operation {
     /// each swaps in the new list and carries the prior list back as its own
     /// inverse, mirroring [`Operation::SetSheetMetadata`].
     SetDefinedNames(Vec<DefinedName>),
+    /// Replace the workbook's macro library wholesale (`MACRO-02`): adding,
+    /// editing, renaming or deleting a macro, or flipping its autostart flag,
+    /// each swaps in the new library and carries the old one back as its
+    /// inverse — the shape of [`Operation::SetDefinedNames`]. Positionally
+    /// inert: a macro names no cell the grid can move.
+    SetMacros(MacroLibrary),
     /// A group applied atomically, with a single combined inverse.
     Batch(Vec<Operation>),
 }
@@ -947,6 +963,7 @@ fn describe_op(op: &Operation) -> &'static str {
         Operation::RenameSheet { .. } => "rename sheet",
         Operation::MoveSheet { .. } => "move sheet",
         Operation::SetDefinedNames(_) => "defined names",
+        Operation::SetMacros(_) => "macros",
         Operation::Batch(ops) => ops.first().map_or("change", describe_op),
     }
 }
@@ -1193,6 +1210,15 @@ pub fn apply(workbook: &mut Workbook, op: Operation) -> Result<Operation, TxnErr
         Operation::SetDefinedNames(names) => {
             let previous = std::mem::replace(&mut workbook.defined_names, names);
             Ok(Operation::SetDefinedNames(previous))
+        }
+        Operation::SetMacros(library) => {
+            // Bounded here as well as at every entry point, because this is the
+            // one they all reach — a peer's operation included.
+            library.check().map_err(|e| TxnError::Invariant {
+                reason: e.to_string(),
+            })?;
+            let previous = std::mem::replace(&mut workbook.macros, library);
+            Ok(Operation::SetMacros(previous))
         }
         Operation::Batch(ops) => {
             let mut inverses = Vec::with_capacity(ops.len());

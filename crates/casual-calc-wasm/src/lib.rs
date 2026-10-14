@@ -52,6 +52,7 @@ mod find;
 mod formula;
 mod history;
 mod io;
+mod macros;
 mod objects;
 mod sheet;
 mod special;

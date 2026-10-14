@@ -2798,6 +2798,11 @@ fn recalc_plan(op: &Operation) -> RecalcPlan {
         | Operation::SetColumnWidth { .. }
         | Operation::SetRowHeight { .. }
         | Operation::SetTabColor { .. } => RecalcPlan::Skip,
+        // A macro is not evaluated by the calc engine — it runs only when the
+        // person chooses Run. When custom functions start to run (`MACRO-04`)
+        // a change to their sources changes what formulas compute, and this
+        // becomes `Full` for that list.
+        Operation::SetMacros(_) => RecalcPlan::Skip,
         // Most of this bundle is presentation, but two of its fields are read
         // by the evaluator: `SUBTOTAL`'s 101–111 codes and `AGGREGATE` skip
         // hidden rows, and `Sheet::is_row_hidden` is the union of the

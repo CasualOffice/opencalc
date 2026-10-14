@@ -668,6 +668,7 @@ fn variant_name(op: &Operation) -> &'static str {
         Operation::MoveRange { .. } => "MoveRange",
         Operation::SetTabColor { .. } => "SetTabColor",
         Operation::SetDefinedNames(_) => "SetDefinedNames",
+        Operation::SetMacros(_) => "SetMacros",
         Operation::Batch(_) => "Batch",
     }
 }
@@ -1384,7 +1385,10 @@ fn same_target(a: &Operation, b: &Operation) -> bool {
         // Sheet already matched by the caller, and the defined-name table is
         // one workbook-wide value.
         (Operation::SetTabColor { .. }, Operation::SetTabColor { .. })
-        | (Operation::SetDefinedNames(_), Operation::SetDefinedNames(_)) => true,
+        | (Operation::SetDefinedNames(_), Operation::SetDefinedNames(_))
+        // The macro library is one workbook-wide value too: two concurrent
+        // replacements contend, and server order decides.
+        | (Operation::SetMacros(_), Operation::SetMacros(_)) => true,
         _ => false,
     }
 }
