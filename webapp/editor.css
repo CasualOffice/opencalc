@@ -2556,3 +2556,13 @@ html, .editor-body { overscroll-behavior: none; }
 .oc-name-form .oc-form-label { align-self: start; padding-top: 7px; }
 .oc-name-form textarea { resize: vertical; min-height: 64px; }
 .oc-name-form select { width: 60%; }
+/* Protect Sheet (XL-UX-023): the master box, the password, and Excel's
+   scrolling "Allow all users" list. */
+.oc-prot { display: flex; flex-direction: column; gap: 8px; }
+.oc-prot .oc-form-label { margin-top: 4px; }
+.oc-prot-master { font-size: 13px; }
+.oc-prot-allow {
+  display: flex; flex-direction: column; gap: 6px; height: 168px; overflow-y: auto; padding: 8px;
+  border: 1px solid var(--oc-control-border-color); border-radius: 6px; background: var(--oc-background-color);
+}
+.oc-prot-note { margin: 4px 0 0; font-size: 12px; line-height: 1.45; color: var(--oc-muted-text-color); }
