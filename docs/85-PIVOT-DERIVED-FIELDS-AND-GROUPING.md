@@ -34,7 +34,7 @@ The row this note answers records two premises and a version. One premise is
 right, one is **backwards**, and the version is stale. Each is worth stating
 before the design, because two of them would have produced a worse plan.
 
-### 1.1 `PROTOCOL_VERSION` is already 8, not 7. This is 8 → 9
+### 1.1 `PROTOCOL_VERSION` was already 8, not 7 (COL-65 has since moved it to 9; this change is 9 → 10)
 
 The row says the version *"must move 7 → 8"*. It is 8
 (`crates/casual-calc-transaction/src/protocol.rs:58`); `CHT-07` moved it earlier
@@ -567,12 +567,12 @@ set. A formula that cannot be parsed is refused rather than stored, because a
 stored-but-unevaluable formula is a report cell that is `#NAME?` forever with no
 way to see why.
 
-### 5.4 The wire: `PROTOCOL_VERSION` 8 → 9
+### 5.4 The wire: `PROTOCOL_VERSION` 9 → 10 (COL-65 took 8 → 9 first)
 
 `SheetMetadata` field 20 `PIVOTS` is a **whole-vector replace**, exactly as
 field 19 `CHARTS` is. §1.2 measured that the consequence is not the same:
 
-> **`PROTOCOL_VERSION` moves to 9.** A chart's additive field was the *quiet*
+> **`PROTOCOL_VERSION` moves to 10** (COL-65 used 9 on 2026-10-15). A chart's additive field was the *quiet*
 > break, because `ChartView` tolerates unknown fields and an old client writes
 > the vector back without them. A pivot's additive field is the **loud** one,
 > because all four pivot types deny unknown fields and an old client refuses the
