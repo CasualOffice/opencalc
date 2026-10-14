@@ -60,7 +60,11 @@ const XLWS: &str = "_XLWS.";
 /// rather than against a copy of this list, so a dotted function added there
 /// and forgotten here fails a test instead of a user's file.
 pub const FUTURE_FUNCTIONS: &[&str] = &[
+    "ACOT",
+    "ACOTH",
     "AGGREGATE",
+    "ARABIC",
+    "BASE",
     "BETA.DIST",
     "BETA.INV",
     "BINOM.DIST",
@@ -91,7 +95,9 @@ pub const FUTURE_FUNCTIONS: &[&str] = &[
     "CSC",
     "CSCH",
     "DAYS",
+    "DECIMAL",
     "ECMA.CEILING",
+    "ENCODEURL",
     "ERF.PRECISE",
     "ERFC.PRECISE",
     "EXPON.DIST",
@@ -114,6 +120,11 @@ pub const FUTURE_FUNCTIONS: &[&str] = &[
     "IFNA",
     "IFS",
     "IMCOSH",
+    "IMCOT",
+    "IMCSC",
+    "IMCSCH",
+    "IMSEC",
+    "IMSECH",
     "IMSINH",
     "IMTAN",
     "ISFORMULA",
@@ -130,6 +141,7 @@ pub const FUTURE_FUNCTIONS: &[&str] = &[
     "MINIFS",
     "MODE.MULT",
     "MODE.SNGL",
+    "MUNIT",
     "NEGBINOM.DIST",
     "NETWORKDAYS.INTL",
     "NORM.DIST",
@@ -569,6 +581,14 @@ mod tests {
             "GAUSS",
             "PHI",
             "T.DIST",
+            "ACOT",
+            "ARABIC",
+            "BASE",
+            "DECIMAL",
+            "MUNIT",
+            "IMCOT",
+            "IMSECH",
+            "ENCODEURL",
         ] {
             let mut expr = parse(&format!("{name}(1)")).unwrap();
             assert!(qualify_future_functions(&mut expr), "{name} written bare");

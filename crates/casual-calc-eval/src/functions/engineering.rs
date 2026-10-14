@@ -631,3 +631,131 @@ pub(crate) fn eval_convert(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) 
     }
     Value::Number(number * f_from / f_to)
 }
+
+// --- 2013 additions (XL-FEAT-013) -------------------------------------------
+
+/// `BASE(number, radix, [min_length])` — a non-negative integer as text in
+/// any radix from 2 to 36, upper case, zero-padded to `min_length`.
+///
+/// Microsoft's bounds, each `#NUM!`: `0 ≤ number < 2^53`, `2 ≤ radix ≤ 36`,
+/// `0 ≤ min_length ≤ 255`. The number and the length truncate.
+pub(crate) fn eval_base(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -> Value {
+    if args.len() < 2 || args.len() > 3 {
+        return Value::Error(ErrorValue::Value);
+    }
+    let mut read = |i: usize, default: f64| match args.get(i) {
+        None | Some(Expr::Empty) => Ok(default),
+        Some(a) => ev.eval_expr(sheet, a).as_number(),
+    };
+    let (n, radix, min_len) = match (read(0, 0.0), read(1, 0.0), read(2, 0.0)) {
+        (Ok(n), Ok(r), Ok(m)) => (n.trunc(), r.trunc(), m.trunc()),
+        (Err(e), _, _) | (_, Err(e), _) | (_, _, Err(e)) => return Value::Error(e),
+    };
+    if !(0.0..9_007_199_254_740_992.0).contains(&n)
+        || !(2.0..=36.0).contains(&radix)
+        || !(0.0..=255.0).contains(&min_len)
+    {
+        return Value::Error(ErrorValue::Num);
+    }
+    let (mut n, radix) = (n as u64, radix as u64);
+    let mut digits = Vec::new();
+    loop {
+        let d = (n % radix) as u32;
+        digits.push(char::from_digit(d, 36).unwrap_or('0').to_ascii_uppercase());
+        n /= radix;
+        if n == 0 {
+            break;
+        }
+    }
+    let mut text: String = digits.into_iter().rev().collect();
+    let width = min_len as usize;
+    if text.len() < width {
+        text = format!("{}{text}", "0".repeat(width - text.len()));
+    }
+    Value::Text(text)
+}
+
+/// `DECIMAL(text, radix)` — text in any radix from 2 to 36, read as a
+/// number. Case does not matter; a digit the radix does not have is `#NUM!`,
+/// and so is text longer than Excel's 255 characters.
+pub(crate) fn eval_decimal(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -> Value {
+    let [text, radix] = args else {
+        return Value::Error(ErrorValue::Value);
+    };
+    let text = match ev.eval_expr(sheet, text).as_text() {
+        Ok(t) => t,
+        Err(e) => return Value::Error(e),
+    };
+    let radix = match ev.eval_expr(sheet, radix).as_number() {
+        Ok(r) => r.trunc(),
+        Err(e) => return Value::Error(e),
+    };
+    if !(2.0..=36.0).contains(&radix) || text.chars().count() > 255 {
+        return Value::Error(ErrorValue::Num);
+    }
+    let mut total = 0.0f64;
+    for c in text.chars() {
+        match c.to_digit(radix as u32) {
+            Some(d) => total = total * radix + f64::from(d),
+            None => return Value::Error(ErrorValue::Num),
+        }
+    }
+    finite_or(total, ErrorValue::Num)
+}
+
+/// `a / b` for complex numbers, or `None` at a pole.
+fn complex_div(a: Complex, b: Complex) -> Option<Complex> {
+    let d = b.0 * b.0 + b.1 * b.1;
+    if d == 0.0 {
+        return None;
+    }
+    let q = ((a.0 * b.0 + a.1 * b.1) / d, (a.1 * b.0 - a.0 * b.1) / d);
+    (q.0.is_finite() && q.1.is_finite()).then_some(q)
+}
+
+fn complex_sin(c: Complex) -> Complex {
+    (c.0.sin() * c.1.cosh(), c.0.cos() * c.1.sinh())
+}
+
+fn complex_cos(c: Complex) -> Complex {
+    (c.0.cos() * c.1.cosh(), -c.0.sin() * c.1.sinh())
+}
+
+fn complex_sinh(c: Complex) -> Complex {
+    (c.0.sinh() * c.1.cos(), c.0.cosh() * c.1.sin())
+}
+
+fn complex_cosh(c: Complex) -> Complex {
+    (c.0.cosh() * c.1.cos(), c.0.sinh() * c.1.sin())
+}
+
+/// `IMCOT`, `IMCSC`, `IMCSCH`, `IMSEC`, `IMSECH` — the reciprocal complex
+/// trigonometric functions. A pole (`IMCSC("0")`) is `#NUM!`, as Excel
+/// answers a complex division by zero.
+pub(crate) fn eval_complex_reciprocal(
+    ev: &mut Evaluator<'_>,
+    sheet: usize,
+    name: &str,
+    args: &[Expr],
+) -> Value {
+    let [arg] = args else {
+        return Value::Error(ErrorValue::Value);
+    };
+    let (re, im, suffix) = match complex_arg(ev, sheet, arg) {
+        Ok(c) => c,
+        Err(e) => return e,
+    };
+    let z = (re, im);
+    let one = (1.0, 0.0);
+    let result = match name {
+        "IMCOT" => complex_div(complex_cos(z), complex_sin(z)),
+        "IMCSC" => complex_div(one, complex_sin(z)),
+        "IMCSCH" => complex_div(one, complex_sinh(z)),
+        "IMSEC" => complex_div(one, complex_cos(z)),
+        _ => complex_div(one, complex_cosh(z)),
+    };
+    match result {
+        Some((r, i)) => Value::Text(format_complex(r, i, suffix)),
+        None => Value::Error(ErrorValue::Num),
+    }
+}

@@ -793,3 +793,28 @@ pub(crate) fn bessel_k(n: i32, x: f64) -> f64 {
     }
     cur
 }
+
+/// `ENCODEURL(text)` — percent-encode text for a URL.
+///
+/// UTF-8 bytes, upper-case hex, and everything but RFC 3986's unreserved set
+/// (`A–Z a–z 0–9 - . _ ~`) encoded. Microsoft's own example keeps the dots of
+/// `contoso.sharepoint.com` and `.xlsx`, which is the unreserved set and not
+/// LibreOffice's (which encodes `.`).
+pub(crate) fn eval_encodeurl(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -> Value {
+    let [arg] = args else {
+        return Value::Error(ErrorValue::Value);
+    };
+    let text = match ev.eval_expr(sheet, arg).as_text() {
+        Ok(t) => t,
+        Err(e) => return Value::Error(e),
+    };
+    let mut out = String::with_capacity(text.len());
+    for byte in text.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
+            out.push(char::from(byte));
+        } else {
+            out.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    Value::Text(out)
+}

@@ -646,3 +646,59 @@ pub(crate) fn eval_round_to_multiple(
     };
     finite_or(q * step, ErrorValue::Num)
 }
+
+/// `ARABIC(text)` — a Roman numeral as a number; the inverse of `ROMAN`.
+///
+/// Microsoft's rules, which are looser than `ROMAN` writes: case is ignored,
+/// leading and trailing spaces are ignored, a leading minus makes it negative,
+/// `""` is 0, and the reading is subtractive — a numeral smaller than the one
+/// after it is subtracted — so the non-standard `IIII` (4) and `IC` (99) read
+/// as they look. Anything else, a number included, is `#VALUE!`, as is text
+/// past 255 characters.
+pub(crate) fn eval_arabic(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -> Value {
+    let [arg] = args else {
+        return Value::Error(ErrorValue::Value);
+    };
+    let text = match ev.eval_expr(sheet, arg) {
+        Value::Text(t) => t,
+        Value::Empty => String::new(),
+        Value::Error(e) => return Value::Error(e),
+        // A number or a logical is not a numeral, even one that would print
+        // as digits.
+        _ => return Value::Error(ErrorValue::Value),
+    };
+    let trimmed = text.trim_matches(' ');
+    if trimmed.chars().count() > 255 {
+        return Value::Error(ErrorValue::Value);
+    }
+    let (negative, body) = match trimmed.strip_prefix('-') {
+        Some(rest) => (true, rest),
+        None => (false, trimmed),
+    };
+    let mut values = Vec::with_capacity(body.len());
+    for c in body.chars() {
+        let v = match c.to_ascii_uppercase() {
+            'I' => 1.0,
+            'V' => 5.0,
+            'X' => 10.0,
+            'L' => 50.0,
+            'C' => 100.0,
+            'D' => 500.0,
+            'M' => 1000.0,
+            _ => return Value::Error(ErrorValue::Value),
+        };
+        values.push(v);
+    }
+    let total: f64 = values
+        .iter()
+        .enumerate()
+        .map(|(i, v)| {
+            if values.get(i + 1).is_some_and(|next| next > v) {
+                -v
+            } else {
+                *v
+            }
+        })
+        .sum();
+    Value::Number(if negative { -total } else { total })
+}

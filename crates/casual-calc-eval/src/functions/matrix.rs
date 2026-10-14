@@ -980,3 +980,36 @@ pub(crate) fn eval_getpivotdata(ev: &mut Evaluator<'_>, sheet: usize, args: &[Ex
         Err(e) => Value::Error(e),
     }
 }
+
+/// `MUNIT(dimension)` — the identity matrix, spilled.
+///
+/// Microsoft: a dimension of zero or less is `#VALUE!`. One too large for
+/// the engine to hold is refused by [`checked_array_size`] before anything is
+/// allocated.
+pub(crate) fn eval_munit(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -> Value {
+    let [arg] = args else {
+        return Value::Error(ErrorValue::Value);
+    };
+    let n = match ev.eval_expr(sheet, arg).as_number() {
+        Ok(n) => array_dimension(n),
+        Err(e) => return Value::Error(e),
+    };
+    if n < 1 {
+        return Value::Error(ErrorValue::Value);
+    }
+    let size = match checked_array_size(n, n) {
+        Ok(size) => size,
+        Err(e) => return Value::Error(e),
+    };
+    if n == 1 {
+        return Value::Number(1.0);
+    }
+    let cells = (0..size)
+        .map(|i| Value::Number(if i / n == i % n { 1.0 } else { 0.0 }))
+        .collect();
+    Value::Array {
+        rows: n,
+        cols: n,
+        cells,
+    }
+}

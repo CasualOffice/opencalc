@@ -92,7 +92,7 @@ fn put_number(sheet: &mut Sheet, at: (u32, u32), n: f64) {
         .set(CellRef::new(at.0, at.1), Cell::value(CellValue::Number(n)));
 }
 
-#[allow(dead_code)] // used by the later groups
+#[allow(dead_code)] // used by the dynamic-array group
 fn put_text(wb: &mut Workbook, sheet: &mut Sheet, at: (u32, u32), s: &str) {
     let id = wb.intern_string(s);
     sheet.cells.set(
@@ -188,7 +188,6 @@ fn boolean(formula: &str, expected: bool) {
     );
 }
 
-#[allow(dead_code)] // used by the later groups
 #[track_caller]
 fn text(formula: &str, expected: &str) {
     let (wb, v) = eval(formula);
@@ -862,4 +861,137 @@ fn fixed_and_dollar_refuse_more_than_127_decimals() {
     refused_quickly("DOLLAR(1,1E9)", ErrorValue::Value);
     error("FIXED(1,128)", ErrorValue::Value);
     num("LEN(FIXED(1,127))", 129.0);
+}
+
+// --- Group 3: maths and engineering -----------------------------------------
+
+#[test]
+fn inverse_cotangents() {
+    // LO; MS: ACOT(2) is 0.4636, ACOTH(6) is 0.168.
+    num("ACOT(2)", 0.463647609000806);
+    num("ACOT(0)", std::f64::consts::FRAC_PI_2); // LO prints 1.5707963267949
+    num("ACOT(-2)", 2.67794504458899); // the range is (0, π), not (−π/2, π/2)
+    num("ACOTH(6)", 0.168236118310606);
+    num("ACOTH(-6)", -0.168236118310606);
+    error("ACOTH(1)", ErrorValue::Num);
+    error("ACOTH(0.5)", ErrorValue::Num);
+    error("ACOT(\"x\")", ErrorValue::Value);
+}
+
+#[test]
+fn arabic_reads_roman_numerals() {
+    // MS: LVII is 57, mcmxii 1912, "mxmvii" 1997, "" is 0.
+    num("ARABIC(\"LVII\")", 57.0);
+    num("ARABIC(\"mcmxii\")", 1912.0);
+    num("ARABIC(\"mxmvii\")", 1997.0);
+    num("ARABIC(\"\")", 0.0);
+    // LO: non-standard forms are read by the subtractive rule.
+    num("ARABIC(\"IIII\")", 4.0);
+    num("ARABIC(\"IC\")", 99.0);
+    // MS: "evaluation of a negative Roman numeral is supported" and "leading
+    // and trailing spaces are ignored" (LibreOffice agrees).
+    num("ARABIC(\"-MMXI\")", -2011.0);
+    num("ARABIC(\"  XV  \")", 15.0);
+    // MS: numbers and text that is not a numeral are #VALUE!.
+    error("ARABIC(\"ABC\")", ErrorValue::Value);
+    error("ARABIC(5)", ErrorValue::Value);
+    error("ARABIC(\"X V\")", ErrorValue::Value);
+    // MS: at most 255 characters, so 255,000 is the largest.
+    let max = format!("ARABIC(\"{}\")", "M".repeat(255));
+    num(&max, 255_000.0);
+    let over = format!("ARABIC(\"{}\")", "M".repeat(256));
+    error(&over, ErrorValue::Value);
+}
+
+#[test]
+fn base_and_decimal_convert_between_radixes() {
+    // LO; MS: BASE(7,2) "111", BASE(100,16) "64", BASE(15,2,10) "0000001111".
+    text("BASE(7,2)", "111");
+    text("BASE(100,16)", "64");
+    text("BASE(15,2,10)", "0000001111");
+    text("BASE(10,36)", "A");
+    text("BASE(10.9,2)", "1010"); // truncates
+    text("BASE(0,2)", "0");
+    text("BASE(255,16,1)", "FF"); // min_length pads, never truncates
+    error("BASE(-1,2)", ErrorValue::Num);
+    error("BASE(10,1)", ErrorValue::Num);
+    error("BASE(10,37)", ErrorValue::Num);
+    error("BASE(2^53,2)", ErrorValue::Num);
+    error("BASE(1,2,256)", ErrorValue::Num);
+    // LO; MS: DECIMAL("FF",16) 255, DECIMAL(111,2) 7, DECIMAL("zap",36) 45745.
+    num("DECIMAL(\"FF\",16)", 255.0);
+    num("DECIMAL(111,2)", 7.0);
+    num("DECIMAL(\"zap\",36)", 45745.0);
+    num("DECIMAL(\"ff\",16)", 255.0);
+    num("DECIMAL(\"\",2)", 0.0);
+    error("DECIMAL(\"12\",2)", ErrorValue::Num);
+    error("DECIMAL(\"FF\",37)", ErrorValue::Num);
+}
+
+#[test]
+fn munit_spills_an_identity_matrix() {
+    spills(
+        "MUNIT(3)",
+        |_, _| {},
+        &[&["1", "0", "0"], &["0", "1", "0"], &["0", "0", "1"]],
+    );
+    num("MUNIT(1)", 1.0);
+    // MS: zero or less is #VALUE!.
+    error("MUNIT(0)", ErrorValue::Value);
+    error("MUNIT(-1)", ErrorValue::Value);
+    // LO.
+    num("INDEX(MUNIT(3),3,3)", 1.0);
+    num("ROWS(MUNIT(3))", 3.0);
+    // Bounded: a matrix of more cells than any range may hold is refused
+    // rather than allocated.
+    error("MUNIT(100000)", ErrorValue::Num);
+}
+
+/// The real and imaginary parts of a complex-valued formula.
+#[track_caller]
+fn complex(formula: &str, re: f64, im: f64) {
+    num(&format!("IMREAL({formula})"), re);
+    num(&format!("IMAGINARY({formula})"), im);
+}
+
+#[test]
+fn reciprocal_complex_trigonometry() {
+    // MS and LO agree on all five, to the digit.
+    complex("IMCOT(\"4+3i\")", 0.00490118239430447, -0.999266927805902);
+    complex("IMCSC(\"4+3i\")", -0.0754898329158637, 0.0648774713706355);
+    complex("IMCSCH(\"4+3i\")", -0.036275889628626, -0.0051744731840194);
+    complex("IMSEC(\"4+3i\")", -0.065294027857947, -0.0752249603027732);
+    complex(
+        "IMSECH(\"4+3i\")",
+        -0.0362534969158689,
+        -0.00516434460775318,
+    );
+    // LO: a real argument and a pure imaginary one.
+    num("IMREAL(IMSEC(\"1\"))", 1.85081571768093);
+    num("IMREAL(IMSECH(\"2j\"))", -2.40299796172238);
+    // The suffix survives.
+    let (wb, v) = eval("IMSECH(\"2j\")");
+    let shown = show(&wb, &v);
+    assert!(!shown.contains('i'), "{shown}");
+    // A pole is #NUM!, as Excel's IMDIV by zero; text that is not a complex
+    // number is #NUM! too.
+    error("IMCSC(\"0\")", ErrorValue::Num);
+    error("IMCOT(\"0\")", ErrorValue::Num);
+    error("IMCSCH(\"0\")", ErrorValue::Num);
+    error("IMCOT(\"x\")", ErrorValue::Num);
+}
+
+#[test]
+fn encodeurl_percent_encodes_utf8() {
+    // MS's example, exactly: the dots survive.
+    text(
+        "ENCODEURL(\"http://contoso.sharepoint.com/Finance/Profit and Loss Statement.xlsx\")",
+        "http%3A%2F%2Fcontoso.sharepoint.com%2FFinance%2FProfit%20and%20Loss%20Statement.xlsx",
+    );
+    // Reserved characters and non-ASCII are encoded as UTF-8 bytes; the
+    // unreserved set of RFC 3986 is not.
+    text("ENCODEURL(\"a b&c=d/é\")", "a%20b%26c%3Dd%2F%C3%A9");
+    text("ENCODEURL(\"A-z_0.9~\")", "A-z_0.9~");
+    text("ENCODEURL(12)", "12");
+    error("ENCODEURL(1/0)", ErrorValue::Div0);
 }

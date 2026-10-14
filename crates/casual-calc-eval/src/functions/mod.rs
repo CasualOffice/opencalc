@@ -113,6 +113,8 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ),
     ("ACOS", "ACOS(number)"),
     ("ACOSH", "ACOSH(number)"),
+    ("ACOT", "ACOT(number)"),
+    ("ACOTH", "ACOTH(number)"),
     ("ADDRESS", "ADDRESS(row, column, [abs], [a1], [sheet])"),
     (
         "AGGREGATE",
@@ -127,6 +129,7 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
         "AMORLINC(cost, date_purchased, first_period, salvage, period, rate, [basis])",
     ),
     ("AND", "AND(logical1, …)"),
+    ("ARABIC", "ARABIC(text)"),
     ("AREAS", "AREAS(reference)"),
     ("ASC", "ASC(text)"),
     ("ASIN", "ASIN(number)"),
@@ -140,6 +143,7 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("AVERAGEIF", "AVERAGEIF(range, criteria, [average_range])"),
     ("AVERAGEIFS", "AVERAGEIFS(avg_range, range1, criteria1, …)"),
     ("BAHTTEXT", "BAHTTEXT(number)"),
+    ("BASE", "BASE(number, radix, [min_length])"),
     ("BESSELI", "BESSELI(x, n)"),
     ("BESSELJ", "BESSELJ(x, n)"),
     ("BESSELK", "BESSELK(x, n)"),
@@ -263,6 +267,7 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("DEC2BIN", "DEC2BIN(number, [places])"),
     ("DEC2HEX", "DEC2HEX(number, [places])"),
     ("DEC2OCT", "DEC2OCT(number, [places])"),
+    ("DECIMAL", "DECIMAL(text, radix)"),
     ("DEGREES", "DEGREES(angle)"),
     ("DELTA", "DELTA(number1, [number2])"),
     ("DEVSQ", "DEVSQ(number1, …)"),
@@ -289,6 +294,7 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("ECMA.CEILING", "ECMA.CEILING(number, significance)"),
     ("EDATE", "EDATE(start_date, months)"),
     ("EFFECT", "EFFECT(nominal_rate, npery)"),
+    ("ENCODEURL", "ENCODEURL(text)"),
     ("EOMONTH", "EOMONTH(start_date, months)"),
     ("ERF", "ERF(lower, [upper])"),
     ("ERF.PRECISE", "ERF.PRECISE(x)"),
@@ -379,6 +385,9 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("IMCONJUGATE", "IMCONJUGATE(inumber)"),
     ("IMCOS", "IMCOS(inumber)"),
     ("IMCOSH", "IMCOSH(inumber)"),
+    ("IMCOT", "IMCOT(inumber)"),
+    ("IMCSC", "IMCSC(inumber)"),
+    ("IMCSCH", "IMCSCH(inumber)"),
     ("IMDIV", "IMDIV(inumber1, inumber2)"),
     ("IMEXP", "IMEXP(inumber)"),
     ("IMLN", "IMLN(inumber)"),
@@ -387,6 +396,8 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("IMPOWER", "IMPOWER(inumber, number)"),
     ("IMPRODUCT", "IMPRODUCT(inumber1, …)"),
     ("IMREAL", "IMREAL(inumber)"),
+    ("IMSEC", "IMSEC(inumber)"),
+    ("IMSECH", "IMSECH(inumber)"),
     ("IMSIN", "IMSIN(inumber)"),
     ("IMSINH", "IMSINH(inumber)"),
     ("IMSQRT", "IMSQRT(inumber)"),
@@ -475,6 +486,7 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("MONTH", "MONTH(serial_number)"),
     ("MROUND", "MROUND(number, multiple)"),
     ("MULTINOMIAL", "MULTINOMIAL(number1, …)"),
+    ("MUNIT", "MUNIT(dimension)"),
     ("N", "N(value)"),
     ("NA", "NA()"),
     (
@@ -788,6 +800,24 @@ pub fn call_function(ev: &mut Evaluator<'_>, sheet: usize, name: &str, args: &[E
         "SECH" => checked(ev, sheet, args, |n| {
             finite_or(1.0 / n.cosh(), ErrorValue::Div0)
         }),
+        // ACOT's range is (0, π) — π/2 − atan, not atan(1/x), which would
+        // jump to negative values left of zero.
+        "ACOT" => scalar(ev, sheet, args, |n| std::f64::consts::FRAC_PI_2 - n.atan()),
+        "ACOTH" => checked(ev, sheet, args, |n| {
+            if n.abs() <= 1.0 {
+                Value::Error(ErrorValue::Num)
+            } else {
+                Value::Number(0.5 * ((n + 1.0) / (n - 1.0)).ln())
+            }
+        }),
+        "ARABIC" => eval_arabic(ev, sheet, args),
+        "BASE" => eval_base(ev, sheet, args),
+        "DECIMAL" => eval_decimal(ev, sheet, args),
+        "MUNIT" => eval_munit(ev, sheet, args),
+        "ENCODEURL" => eval_encodeurl(ev, sheet, args),
+        "IMCOT" | "IMCSC" | "IMCSCH" | "IMSEC" | "IMSECH" => {
+            eval_complex_reciprocal(ev, sheet, name, args)
+        }
         // Domain-restricted: outside the domain the answer is #NUM!.
         "ASIN" => checked(ev, sheet, args, |n| domain(n.asin())),
         "ACOS" => checked(ev, sheet, args, |n| domain(n.acos())),
