@@ -1429,29 +1429,6 @@ textarea.panel-field { resize: vertical; min-height: 68px; font-family: inherit;
   color: var(--oc-text-color);
 }
 
-.find-bar {
-  position: absolute; top: 6px; right: 18px; z-index: 20; display: flex; align-items: center; gap: 6px;
-  background: var(--oc-popover-background-color); border: 1px solid var(--oc-border-color); border-radius: 10px; padding: 6px 8px;
-  box-shadow: var(--oc-elevation-overlay);
-}
-.find-bar[hidden] { display: none; }
-.find-field {
-  height: 28px; padding: 0 8px; border: 1px solid var(--oc-border-color); border-radius: 7px;
-  background: var(--oc-background-color); color: var(--oc-text-color); font-size: 13px; width: 130px;
-}
-.find-count { color: var(--oc-muted-text-color); font-size: 12px; font-family: var(--oc-mono-font-family); min-width: 34px; text-align: center; }
-.find-btn {
-  width: 28px; height: 28px; padding: 0; display: inline-flex; align-items: center; justify-content: center;
-  border: 1px solid transparent; border-radius: 7px; background: transparent; color: var(--oc-text-color); cursor: pointer;
-}
-.find-btn:hover { background: var(--oc-background-color); border-color: var(--oc-border-color); }
-.find-action {
-  height: 28px; padding: 0 10px; border: 1px solid var(--oc-border-color); border-radius: 7px;
-  background: var(--oc-background-color); color: var(--oc-text-color); font-size: 12px; font-weight: 600; cursor: pointer;
-}
-.find-action:hover { border-color: var(--oc-accent-color); }
-.find-case { display: inline-flex; align-items: center; gap: 3px; color: var(--oc-muted-text-color); font-size: 12px; cursor: pointer; }
-
 /* Custom scrollbars — identical on every OS (no native scrollbar UI). */
 .scrollbar { position: absolute; z-index: 6; }
 .scrollbar.vscroll { top: 24px; right: 0; bottom: 14px; width: 14px; }
@@ -2589,3 +2566,41 @@ html, .editor-body { overscroll-behavior: none; }
 .oc-fa-fdesc { font-size: 12px; line-height: 1.45; }
 .oc-fa-adesc { min-height: 2.9em; font-size: 12px; line-height: 1.45; color: var(--oc-muted-text-color); }
 .oc-fa-result { font-size: 13px; padding-top: 6px; border-top: 1px solid var(--oc-border-color); }
+
+/* Find and Replace (XL-UX-024/025). Modeless, as Excel's is: the shared frame
+   without its backdrop, so the grid underneath keeps taking clicks; the box
+   is dragged by its title. */
+.oc-modal.oc-modeless { background: transparent; pointer-events: none; }
+.oc-modal.oc-modeless .oc-modal-box { pointer-events: auto; box-shadow: var(--oc-popover-shadow); }
+.oc-modal-title.oc-drag-handle { cursor: move; user-select: none; touch-action: none; }
+.oc-modal-box:has(.oc-fr) { width: min(92vw, 560px); }
+.oc-fr-fields { display: grid; grid-template-columns: auto 1fr; gap: 8px 12px; align-items: center; margin: 4px 0 10px; }
+.oc-fr-fields [hidden] { display: none; }
+.oc-fr-options { display: grid; grid-template-columns: auto auto; gap: 8px 24px; align-items: start; margin: 0 0 8px; }
+.oc-fr-options[hidden] { display: none; }
+.oc-fr-selects { display: grid; grid-template-columns: auto 132px; gap: 6px 10px; align-items: center; }
+.oc-fr-checks { display: flex; flex-direction: column; gap: 8px; padding-top: 6px; }
+.oc-fr-options-row { display: flex; justify-content: flex-end; }
+.oc-fr-msg { margin-top: 10px; font-size: 12px; line-height: 1.35; color: var(--oc-text-color); }
+.oc-fr-msg[hidden] { display: none; }
+.oc-fr-actions { margin-top: 12px; }
+.oc-fr-actions .oc-btn { min-width: 0; padding: 0 12px; }
+.oc-fr-actions .oc-btn[hidden] { display: none; }
+.oc-fr-results-wrap { margin-top: 12px; }
+.oc-fr-results-wrap[hidden] { display: none; }
+.oc-fr-scroll { max-height: 180px; overflow: auto; border: 1px solid var(--oc-control-border-color); border-radius: 6px; }
+.oc-fr-table { width: 100%; border-collapse: collapse; table-layout: fixed; font-size: 12px; }
+.oc-fr-table th, .oc-fr-table td {
+  padding: 3px 6px; text-align: left; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.oc-fr-table th { position: sticky; top: 0; background: var(--oc-surface-color); font-weight: 600; border-bottom: 1px solid var(--oc-border-color); }
+.oc-fr-table tbody tr { cursor: pointer; }
+.oc-fr-table tbody tr:hover { background: var(--oc-surface-color); }
+.oc-fr-table tbody tr.on { background: color-mix(in srgb, var(--oc-accent-color) 14%, transparent); }
+.oc-fr-count { margin-top: 6px; font-size: 12px; color: var(--oc-muted-text-color); }
+
+/* Goal Seek (XL-FEAT-032). */
+.oc-gs-form { display: grid; grid-template-columns: auto 1fr; gap: 8px 12px; align-items: center; margin: 0 0 6px; }
+.oc-gs-head { margin: 0 0 10px; }
+.oc-gs-status { display: grid; grid-template-columns: auto 1fr; gap: 4px 12px; }
+.oc-gs-num { font-family: var(--oc-mono-font-family); }

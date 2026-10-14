@@ -75,6 +75,16 @@ jobs:
       - name: Assemble the packages
         run: node sdk/build-packages.mjs
 
+      # Install the tarball into an empty app and boot the element from it,
+      # before anything is published (`SDK-012`). `ci.yml` runs this on every
+      # push; it runs again here because this is the engine build that ships.
+      - name: The packaged element installs and boots
+        working-directory: tests/browser
+        run: |
+          npm ci --no-audit --no-fund
+          npx playwright install --with-deps chromium
+          npx playwright test -c sdk-install/playwright.config.mjs
+
       # A tag that disagrees with package.json publishes a version nobody can
       # find from the repository. Checked before publishing, not after.
       - name: Check the tag against the packaged version

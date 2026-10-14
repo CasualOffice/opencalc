@@ -483,7 +483,7 @@ export function commitToSelection(value) {
 /// still open. Brackets inside a string or a quoted sheet name do not count,
 /// and a surplus `)` is left for the formula guard to report.
 export function closeFormula(value) {
-  if (!value.trim().startsWith("=")) return value;
+  if (!value.startsWith("=")) return value;   // a leading space makes it text (XL-FEAT-128)
   let depth = 0;
   let quote = "";
   for (let i = 0; i < value.length; i++) {
@@ -533,7 +533,7 @@ export function commit(value, advance, source = "user") {
   // which is the opposite of what a validation is for. Gated on typed entry
   // only, as in Excel: fill and paste are not checked.
   let advisory = "";
-  if (!value.trim().startsWith("=")) {
+  if (!value.startsWith("=")) {
     let bad = "";
     // The `catch` is belt and braces, not a decision: `session_validation_error`
     // returns a `String` rather than a `Result`, so it has no ordinary failure
@@ -566,7 +566,7 @@ export function commit(value, advance, source = "user") {
   }
   // Reject an unparseable formula instead of silently storing it as text —
   // keep the editor open with the error, like Excel's formula guard.
-  if (value.trim().startsWith("=")) {
+  if (value.startsWith("=")) {
     let err = "";
     try { err = wasm.validate_formula(value); } catch {}
     if (err) {

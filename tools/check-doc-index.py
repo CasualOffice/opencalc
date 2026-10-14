@@ -39,10 +39,10 @@ DOCS = ROOT / "docs"
 INDEX = DOCS / "00-README.md"
 
 # `| 68 | [Clipboard HTML Paste](68-CLIPBOARD-HTML-PASTE.md) | ... |`
-ROW = re.compile(r"^\|\s*([0-9]{2}[a-z]?)\s*\|(.*)\|.*$")
+ROW = re.compile(r"^\|\s*([0-9]{2,3}[a-z]?)\s*\|(.*)\|.*$")
 LINK = re.compile(r"\[[^\]]*\]\(([^)]+)\)")
 # `14a-ARCHIVE-CLOSED-WORK.md` -> `14a`
-NUMBER = re.compile(r"^([0-9]{2}[a-z]?)-")
+NUMBER = re.compile(r"^([0-9]{2,3}[a-z]?)-")
 
 
 def title_of(path: pathlib.Path) -> str:
@@ -50,7 +50,7 @@ def title_of(path: pathlib.Path) -> str:
     for line in path.read_text().splitlines():
         if line.startswith("# "):
             text = line[2:].strip()
-            return re.sub(r"^[0-9]{2}[a-z]? [—-] ", "", text)
+            return re.sub(r"^[0-9]{2,3}[a-z]? [—-] ", "", text)
     return path.stem
 
 

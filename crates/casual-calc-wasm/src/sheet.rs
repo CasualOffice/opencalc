@@ -108,62 +108,6 @@ pub fn session_duplicate_sheet(index: usize) -> Result<usize, JsError> {
     })
 }
 
-/// Case-insensitive substring replace (used when Find & Replace isn't
-/// match-case). Replaces every occurrence, emitting the replacement verbatim.
-pub(crate) fn ci_replace(haystack: &str, needle: &str, repl: &str) -> String {
-    if needle.is_empty() {
-        return haystack.to_owned();
-    }
-    let needle_l = needle.to_lowercase();
-    let mut out = String::with_capacity(haystack.len());
-    let mut rest = haystack;
-    while !rest.is_empty() {
-        // **Lowercased per position, from the original.** The previous version
-        // lowercased the whole haystack once and then indexed it with offsets
-        // taken from the *original* — which is only sound if lowercasing
-        // preserves byte length, and it does not. `İ` (U+0130) lowercases to
-        // two characters and `K` (U+212A, the Kelvin sign) lowercases to one
-        // byte, so the two strings drift apart and `hay_l[i..]` slices out of
-        // bounds or into the middle of a character.
-        //
-        // Either one panics, and a panic here is not an error the caller can
-        // handle: on wasm32 it is a trap that aborts the module, leaves the
-        // `RefCell` borrow held across it permanently locked, and takes the
-        // open workbook with it. An ordinary Turkish column heading was enough,
-        // through the default Find bar path — "match case" is off by default.
-        // Lowercase forward from this position one character at a time until
-        // enough bytes have been produced to decide, tracking how much of the
-        // *original* was consumed as we go. No index ever crosses between the
-        // two encodings, so no length change can put one out of step.
-        let mut consumed = 0usize;
-        let mut lowered = String::new();
-        for ch in rest.chars() {
-            consumed += ch.len_utf8();
-            lowered.extend(ch.to_lowercase());
-            if lowered.len() >= needle_l.len() {
-                break;
-            }
-        }
-        if lowered == needle_l {
-            out.push_str(repl);
-            rest = &rest[consumed..];
-        } else {
-            let ch = rest.chars().next().expect("rest is not empty");
-            out.push(ch);
-            rest = &rest[ch.len_utf8()..];
-        }
-    }
-    out
-}
-
-pub(crate) fn contains_ci(hay: &str, needle: &str, match_case: bool) -> bool {
-    if match_case {
-        hay.contains(needle)
-    } else {
-        hay.to_lowercase().contains(&needle.to_lowercase())
-    }
-}
-
 /// All cells whose display text contains `query`, as JSON `[{r,c}, …]`.
 #[wasm_bindgen]
 pub fn session_find(sheet: usize, query: &str, match_case: bool) -> String {

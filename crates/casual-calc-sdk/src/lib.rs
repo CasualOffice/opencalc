@@ -1162,6 +1162,11 @@ impl WorkbookSession {
     /// It returns the operation rather than applying it, so a caller can put it
     /// in a batch — a paste is many of these and one undo.
     pub fn input_edit(&mut self, sheet: usize, at: CellRef, input: &str) -> Operation {
+        // Spaces are part of typed **text** (XL-FEAT-128): Excel stores
+        // `"  abc "` as typed, and only reads a number or date through its
+        // spaces (`" 42 "` is 42). So `=` and `'` are recognised on the raw
+        // entry — a leading space makes them text, as in Excel — numbers and
+        // dates are parsed from `trimmed`, and text is stored as `input`.
         let trimmed = input.trim();
         let existing_style = self
             .workbook()
@@ -1170,7 +1175,7 @@ impl WorkbookSession {
             .and_then(|s| s.cells.get(at))
             .and_then(|c| c.style);
 
-        if trimmed.is_empty() {
+        if input.is_empty() {
             return Operation::ClearCell { sheet, at };
         }
 
@@ -1179,7 +1184,7 @@ impl WorkbookSession {
         // style (`quotePrefix`), not merely obeyed here: without it the cell saves
         // as a plain string and Excel re-reads `0123` as the number 123 the next
         // time the file is opened.
-        if let Some(body) = trimmed.strip_prefix('\'') {
+        if let Some(body) = input.strip_prefix('\'') {
             let mut style = existing_style
                 .and_then(|id| self.workbook().styles.get(id))
                 .cloned()
@@ -1196,7 +1201,7 @@ impl WorkbookSession {
             };
         }
 
-        if let Some(body) = trimmed.strip_prefix('=')
+        if let Some(body) = input.strip_prefix('=')
             && let Ok(expr) = parse(body)
         {
             let handle = self
@@ -1307,7 +1312,7 @@ impl WorkbookSession {
             Ok(n) if n.is_finite() && !text_formatted && !has_leading_zero(trimmed) => {
                 CellValue::Number(n)
             }
-            _ => CellValue::InlineString(self.workbook_mut().intern_string(trimmed)),
+            _ => CellValue::InlineString(self.workbook_mut().intern_string(input)),
         };
         Operation::SetValue { sheet, at, value }
     }
@@ -2863,6 +2868,10 @@ fn recalc_plan(op: &Operation) -> RecalcPlan {
 pub mod views;
 
 mod entry;
+mod what_if;
+
+pub use casual_calc_eval::goal_seek::{GoalSeekOptions, GoalSeekResult};
+pub use what_if::GoalSeekError;
 
 use std::collections::{BTreeMap, BTreeSet};
 

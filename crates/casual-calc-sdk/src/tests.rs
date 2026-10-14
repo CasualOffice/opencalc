@@ -4410,3 +4410,47 @@ fn cell_display_applies_the_number_format() {
     assert_eq!(session.cell_display(0, CellRef::new(5, 5)), "");
     assert_eq!(session.cell_display(9, at), "");
 }
+
+/// **Typed text keeps its spaces** (XL-FEAT-128).
+///
+/// Excel stores `"  abc "` exactly as typed; spaces only stop mattering while
+/// the entry is being read as a number or a date (`" 42 "` is the number 42).
+/// A leading space also stops `=` and `'` from meaning anything — `" =A1"` is
+/// text in Excel, not a formula — and a cell of only spaces is a value, not a
+/// cleared cell. Entry trimmed everything, so leading and trailing spaces were
+/// silently dropped from what the user (or an agent) wrote.
+#[test]
+fn typed_text_keeps_its_spaces_as_excel_does() {
+    let mut s = session_with_formula();
+    let put = |s: &mut WorkbookSession, row: u32, text: &str| {
+        let op = s.input_edit(0, CellRef::new(row, 7), text);
+        s.edit(op).unwrap();
+        s.cell_input(0, CellRef::new(row, 7))
+    };
+    assert_eq!(
+        put(&mut s, 0, "  abc "),
+        "  abc ",
+        "spaces around text are part of the value"
+    );
+    assert_eq!(
+        put(&mut s, 1, " 42 "),
+        "42",
+        "a number is read through its spaces"
+    );
+    assert_eq!(
+        put(&mut s, 2, " =1+1"),
+        " =1+1",
+        "a leading space makes `=` text, as in Excel"
+    );
+    assert_eq!(
+        put(&mut s, 3, "   "),
+        "   ",
+        "a cell of spaces is a value, not cleared"
+    );
+    assert_eq!(
+        put(&mut s, 4, "=1+1"),
+        "=1+1",
+        "a formula is still a formula"
+    );
+    assert_eq!(put(&mut s, 5, ""), "", "an empty entry still clears");
+}

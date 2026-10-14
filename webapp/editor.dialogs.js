@@ -88,6 +88,7 @@ import {
   wasm,
   wrap,
 } from "./editor.core.js";
+import { syncVolatileClock } from "./editor.selection.js";
 
 export function manageCfRules() {
   const modal = byId("oc-modal");
@@ -4205,4 +4206,140 @@ function unprotectSheetDialog(index) {
   }
   ok.addEventListener("click", apply);
   pw.focus();
+}
+
+// ---- Goal Seek (Data ▸ What-If Analysis, XL-FEAT-032) -------------------------
+
+/// What the dialog last held, so it reopens on it as Excel's does.
+const gsLast = { to: "", change: "" };
+
+/// A Goal Seek reference: one cell on the active sheet, or Excel's refusal.
+function goalSeekCell(text) {
+  const hit = resolveGoTo(text);
+  if (!hit) return { error: "Reference is not valid." };
+  const b = hit.boxes[0];
+  if (hit.boxes.length !== 1 || b.r0 !== b.r1 || b.c0 !== b.c1) return { error: "Reference must be to a single cell." };
+  if (hit.sheet !== state.sheet) return { error: "Reference must be on the active sheet." };
+  return { r: b.r0, c: b.c0 };
+}
+
+/// Excel's Goal Seek: Set cell, To value, By changing cell. The search runs
+/// in the engine on a scratch copy of the workbook (`session_goal_seek`), so
+/// nothing changes until the Goal Seek Status step's OK — and then once, as
+/// one ordinary edit and one undo step. Anything wrong with what was typed is
+/// said in the dialog, with the typing kept (docs/95 rule 8).
+export function goalSeekDialog() {
+  const { body, close } = modalFrame("Goal Seek", { onEnter: () => run() });
+  const form = el("div", "oc-gs-form");
+  const field = (id, label, value) => {
+    const l = el("label", "oc-form-label", label);
+    l.htmlFor = id;
+    const i = document.createElement("input");
+    i.type = "text";
+    i.id = id;
+    i.className = "oc-form-field mono";
+    i.spellcheck = false;
+    i.autocomplete = "off";
+    i.value = value;
+    form.append(l, i);
+    return i;
+  };
+  const setIn = field("oc-gs-set", "Set cell:", A1(state.sel.row, state.sel.col));
+  const toIn = field("oc-gs-to", "To value:", gsLast.to);
+  const changeIn = field("oc-gs-change", "By changing cell:", gsLast.change);
+  const err = el("div", "oc-form-error");
+  err.id = "oc-gs-error";
+  err.setAttribute("role", "alert");
+  err.hidden = true;
+  const clear = () => {
+    err.hidden = true;
+    err.textContent = "";
+    for (const i of [setIn, toIn, changeIn]) { i.classList.remove("bad"); i.removeAttribute("aria-invalid"); }
+  };
+  for (const i of [setIn, toIn, changeIn]) i.addEventListener("input", clear);
+  const fail = (input, message) => {
+    err.textContent = message;
+    err.hidden = false;
+    input.classList.add("bad");
+    input.setAttribute("aria-invalid", "true");
+    input.focus();
+    input.select();
+  };
+
+  const actions = el("div", "oc-confirm-actions");
+  const ok = el("button", "oc-btn primary", "OK");
+  const cancel = el("button", "oc-btn", "Cancel");
+  ok.addEventListener("click", () => run());
+  cancel.addEventListener("click", () => { close(); canvas.focus(); });
+  actions.append(ok, cancel);
+  body.append(form, err, actions);
+  setIn.focus();
+  setIn.select();
+
+  function run() {
+    clear();
+    gsLast.to = toIn.value;
+    gsLast.change = changeIn.value;
+    // Excel checks in the order the fields are read: Set cell, To value, By
+    // changing cell.
+    const set = goalSeekCell(setIn.value);
+    if (set.error) return fail(setIn, set.error);
+    const text = toIn.value.trim();
+    const target = Number(text);
+    if (!text || !Number.isFinite(target)) return fail(toIn, "Invalid value.");
+    const change = goalSeekCell(changeIn.value);
+    if (change.error) return fail(changeIn, change.error);
+    let res;
+    try { res = JSON.parse(wasm.session_goal_seek(state.sheet, set.r, set.c, target, change.r, change.c)); }
+    catch (e) {
+      // The engine's refusals are Excel's words; say which field they are about.
+      const message = errText(e);
+      return fail(/formula/.test(message) ? setIn : changeIn, message);
+    }
+    close();
+    goalSeekStatus(set, text, change, res);
+  }
+}
+
+/// The Goal Seek Status step: what was found, the target and the value the
+/// set cell now shows. OK keeps the input, as one edit; Cancel keeps nothing.
+function goalSeekStatus(set, target, change, res) {
+  const { body, close } = modalFrame("Goal Seek Status", { onEnter: () => keep() });
+  const head = el("p", "oc-confirm-text oc-gs-head");
+  head.append(`Goal Seeking with Cell ${A1(set.r, set.c)}`, document.createElement("br"),
+    res.found ? "found a solution." : "may not have found a solution.");
+  const grid = el("div", "oc-gs-status");
+  const t = el("span", "oc-gs-num", target);
+  t.id = "oc-gs-target";
+  const cur = el("span", "oc-gs-num", res.display);
+  cur.id = "oc-gs-current";
+  grid.append(el("span", "oc-form-label", "Target value:"), t, el("span", "oc-form-label", "Current value:"), cur);
+  const err = el("div", "oc-form-error");
+  err.id = "oc-gs-error";
+  err.setAttribute("role", "alert");
+  err.hidden = true;
+  const actions = el("div", "oc-confirm-actions");
+  const ok = el("button", "oc-btn primary", "OK");
+  const cancel = el("button", "oc-btn", "Cancel");
+  ok.addEventListener("click", keep);
+  cancel.addEventListener("click", () => { close(); canvas.focus(); });
+  actions.append(ok, cancel);
+  body.append(head, grid, err, actions);
+  ok.focus();
+
+  function keep() {
+    if (res.input === null) { close(); canvas.focus(); return; }
+    syncVolatileClock();
+    try { wasm.session_set_cell(state.sheet, change.r, change.c, res.inputText); }
+    catch (e) {
+      // A protected changing cell, say: refused here, in the dialog.
+      err.textContent = errText(e);
+      err.hidden = false;
+      return;
+    }
+    close();
+    invalidateGrowth();
+    draw();
+    canvas.focus();
+  }
 }

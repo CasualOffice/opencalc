@@ -22,7 +22,12 @@ import { fileURLToPath } from "node:url";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const WEBAPP = join(ROOT, "webapp");
-const WASM = join(ROOT, "crates", "casual-calc-wasm", "pkg");
+// `OPENCALC_WASM_DIR` takes the engine from elsewhere — CI points it at the
+// `webapp/pkg` that `tools/build-wasm.py` already built for the browser suite,
+// rather than compiling the same crate twice in one job.
+const WASM = process.env.OPENCALC_WASM_DIR
+  ? resolve(ROOT, process.env.OPENCALC_WASM_DIR)
+  : join(ROOT, "crates", "casual-calc-wasm", "pkg");
 const PACKAGES = join(ROOT, "sdk", "packages");
 
 const die = (message) => {
@@ -111,24 +116,142 @@ if (wasmBytes < 500_000) {
 }
 
 // ---------------------------------------------------------------------------
-// @opencalc/sheet — everything flat beside embed.js, because that is where
-// `new URL(".", import.meta.url)` looks for it.
+// @opencalc/sheet — what the element loads, found by following it.
+//
+// This used to be a list: `editor.js`, `editor.css`, `editor.html`, the wasm
+// and the fonts. It was right when it was written and wrong from the day the
+// editor was split into topic modules (`MNT-005`): `editor.js` became a
+// one-line re-export of `editor.core.js`, which was not on the list, so the
+// published element could not load its own editor — and nothing noticed,
+// because every gate ran the editor out of `webapp/`, where every file exists
+// (`SDK-012`). The shell (`ribbon.js`, its model, styles and icon sprite),
+// collaboration and Insert Function's lazy `fn-info.js` were missing too.
+//
+// So the package is now *derived*: start from the entry points and follow
+// every file the code names — static imports, `import()`, `new URL(...)`,
+// `fetch(...)`, a stylesheet named in a list — and every `url()` a stylesheet
+// names. A module added next month ships because something imports it, not
+// because somebody remembered this file. What static reading cannot see (a
+// file name assembled at run time from parts) is what the install test,
+// `tests/browser/sdk-install/`, is for: it installs the packed tarball into an
+// empty app and boots the element from it, so a file the walk missed is a 404
+// in CI rather than in a user's console.
+//
+// Everything sits flat beside `embed.js`, as in `webapp/`, because that is
+// where `new URL(".", import.meta.url)` looks for it. `pkg/` is the one
+// directory that comes from elsewhere: the engine build.
 // ---------------------------------------------------------------------------
+
+/// Where the element starts. `embed.js` is the package's entry; `editor.js` is
+/// named as well because `embed.js` reaches it through a URL built at run time.
+const ENTRIES = ["embed.js", "editor.js"];
+
+/// Not loaded by the browser, so no walk finds them, and shipped on purpose:
+/// `embed.d.ts` is the package's public contract (SDK-009), and the engine's
+/// declarations ride along with its bindings.
+const DECLARATIONS = [
+  "embed.d.ts",
+  ...WASM_FILES.filter((f) => f.endsWith(".d.ts")).map((f) => `pkg/${f}`),
+];
+
+/// File types the editor loads by name. A literal ending in one of these and
+/// naming a file that exists is a dependency; anything else is just a string.
+const ASSET = /\.(?:m?js|css|html|svg|wasm|json|woff2?|ttf|otf)$/;
+
+/// A package path to the file it is copied from.
+const sourceOf = (rel) =>
+  rel.startsWith("pkg/") ? join(WASM, rel.slice("pkg/".length)) : join(WEBAPP, rel);
+
+const isFile = async (path) => {
+  try {
+    return (await stat(path)).isFile();
+  } catch {
+    return false;
+  }
+};
+
+/// Resolve `spec`, as written in package file `from`, to a package path — or
+/// null when it is absolute, has a scheme, or leaves the package.
+function resolveSpec(from, spec) {
+  const path = spec.split(/[?#]/)[0];
+  if (!path || /^[a-z][\w+.-]*:/i.test(path) || path.startsWith("/")) return null;
+  const url = new URL(path, `file:///package/${from}`);
+  if (!url.pathname.startsWith("/package/")) return null;
+  return decodeURIComponent(url.pathname.slice("/package/".length));
+}
+
+/// Every file reference in one package file, as `{ spec, strict }`. A strict
+/// reference is a module specifier or a stylesheet `url()`: if it names
+/// nothing, the graph is broken and the build stops rather than shipping it.
+function referencesIn(rel, text) {
+  const refs = [];
+  if (rel.endsWith(".js")) {
+    // Comments go first. They mention file names constantly, and a comment
+    // saying the page links `index.html` is not a dependency.
+    const code = text.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+    for (const m of code.matchAll(/(?:\bfrom|\bimport)\s*\(?\s*(["'`])([^"'`$?#]+)/g)) {
+      refs.push({ spec: m[2], strict: m[2].startsWith(".") });
+    }
+    // Any other literal that starts with a file name: `new URL("./x", ...)`,
+    // `` fetch(`editor.html?v=${BUILD}`) ``, `["editor.css", "ribbon.css"]`.
+    // Not an `href=` written into markup: a link is somewhere to go, not
+    // something to load, and the About box's link home is not a reason to
+    // ship the home page and the whole site behind it.
+    for (const m of code.matchAll(/(?<!href=)["'`]((?:\.{1,2}\/)?\w[\w./-]*)(?=[?#"'`$])/g)) {
+      if (ASSET.test(m[1])) refs.push({ spec: m[1], strict: false });
+    }
+  } else if (rel.endsWith(".css")) {
+    const code = text.replace(/\/\*[\s\S]*?\*\//g, "");
+    for (const m of code.matchAll(/url\(\s*(["']?)([^"')]+)\1\s*\)|@import\s+(["'])([^"']+)\3/g)) {
+      const spec = m[2] ?? m[4];
+      if (!spec.startsWith("data:") && !spec.startsWith("#")) refs.push({ spec, strict: true });
+    }
+  } else if (rel.endsWith(".html")) {
+    // What a page loads: any `src=`, and a `<link>`'s `href` — not an anchor's.
+    for (const m of text.matchAll(/<(?:link\b[^>]*?\bhref|[a-z]+\b[^>]*?\bsrc)\s*=\s*"([^"#][^"]*)"/g)) {
+      refs.push({ spec: m[1], strict: false });
+    }
+  }
+  return refs;
+}
+
+const shipped = new Set();
+const pending = [...ENTRIES];
+const broken = [];
+while (pending.length) {
+  const rel = pending.pop();
+  if (shipped.has(rel)) continue;
+  shipped.add(rel);
+  if (!/\.(?:js|css|html)$/.test(rel)) continue;
+  const text = await readFile(sourceOf(rel), "utf8");
+  for (const { spec, strict } of referencesIn(rel, text)) {
+    const target = resolveSpec(rel, spec);
+    if (target === null || shipped.has(target)) continue;
+    if (await isFile(sourceOf(target))) pending.push(target);
+    else if (strict) broken.push(`${rel} -> ${spec}`);
+  }
+}
+if (broken.length) {
+  die(`these references name files that do not exist:\n  ${broken.join("\n  ")}`);
+}
+
+// A font's licence travels with the font: any `LICENSE*` in a directory the
+// walk shipped something from.
+for (const dir of new Set([...shipped].map((rel) => dirname(rel)))) {
+  if (dir === "." || dir === "pkg") continue;
+  for (const name of await readdir(join(WEBAPP, dir))) {
+    if (/^LICENSE/i.test(name)) shipped.add(`${dir}/${name}`);
+  }
+}
+for (const rel of DECLARATIONS) shipped.add(rel);
 
 const dist = join(PACKAGES, "sheet", "dist");
 await rm(dist, { recursive: true, force: true });
-await mkdir(join(dist, "pkg"), { recursive: true });
-
-// `embed.d.ts` rides along with `embed.js`: the declarations are the package's
-// public contract, and a package that ships one without the other is the state
-// SDK-009 describes.
-for (const file of ["editor.js", "editor.css", "editor.html", "embed.d.ts"]) {
-  await cp(join(WEBAPP, file), join(dist, file));
+for (const rel of [...shipped].sort()) {
+  if (rel === "embed.js") continue; // written below, stamped with the version
+  await mkdir(dirname(join(dist, rel)), { recursive: true });
+  await cp(sourceOf(rel), join(dist, rel));
 }
-for (const file of WASM_FILES) {
-  await cp(join(WASM, file), join(dist, "pkg", file));
-}
-await cp(join(WEBAPP, "fonts"), join(dist, "fonts"), { recursive: true });
 
 // `embed.js` carries the version so it can refuse to boot against an engine
 // from a different release. Replacing a literal is blunt, but the alternative
@@ -174,12 +297,17 @@ const sizeOf = async (path) => {
 };
 
 const mb = (bytes) => `${(bytes / 1_048_576).toFixed(1)} MB`;
-const fontCount = (await readdir(join(dist, "fonts"))).length;
+const fontCount = [...shipped].filter((rel) => /\.(?:woff2?|ttf|otf)$/.test(rel)).length;
 
 process.stdout.write(
   `build-packages: assembled ${version}\n` +
     `  @opencalc/sheet   ${mb(await sizeOf(dist))} unpacked ` +
-    `(engine ${mb(wasmBytes)}, ${fontCount} fonts)\n` +
+    `(engine ${mb(wasmBytes)}, ${fontCount} fonts, ${shipped.size} files)\n` +
+    [...shipped]
+      .filter((rel) => !rel.startsWith("fonts/"))
+      .sort()
+      .map((rel) => `      ${rel}\n`)
+      .join("") +
     `  @opencalc/engine  ${mb(await sizeOf(join(enginePkg, "casual_calc_wasm_bg.wasm")))} binary\n` +
     `  @opencalc/react   no build step\n`,
 );

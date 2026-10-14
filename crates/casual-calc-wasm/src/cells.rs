@@ -42,14 +42,16 @@ pub fn session_display_list(
     .unwrap_or_else(|| Ok(String::from(r#"{"items":[]}"#)))
 }
 
-/// Search a sheet — or the whole workbook — with the options a find bar offers.
+/// Search a sheet — or the whole workbook — with the options a find bar offers,
+/// as JSON `[{r,c,s}, …]`.
 ///
 /// - `whole_cell`: the cell must equal the query, not merely contain it.
 /// - `in_values`: match what the cell *displays* (Excel's "Values" look-in)
-///   rather than what you would type into it. The difference matters: a
-///   formula's text is `=B2*C2` while its value is `13.5`, and only one of
-///   those is what the user can see.
+///   rather than what you would type into it.
 /// - `all_sheets`: search every sheet, tagging each hit with its sheet index.
+///
+/// A wrapper over [`session_find_ex`]'s search, kept for callers of the older
+/// signature; there is one matcher.
 #[wasm_bindgen]
 pub fn session_find_opts(
     sheet: usize,
@@ -60,64 +62,38 @@ pub fn session_find_opts(
     all_sheets: bool,
     wildcards: bool,
 ) -> String {
+    let opts = crate::find::FindOptions {
+        match_case,
+        whole_cell,
+        look_in: if in_values {
+            crate::find::LookIn::Values
+        } else {
+            crate::find::LookIn::Formulas
+        },
+        all_sheets,
+        by_columns: false,
+        wildcards,
+        range: None,
+    };
     with_session(|s| {
-        let wb = s.workbook();
-        if query.is_empty() {
-            return "[]".to_owned();
-        }
-        let sheets: Vec<usize> = if all_sheets {
-            (0..wb.sheets.len()).collect()
-        } else {
-            vec![sheet]
-        };
-        // With wildcards on, `?` and `*` are pattern syntax. Excel matches the
-        // whole cell against the pattern, so a substring search wraps it in `*`
-        // rather than falling back to a literal `contains`.
-        let pattern = if wildcards && !whole_cell {
-            format!("*{query}*")
-        } else {
-            query.to_owned()
-        };
-        let matches = |haystack: &str| {
-            if wildcards {
-                return casual_calc_model::wildcard_match(&pattern, haystack, !match_case);
-            }
-            if whole_cell {
-                if match_case {
-                    haystack == query
-                } else {
-                    haystack.eq_ignore_ascii_case(query)
-                }
-            } else {
-                contains_ci(haystack, query, match_case)
-            }
-        };
-        let mut hits = Vec::new();
-        for idx in sheets {
-            let Some(sh) = wb.sheets.get(idx) else {
-                continue;
-            };
-            for (at, cell) in sh.cells.iter() {
-                let haystack = if in_values {
-                    display_text(wb, cell)
-                } else {
-                    cell_input_text(wb, cell, at)
-                };
-                if matches(&haystack) {
-                    hits.push(format!(
-                        "{{\"r\":{},\"c\":{},\"s\":{}}}",
-                        at.row, at.col, idx
-                    ));
-                }
-            }
-        }
+        let pattern = crate::find::Pattern::new(query, wildcards, match_case);
+        let hits: Vec<String> = crate::find::scan(s.workbook(), sheet, &pattern, &opts)
+            .into_iter()
+            .map(|h| {
+                format!(
+                    "{{\"r\":{},\"c\":{},\"s\":{}}}",
+                    h.at.row, h.at.col, h.sheet
+                )
+            })
+            .collect();
         format!("[{}]", hits.join(","))
     })
     .unwrap_or_else(|| "[]".to_owned())
 }
 
-/// Replace `find` with `replace` in every text cell, returning the count
-/// (one undo step). Only string cells are touched; formulas/numbers are left.
+/// Replace `find` with `replace` in every cell of one sheet, returning the
+/// count (one undo step). Literal text, substring match — the older signature,
+/// now a wrapper over [`session_replace_all_ex`].
 #[wasm_bindgen]
 pub fn session_replace_all(
     sheet: usize,
@@ -125,74 +101,13 @@ pub fn session_replace_all(
     replace: &str,
     match_case: bool,
 ) -> Result<usize, JsError> {
-    if find.is_empty() {
-        return Ok(0);
-    }
-    // Replace-all writes wherever it matched, so the block it must be allowed
-    // to write is the box around those matches — which is not known until the
-    // scan has run. So the scan runs first, under its own borrow, and the guard
-    // is applied between the two. `protection_blocks` borrows SESSION itself,
-    // and re-entering a borrow that is still open would panic; splitting the
-    // pass is what lets this reuse the real guard instead of re-deriving what
-    // "locked" means, which is the sort of second definition that drifts.
-    let scanned: Vec<(CellRef, String)> = SESSION.with(|cell| {
-        let mut guard = cell.borrow_mut();
-        let session = guard.as_mut().ok_or_else(|| JsError::new("no session"))?;
-        // Collect (cell, replaced-input) over the editable text of every cell —
-        // text, numbers, and formulas alike — so what Find matches, Replace
-        // rewrites.
-        let mut edits: Vec<(CellRef, String)> = Vec::new();
-        if let Some(sh) = session.workbook().sheets.get(sheet) {
-            let wb = session.workbook();
-            for (at, c) in sh.cells.iter() {
-                let input = cell_input_text(wb, c, at);
-                if !contains_ci(&input, find, match_case) {
-                    continue;
-                }
-                let replaced = if match_case {
-                    input.replace(find, replace)
-                } else {
-                    ci_replace(&input, find, replace)
-                };
-                edits.push((at, replaced));
-            }
-        }
-        Ok::<_, JsError>(edits)
-    })?;
-
-    if scanned.is_empty() {
-        return Ok(0);
-    }
-    let (mut r0, mut c0, mut r1, mut c1) = (u32::MAX, u32::MAX, 0u32, 0u32);
-    for (at, _) in &scanned {
-        r0 = r0.min(at.row);
-        c0 = c0.min(at.col);
-        r1 = r1.max(at.row);
-        c1 = c1.max(at.col);
-    }
-    guard_protected(sheet, r0, c0, r1, c1)?;
-
-    SESSION.with(|cell| {
-        let mut guard = cell.borrow_mut();
-        let session = guard.as_mut().ok_or_else(|| JsError::new("no session"))?;
-        let edits = scanned;
-        let count = edits.len();
-        // Re-parse each replaced input so numbers/formulas are re-typed, not
-        // frozen as text.
-        let ops: Vec<EditOperation> = edits
-            .into_iter()
-            .map(|(at, input)| session.input_edit(sheet, at, &input))
-            .collect();
-        if !ops.is_empty() {
-            session.edit(EditOperation::Batch(ops)).map_err(js)?;
-        }
-        Ok(count)
-    })
+    let opts = format!("{{\"matchCase\":{match_case},\"wildcards\":false}}");
+    session_replace_all_ex(sheet, find, replace, &opts)
 }
 
 /// Replace occurrences of `find` in a single cell's editable text, re-parsing
-/// the result (formula/number/text). Returns whether the cell changed. Used by
-/// the Find bar's one-at-a-time **Replace**.
+/// the result. Returns whether the cell changed. A wrapper over
+/// [`session_replace_at_ex`].
 #[wasm_bindgen]
 pub fn session_replace_at(
     sheet: usize,
@@ -202,33 +117,8 @@ pub fn session_replace_at(
     replace: &str,
     match_case: bool,
 ) -> Result<bool, JsError> {
-    guard_protected(sheet, row, col, row, col)?;
-    if find.is_empty() {
-        return Ok(false);
-    }
-    SESSION.with(|cell| {
-        let mut guard = cell.borrow_mut();
-        let session = guard.as_mut().ok_or_else(|| JsError::new("no session"))?;
-        let at = CellRef::new(row, col);
-        let input = {
-            let wb = session.workbook();
-            match wb.sheets.get(sheet).and_then(|s| s.cells.get(at)) {
-                Some(c) => cell_input_text(wb, c, at),
-                None => return Ok(false),
-            }
-        };
-        if !contains_ci(&input, find, match_case) {
-            return Ok(false);
-        }
-        let replaced = if match_case {
-            input.replace(find, replace)
-        } else {
-            ci_replace(&input, find, replace)
-        };
-        let op = session.input_edit(sheet, at, &replaced);
-        session.edit(op).map_err(js)?;
-        Ok(true)
-    })
+    let opts = format!("{{\"matchCase\":{match_case},\"wildcards\":false}}");
+    session_replace_at_ex(sheet, row, col, find, replace, &opts)
 }
 
 /// The data-edge cell reached by Ctrl+Arrow from `(row,col)` moving by

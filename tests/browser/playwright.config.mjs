@@ -261,6 +261,9 @@ if (startsServers) {
 
 export default defineConfig({
   testDir: ".",
+  // The package install gate has its own configuration and its own server: it
+  // must not see `webapp/` at all (`sdk-install/playwright.config.mjs`).
+  testIgnore: "sdk-install/**",
   // The editor boots a WebAssembly module and paints a canvas; a CI runner
   // under load is slower at both than any laptop.
   timeout: 60_000,

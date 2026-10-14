@@ -96,14 +96,14 @@ test("Ctrl+Shift+F opens Format cells rather than the find bar", async ({ page }
   await page.keyboard.press("Control+Shift+f");
   await expect(page.locator("#oc-modal")).toBeVisible();
   await expect(page.locator("#oc-modal-title")).toHaveText("Format Cells");
-  await expect(page.locator("#find-bar")).toBeHidden();
+  await expect(page.locator("#oc-fr-what")).toHaveCount(0);
 });
 
-test("Ctrl+F still opens the find bar", async ({ page }) => {
+test("Ctrl+F still opens Find and Replace", async ({ page }) => {
   await boot(page);
   await page.keyboard.press("Control+f");
-  await expect(page.locator("#find-bar")).toBeVisible();
-  await expect(page.locator("#find-input")).toBeFocused();
+  await expect(page.locator("#oc-modal-title")).toHaveText("Find and Replace");
+  await expect(page.locator("#oc-fr-what")).toBeFocused();
 });
 
 // --- Ctrl+Shift+O — select the cells carrying notes ------------------------
@@ -334,7 +334,7 @@ const observe = (page) => page.evaluate(() => {
   }
   return [
     document.activeElement ? document.activeElement.id || document.activeElement.tagName : "",
-    vis("#find-bar"), vis("#oc-modal"), vis("#inline-edit"),
+    vis(".oc-fr"), vis("#oc-modal"), vis("#inline-edit"),
     document.querySelector("#oc-modal-title").textContent,
     document.querySelector(".formula-bar").className,
     document.querySelector("#cell-ref").value,
@@ -380,8 +380,6 @@ test("every chord the shortcuts panel advertises does something", async ({ page 
       for (const m of document.querySelectorAll(".popmenu")) m.hidden = true;
       const bar = document.querySelector(".formula-bar");
       bar.classList.remove("expanded");
-      const fb = document.querySelector("#find-bar");
-      if (!fb.hidden) document.querySelector("#find-close").click();
       window.opencalcEditor.selectForTest(2, 2);
     });
     await page.locator("#grid").focus();
