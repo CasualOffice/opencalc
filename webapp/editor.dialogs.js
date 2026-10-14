@@ -3605,7 +3605,7 @@ export function goToSpecialDialog() {
 /// and a `close()` that tears the wiring down. One place for the plumbing every
 /// dialog here used to repeat, so a dialog cannot forget a listener and leave
 /// it catching keys after it has gone.
-function modalFrame(title, { onEnter, onCancel, onKey } = {}) {
+export function modalFrame(title, { onEnter, onCancel, onKey } = {}) {
   const modal = byId("oc-modal");
   const body = byId("oc-modal-body");
   byId("oc-modal-title").textContent = title;

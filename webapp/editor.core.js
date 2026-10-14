@@ -75,6 +75,7 @@ import {
   openNameManager,
   nameDialog,
   protectSheetCommand,
+  modalFrame,
   openValidationMenu,
   panelActions,
   panelLabel,
@@ -493,6 +494,7 @@ export {
   openNameManager,
   nameDialog,
   protectSheetCommand,
+  modalFrame,
   openValidationMenu,
   panelActions,
   panelLabel,
@@ -6941,62 +6943,244 @@ function registerShellCommands() {
   R("edit.go-to-special", { label: "Go To Special…", run: () => goToSpecialDialog() });
 }
 
-function insertFunctionDialog() {
-  if (!fnCatalog) { try { fnCatalog = JSON.parse(wasm.function_catalog()); } catch { fnCatalog = []; } }
-  const modal = byId("oc-modal");
-  const body = byId("oc-modal-body");
-  byId("oc-modal-title").textContent = "Insert function";
-  body.textContent = "";
+// ---- Insert Function / Function Arguments (Shift+F3, XL-UX-026/027) ---------
 
-  const search = el("input", "panel-field");
-  search.placeholder = "Search functions";
+/// Excel's own Most Recently Used list on a fresh install; functions used here
+/// go to its top, for the session.
+const fnRecent = ["SUM", "AVERAGE", "IF", "HYPERLINK", "COUNT", "MAX", "SIN", "SUMIF", "PMT", "STDEV"];
+let fnInfo = null;
+let fnCategories = null;
+
+/// The catalogue, loaded on first use: 150 KB of descriptions nobody needs
+/// until the dialog opens.
+async function loadFnInfo() {
+  if (!fnInfo) ({ FN_INFO: fnInfo, FN_CATEGORIES: fnCategories } = await import("./fn-info.js"));
+  if (!fnCatalog) { try { fnCatalog = JSON.parse(wasm.function_catalog()); } catch { fnCatalog = []; } }
+}
+
+/// Only what the engine implements, with its Excel metadata.
+function implementedFns() {
+  return (fnCatalog || []).map((f) => f.n).filter((n) => fnInfo[n]);
+}
+
+/// Excel's syntax line: `VLOOKUP(lookup_value,table_array,col_index_num,range_lookup)`.
+function fnSyntax(name) {
+  const [, , args, rep] = fnInfo[name];
+  const names = args.map(([a]) => a.replace(/^\[|\]$/g, "").toLowerCase());
+  return `${name}(${names.join(",")}${rep ? ",..." : ""})`;
+}
+
+/// Excel's Insert Function dialog.
+export async function insertFunctionDialog() {
+  await loadFnInfo();
+  const frame = modalFrame("Insert Function", {
+    onEnter: () => (document.activeElement === search ? go() : apply()),
+  });
+  const { body } = frame;
+  const form = el("div", "oc-fn");
+  const searchLabel = el("label", "oc-form-label", "Search for a function:");
+  searchLabel.htmlFor = "oc-fn-search";
+  const searchRow = el("div", "oc-fn-search-row");
+  const search = el("input", "oc-form-field");
+  search.id = "oc-fn-search";
+  search.type = "text";
   search.spellcheck = false;
-  const list = el("div", "fn-list");
-  const detail = el("div", "panel-hint");
-  body.append(search, list, detail);
+  search.placeholder = "Type a brief description of what you want to do and then click Go";
+  const goBtn = el("button", "oc-btn", "Go");
+  goBtn.id = "oc-fn-go";
+  searchRow.append(search, goBtn);
+  const catLabel = el("label", "oc-form-label", "Or select a category:");
+  catLabel.htmlFor = "oc-fn-cat";
+  const cat = document.createElement("select");
+  cat.id = "oc-fn-cat";
+  for (const c of fnCategories) {
+    const o = document.createElement("option");
+    o.value = c; o.textContent = c;
+    cat.appendChild(o);
+  }
+  const listLabel = el("div", "oc-form-label", "Select a function:");
+  const list = el("div", "fn-list oc-fn-list");
+  list.id = "oc-fn-list";
+  list.setAttribute("role", "listbox");
+  list.setAttribute("aria-label", "Select a function");
+  const syntax = el("div", "oc-fn-syntax");
+  syntax.id = "oc-fn-syntax";
+  const desc = el("div", "oc-fn-desc");
+  desc.id = "oc-fn-desc";
+  form.append(searchLabel, searchRow, catLabel, cat, listLabel, list, syntax, desc);
+  const actions = el("div", "oc-confirm-actions");
+  const ok = el("button", "oc-btn primary", "OK");
+  const cancel = el("button", "oc-btn", "Cancel");
+  actions.append(ok, cancel);
+  body.append(form, actions);
 
   let chosen = null;
-  const render = () => {
-    const q = search.value.trim().toUpperCase();
-    const items = (fnCatalog || []).filter((f) => !q || f.n.includes(q)).slice(0, 200);
-    list.textContent = "";
-    for (const f of items) {
-      const b = el("button", "fn-row", f.n);
-      b.addEventListener("click", () => {
-        chosen = f;
-        list.querySelectorAll(".fn-row").forEach((x) => x.classList.remove("on"));
-        b.classList.add("on");
-        detail.textContent = `${f.sig || f.n + "(…)"}${f.d ? " — " + f.d : ""}`;
-      });
-      b.addEventListener("dblclick", () => { chosen = f; ok.click(); });
-      list.appendChild(b);
-    }
-    if (!items.length) list.appendChild(el("div", "panel-hint", "No matching function"));
+  const pick = (name, row) => {
+    chosen = name;
+    list.querySelectorAll(".fn-row").forEach((r) => { r.classList.toggle("on", r === row); r.setAttribute("aria-selected", String(r === row)); });
+    syntax.textContent = fnSyntax(name);
+    desc.textContent = fnInfo[name][1];
   };
-  search.addEventListener("input", render);
-  render();
+  const show = (names) => {
+    list.textContent = "";
+    for (const n of names) {
+      const row = el("button", "fn-row", n);
+      row.type = "button";
+      row.setAttribute("role", "option");
+      row.addEventListener("click", () => pick(n, row));
+      row.addEventListener("dblclick", () => { pick(n, row); apply(); });
+      list.appendChild(row);
+    }
+    const first = list.querySelector(".fn-row");
+    if (first) pick(names[0], first);
+    else { chosen = null; syntax.textContent = ""; desc.textContent = ""; }
+  };
+  const byCategory = () => {
+    const all = implementedFns();
+    if (cat.value === "Most Recently Used") show(fnRecent.filter((n) => fnInfo[n] && all.includes(n)));
+    else if (cat.value === "All") show(all);
+    else if (cat.value === "Recommended") go();
+    else show(all.filter((n) => fnInfo[n][0] === cat.value));
+  };
+  /// Go: every word of the search must appear in the name or the description,
+  /// name matches first — Excel's "Recommended".
+  function go() {
+    const words = search.value.toLowerCase().split(/\s+/).filter(Boolean);
+    if (!words.length) return;
+    if (!cat.querySelector('option[value="Recommended"]')) {
+      const o = document.createElement("option");
+      o.value = "Recommended"; o.textContent = "Recommended";
+      cat.prepend(o);
+    }
+    cat.value = "Recommended";
+    const hits = implementedFns().filter((n) => {
+      const text = `${n} ${fnInfo[n][1]}`.toLowerCase();
+      return words.every((w) => text.includes(w));
+    });
+    const named = (n) => words.some((w) => n.toLowerCase().includes(w));
+    show([...hits.filter(named), ...hits.filter((n) => !named(n))]);
+  }
+  goBtn.addEventListener("click", go);
+  cat.addEventListener("change", byCategory);
+  byCategory();
 
-  const actions = el("div", "oc-confirm-actions");
-  const cancel = el("button", "oc-btn", "Cancel");
-  const ok = el("button", "oc-btn primary", "Insert");
-  actions.append(ok, cancel);
-  body.appendChild(actions);
-  modal.hidden = false;
-
-  const close = () => { modal.hidden = true; body.textContent = ""; };
-  cancel.addEventListener("click", () => { close(); canvas.focus(); });
-  ok.addEventListener("click", () => {
-    const f = chosen || (fnCatalog || [])[0];
-    close();
-    if (!f) { canvas.focus(); return; }
-    // Open an edit on the active cell and drop the call in with the caret
-    // between the parentheses, ready for arguments.
-    beginEdit(inline, "=" + f.n + "()");
-    const at = inline.value.length - 1;
-    inline.setSelectionRange(at, at);
-    updateRefSpans();
-  });
+  function apply() {
+    if (!chosen) return;
+    const name = chosen;
+    frame.close();
+    const at = fnRecent.indexOf(name);
+    if (at >= 0) fnRecent.splice(at, 1);
+    fnRecent.unshift(name);
+    fnRecent.length = Math.min(fnRecent.length, 10);
+    functionArgumentsDialog(name);
+  }
+  ok.addEventListener("click", apply);
+  cancel.addEventListener("click", () => { frame.close(); (editSurface ?? canvas).focus(); });
   search.focus();
+}
+
+/// Excel's Function Arguments: a box per argument with its live value, the
+/// function's and the focused argument's description, the formula result, and
+/// OK writing the call — into the edit at the caret when one is open, else as
+/// the active cell's formula.
+function functionArgumentsDialog(name) {
+  const [, fdesc, args, rep] = fnInfo[name];
+  const sheet = state.sheet;
+  const frame = modalFrame("Function Arguments", { onEnter: () => apply() });
+  const { body } = frame;
+  const form = el("div", "oc-fa");
+  const head = el("div", "oc-fa-fn", name);
+  const rowsEl = el("div", "oc-fa-rows");
+  const adesc = el("div", "oc-fa-adesc");
+  adesc.id = "oc-fa-adesc";
+  const fdescEl = el("div", "oc-fa-fdesc", fdesc);
+  fdescEl.id = "oc-fa-fdesc";
+  const result = el("div", "oc-fa-result");
+  result.id = "oc-fa-result";
+  form.append(head, rowsEl, fdescEl, adesc, result);
+  const actions = el("div", "oc-confirm-actions");
+  const ok = el("button", "oc-btn primary", "OK");
+  const cancel = el("button", "oc-btn", "Cancel");
+  actions.append(ok, cancel);
+  body.append(form, actions);
+
+  // The fixed arguments, then the repeating group's instances.
+  const fixed = args.length - rep;
+  const specs = args.map(([n, d]) => ({ name: n.replace(/^\[|\]$/g, ""), optional: n.startsWith("["), desc: d }));
+  const inputs = [];
+  /// The spec for box `i`: past the written ones, the repeating group again
+  /// with its trailing numbers moved on.
+  const specAt = (i) => {
+    if (i < specs.length) return specs[i];
+    const k = (i - fixed) % rep;
+    const base = specs[fixed + k];
+    const step = Math.floor((i - fixed) / rep);
+    return { ...base, optional: true, name: base.name.replace(/(\d+)$/, (m) => String(Number(m) + step)) };
+  };
+  const addRow = (i) => {
+    const s = specAt(i);
+    const row = el("div", "oc-fa-row");
+    const label = el("label", "oc-fa-name" + (s.optional ? "" : " required"), s.name);
+    const input = el("input", "oc-form-field mono oc-fa-input");
+    input.type = "text";
+    input.id = `oc-fa-arg-${i}`;
+    input.spellcheck = false;
+    input.autocomplete = "off";
+    label.htmlFor = input.id;
+    const value = el("span", "oc-fa-value");
+    row.append(label, input, value);
+    rowsEl.appendChild(row);
+    input.addEventListener("focus", () => { adesc.textContent = ""; adesc.append(el("b", null, `${s.name}: `), document.createTextNode(s.desc)); });
+    input.addEventListener("input", refresh);
+    inputs.push({ input, value });
+  };
+  for (let i = 0; i < specs.length; i++) addRow(i);
+
+  const formula = () => {
+    const vals = inputs.map((x) => x.input.value.trim());
+    while (vals.length && !vals[vals.length - 1]) vals.pop();
+    return `${name}(${vals.join(",")})`;
+  };
+  function refresh() {
+    // A repeating argument grows a box once its last box is filled.
+    if (rep && inputs.length >= specs.length && inputs[inputs.length - 1].input.value.trim() && inputs.length < 255) {
+      for (let k = 0; k < rep; k++) addRow(inputs.length);
+    }
+    for (const { input, value } of inputs) {
+      const t = input.value.trim();
+      let v = "";
+      if (t) { try { v = wasm.session_evaluate(sheet, t); } catch {} }
+      value.textContent = v ? `= ${v}` : "";
+    }
+    const required = inputs.every(({ input }, i) => specAt(i).optional || input.value.trim());
+    let r = "";
+    if (required) { try { r = wasm.session_evaluate(sheet, formula()); } catch {} }
+    result.textContent = `Formula result = ${r.replace(/^"|"$/g, "")}`;
+  }
+  refresh();
+
+  const editing = editSurface;
+  function apply() {
+    const call = formula();
+    frame.close();
+    if (editing && editing.isConnected) {
+      // Into the edit at the caret, as Excel's fx does mid-formula.
+      const v = editing.value;
+      const at = editing.selectionStart ?? v.length;
+      const pre = v.slice(0, at) || "=";
+      editing.value = pre + call + v.slice(editing.selectionEnd ?? at);
+      editing.focus();
+      const caret = (pre + call).length;
+      editing.setSelectionRange(caret, caret);
+      updateRefSpans();
+      return;
+    }
+    commit("=" + call, false);
+    canvas.focus();
+  }
+  ok.addEventListener("click", apply);
+  cancel.addEventListener("click", () => { frame.close(); (editing ?? canvas).focus(); });
+  inputs[0]?.input.focus();
 }
 
 // A caret on the Name Box listing the workbook's defined names. They are
@@ -8808,6 +8992,10 @@ function wireEvents() {
         else if (e.altKey) refreshPivotHere();
         else goToDialog();
         e.preventDefault();
+        break;
+      // Shift+F3 is Insert Function (XL-UX-026); Ctrl+F3 is above.
+      case "F3":
+        if (e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey) { insertFunctionDialog(); e.preventDefault(); }
         break;
       // F9 recalculates, F11 (Shift) adds a sheet — both Excel's.
       case "F9":

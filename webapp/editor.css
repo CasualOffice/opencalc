@@ -2566,3 +2566,26 @@ html, .editor-body { overscroll-behavior: none; }
   border: 1px solid var(--oc-control-border-color); border-radius: 6px; background: var(--oc-background-color);
 }
 .oc-prot-note { margin: 4px 0 0; font-size: 12px; line-height: 1.45; color: var(--oc-muted-text-color); }
+/* Insert Function / Function Arguments (XL-UX-026/027). */
+.oc-modal-box:has(.oc-fn), .oc-modal-box:has(.oc-fa) { width: min(92vw, 560px); }
+.oc-fn { display: flex; flex-direction: column; gap: 6px; }
+.oc-fn-search-row { display: flex; gap: 8px; }
+.oc-fn-search-row .oc-form-field { flex: 1; min-width: 0; }
+.oc-fn-search-row .oc-btn { min-width: 64px; }
+.oc-fn #oc-fn-cat { width: 60%; }
+.oc-fn-list {
+  height: 168px; max-height: none; margin: 0; padding: 2px;
+  border: 1px solid var(--oc-control-border-color); border-radius: 6px;
+}
+.oc-fn-syntax { margin-top: 6px; font-weight: 600; font-size: 13px; overflow-wrap: anywhere; }
+.oc-fn-desc { min-height: 2.9em; font-size: 12px; line-height: 1.45; color: var(--oc-text-color); }
+.oc-fa { display: flex; flex-direction: column; gap: 8px; }
+.oc-fa-fn { font-weight: 600; font-size: 13px; }
+.oc-fa-rows { display: flex; flex-direction: column; gap: 6px; max-height: 210px; overflow-y: auto; padding: 2px; }
+.oc-fa-row { display: grid; grid-template-columns: 120px minmax(0, 1fr) 130px; gap: 8px; align-items: center; }
+.oc-fa-name { font-size: 12px; text-align: right; color: var(--oc-text-color); overflow: hidden; text-overflow: ellipsis; }
+.oc-fa-name.required { font-weight: 600; }
+.oc-fa-value { font-size: 12px; font-family: var(--oc-mono-font-family); color: var(--oc-muted-text-color); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.oc-fa-fdesc { font-size: 12px; line-height: 1.45; }
+.oc-fa-adesc { min-height: 2.9em; font-size: 12px; line-height: 1.45; color: var(--oc-muted-text-color); }
+.oc-fa-result { font-size: 13px; padding-top: 6px; border-top: 1px solid var(--oc-border-color); }
