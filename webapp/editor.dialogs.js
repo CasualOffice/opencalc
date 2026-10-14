@@ -2588,9 +2588,11 @@ export function refreshValidationPrompt() {
   if (p.text) box.appendChild(el("span", null, p.text));
   const x = colXAt(state.sel.col), y = rowYAt(state.sel.row);
   if (x === undefined || y === undefined) { box.hidden = true; return; }
+  // Grid geometry is unzoomed canvas units; the screen is zoomed (XL-UX-148).
   const rect = canvas.getBoundingClientRect();
-  box.style.left = `${rect.left + x}px`;
-  box.style.top = `${rect.top + y + rowHAt(state.sel.row) + 4}px`;
+  const z = state.zoom || 1;
+  box.style.left = `${rect.left + x * z}px`;
+  box.style.top = `${rect.top + (y + rowHAt(state.sel.row)) * z + 4}px`;
   box.hidden = false;
 }
 
