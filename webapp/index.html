@@ -3,555 +3,829 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>OpenCalc — a spreadsheet engine you can put anywhere</title>
-    <meta name="description" content="OpenCalc reads and writes real .xlsx, keeps the workbook in a normalized editable model, recalculates it, and renders a virtualized grid — the same Rust core on the desktop, in the browser via WebAssembly, and headless on a server." />
-    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%232f6df6'/%3E%3Cg fill='none' stroke='%23fff' stroke-width='2.4'%3E%3Crect x='7' y='7' width='18' height='18' rx='2'/%3E%3Cpath d='M7 13h18M13 7v18'/%3E%3C/g%3E%3C/svg%3E" />
-    <link rel="stylesheet" href="./style.css?v=6" />
+    <title>OpenCalc — the open-source, Excel-compatible spreadsheet</title>
+    <meta name="description" content="OpenCalc is an open-source, Excel-compatible spreadsheet: it opens and saves .xlsx, .xlsm, .ods and CSV without silently dropping anything, keeps the ribbon and shortcuts you know, and runs in the browser, on the desktop, inside your product and under AI agents." />
+    <meta name="theme-color" content="#0e7a55" />
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230e7a55'/%3E%3Cg fill='none' stroke='%23fff' stroke-width='2.4'%3E%3Crect x='7' y='7' width='18' height='18' rx='2'/%3E%3Cpath d='M7 13h18M13 7v18'/%3E%3C/g%3E%3C/svg%3E" />
+    <link rel="preload" href="./fonts/inter-latin-400-700.woff2" as="font" type="font/woff2" crossorigin />
+    <link rel="stylesheet" href="./style.css?v=7" />
+    <script src="./site.js" defer></script>
   </head>
   <body>
-    <!-- Nav -->
-    <header class="nav">
-      <div class="wrap nav-inner">
-        <a class="brand" href="#top" aria-label="OpenCalc home">
-          <span class="logo" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18M9 3v18"/></svg></span>
+    <a class="skip" href="#main">Skip to content</a>
+
+    <header class="site-header">
+      <div class="wrap">
+        <a class="brand" href="./index.html" aria-label="OpenCalc home">
+          <svg class="mark" viewBox="0 0 32 32" aria-hidden="true" focusable="false"><rect class="m-bg" width="32" height="32" rx="7"/><rect class="m-ln" x="7.5" y="7.5" width="17" height="17" rx="2"/><path class="m-ln" d="M7.5 13.5h17M13.5 7.5v17"/></svg>
           OpenCalc
         </a>
         <nav class="nav-links">
-          <a href="#product">Product</a>
-          <a href="#today">What works</a>
-          <a href="#choose">Which one</a>
-          <a href="#engine">Engine</a>
-          <a href="#embed">Embed</a>
-          <a href="#roadmap">Roadmap</a>
-          <a href="./docs.html">SDK docs</a>
-          <a href="./download.html">Download</a>
+          <a href="#product">Features</a>
+          <a href="./docs.html">Docs</a>
+          <a href="./embed.html">Embed demo</a>
           <a href="./deploy.html">Self-host</a>
+          <a href="./download.html">Download</a>
           <a href="https://github.com/CasualOffice/opencalc">GitHub</a>
-          <a class="btn btn-ink btn-sm" href="./editor.html">Open the editor</a>
         </nav>
+        <div class="header-actions">
+          <a class="btn btn-primary btn-sm" href="./editor.html"><span class="btn-cta-label">Open the editor</span><span class="sr-only"> (OpenCalc in your browser)</span><svg viewBox="0 0 20 20" aria-hidden="true" focusable="false"><path fill="currentColor" d="M11.3 4.3a1 1 0 0 1 1.4 0l5 5a1 1 0 0 1 0 1.4l-5 5a1 1 0 0 1-1.4-1.4L14.6 11H3a1 1 0 1 1 0-2h11.6l-3.3-3.3a1 1 0 0 1 0-1.4Z"/></svg></a>
+          <details class="menu">
+            <summary aria-label="Menu"><svg viewBox="0 0 20 20" aria-hidden="true" focusable="false"><path fill="currentColor" d="M3 5.5a.75.75 0 0 1 .75-.75h12.5a.75.75 0 0 1 0 1.5H3.75A.75.75 0 0 1 3 5.5Zm0 4.5a.75.75 0 0 1 .75-.75h12.5a.75.75 0 0 1 0 1.5H3.75A.75.75 0 0 1 3 10Zm.75 3.75a.75.75 0 0 0 0 1.5h12.5a.75.75 0 0 0 0-1.5H3.75Z"/></svg></summary>
+            <nav class="menu-panel" aria-label="Main (mobile)">
+              <a href="#product">Features</a>
+              <a href="./docs.html">Docs</a>
+              <a href="./embed.html">Embed demo</a>
+              <a href="./deploy.html">Self-host</a>
+              <a href="./download.html">Download</a>
+              <a href="https://github.com/CasualOffice/opencalc">GitHub</a>
+              <a href="./editor.html">Open the editor</a>
+            </nav>
+          </details>
+        </div>
       </div>
     </header>
 
-    <!-- Hero -->
-    <section id="top" class="hero">
-      <div class="wrap">
-        <div class="hero-copy">
-          <span class="pill"><span class="dot"></span>Alpha · the engine and editor are live</span>
-          <h1>A spreadsheet engine<br />you can put anywhere.</h1>
-          <p class="lede">
-            OpenCalc reads and writes real <code>.xlsx</code>, keeps the workbook in a
-            normalized editable model, recalculates it, and renders a virtualized grid —
-            the same Rust core on the desktop, in the browser through WebAssembly, and
-            headless on a server.
-          </p>
-          <div class="cta">
-            <a class="btn btn-ink btn-lg" href="./editor.html">Open the editor</a>
-            <a class="btn btn-lg btn-quiet" href="./download.html">Download for desktop</a>
-            <a class="btn btn-outline btn-lg" href="#engine">Read the architecture</a>
-            <a class="btn btn-outline btn-lg" href="https://github.com/CasualOffice/opencalc">
-              <svg viewBox="0 0 24 24" width="17" height="17" fill="currentColor" aria-hidden="true"><path d="M12 .5a12 12 0 0 0-3.8 23.4c.6.1.8-.3.8-.6v-2c-3.3.7-4-1.6-4-1.6-.6-1.4-1.3-1.8-1.3-1.8-1.1-.7 0-.7 0-.7 1.2 0 1.8 1.2 1.8 1.2 1.1 1.8 2.8 1.3 3.5 1 .1-.8.4-1.3.7-1.6-2.7-.3-5.5-1.3-5.5-5.9 0-1.3.5-2.4 1.2-3.2 0-.4-.5-1.6.2-3.3 0 0 1-.3 3.3 1.2a11.5 11.5 0 0 1 6 0C17.3 5 18.3 5.3 18.3 5.3c.7 1.7.2 2.9.1 3.3.8.8 1.2 1.9 1.2 3.2 0 4.6-2.8 5.6-5.5 5.9.4.4.8 1.1.8 2.2v3.3c0 .3.2.7.8.6A12 12 0 0 0 12 .5Z"/></svg>
-              GitHub
-            </a>
+    <main id="main">
+      <!-- ── Hero ──────────────────────────────────────────────────────────── -->
+      <section id="top" class="hero" aria-labelledby="hero-h">
+        <div class="wrap">
+          <div class="hero-grid">
+            <div class="hero-copy">
+              <p class="eyebrow">Open source · Apache-2.0 · Alpha</p>
+              <h1 id="hero-h">Spreadsheets, the way you <span class="cellsel">already work</span>.</h1>
+              <p class="lede">
+                OpenCalc is an open-source, Excel-compatible spreadsheet. It opens your
+                <code>.xlsx</code> files without quietly losing anything, keeps the ribbon
+                and the shortcuts your hands already know, and runs in your browser, on
+                your desktop, inside your own product — and under your AI agents.
+              </p>
+              <div class="cta-row">
+                <a class="btn btn-primary btn-lg" href="./editor.html">Open the editor</a>
+                <a class="btn btn-secondary btn-lg" href="./download.html">Download for desktop</a>
+                <a class="btn btn-quiet btn-lg link-arrow" href="./docs.html">Read the docs <span class="arr" aria-hidden="true">→</span></a>
+              </div>
+              <p class="hero-note">
+                <span><svg viewBox="0 0 20 20" aria-hidden="true" focusable="false"><use href="./icons.fluent.svg#fi-lock_closed"/></svg>No sign-up, nothing uploaded</span>
+                <span><svg viewBox="0 0 20 20" aria-hidden="true" focusable="false"><use href="./icons.fluent.svg#fi-checkmark"/></svg>The engine runs on your machine</span>
+              </p>
+            </div>
+
+            <figure class="story s0 s1 s2 s3 s4" data-story aria-labelledby="story-cap">
+              <figcaption id="story-cap" class="sr-only">
+                An animated spreadsheet: quarterly figures are typed in, totals
+                calculate, a SORTBY formula spills a ranked list, a collaborator
+                named Ana changes one value and everything that depends on it
+                recalculates — the ranking reorders — and the file is saved as
+                .xlsx with nothing dropped.
+              </figcaption>
+              <div class="story-stage" aria-hidden="true">
+                <div class="ss-win">
+                  <div class="ss-title">
+                    <svg class="mark" viewBox="0 0 32 32" focusable="false"><rect class="m-bg" width="32" height="32" rx="7"/><rect class="m-ln" x="7.5" y="7.5" width="17" height="17" rx="2"/><path class="m-ln" d="M7.5 13.5h17M13.5 7.5v17"/></svg>
+                    <span class="ss-doc">Q3 budget.xlsx</span>
+                    <span class="ss-presence"><span class="who">Ana is editing C5</span><span class="av av-me">Me</span><span class="av av-ana">A</span></span>
+                  </div>
+                  <div class="ss-fx">
+                    <span class="ss-nb"><span class="n0">B5</span><span class="n1">B6</span><span class="n2">E2</span></span>
+                    <span class="ss-fxl">fx</span>
+                    <span class="ss-f"><span class="f0">870<i class="mask"></i></span><span class="f1">=<span class="fn">SUM</span>(<span class="rg">B2:B5</span>)<i class="mask"></i></span><span class="f2">=<span class="fn">SORTBY</span>(<span class="rg">A2:A5</span>, <span class="rg">D2:D5</span>, -1)<i class="mask"></i></span></span>
+                  </div>
+                  <div class="ss-grid">
+                    <span class="h"></span><span class="h">A</span><span class="h">B</span><span class="h">C</span><span class="h">D</span><span class="h col-e">E</span>
+
+                    <span class="h r">1</span><span class="lbl">Region</span><span class="lbl n">Q1</span><span class="lbl n">Q2</span><span class="lbl n">Total</span><span class="lbl">By total</span>
+
+                    <span class="h r">2</span>
+                    <span><span class="v c0" style="--d:0">North</span></span>
+                    <span class="n"><span class="v c0" style="--d:1">1,240</span></span>
+                    <span class="n"><span class="v c0" style="--d:2">1,410</span></span>
+                    <span class="n fl fl1"><span class="v c1" style="--d:0">2,650</span></span>
+                    <span class="sel sel2"><span class="v c2" style="--d:0">East</span><i class="spill"></i></span>
+
+                    <span class="h r">3</span>
+                    <span><span class="v c0" style="--d:3">South</span></span>
+                    <span class="n"><span class="v c0" style="--d:4">980</span></span>
+                    <span class="n"><span class="v c0" style="--d:5">1,120</span></span>
+                    <span class="n"><span class="v c1" style="--d:1">2,100</span></span>
+                    <span><span class="v c2" style="--d:1">North</span></span>
+
+                    <span class="h r">4</span>
+                    <span><span class="v c0" style="--d:6">East</span></span>
+                    <span class="n"><span class="v c0" style="--d:7">1,560</span></span>
+                    <span class="n"><span class="v c0" style="--d:8">1,690</span></span>
+                    <span class="n"><span class="v c1" style="--d:2">3,250</span></span>
+                    <span class="fl fl3"><span class="v c2" style="--d:2"><span class="old">South</span><span class="new">West</span></span></span>
+
+                    <span class="h r">5</span>
+                    <span><span class="v c0" style="--d:9">West</span></span>
+                    <span class="n sel sel0"><span class="v c0" style="--d:10">870</span></span>
+                    <span class="n ana fl fl3"><span class="v c0" style="--d:11"><span class="old">1,020</span><span class="new">1,520</span></span><i class="ss-cursor"><svg viewBox="0 0 16 16" focusable="false"><path class="ptr" d="M2 1.5 13 7l-4.7 1.3L6 13Z"/></svg><b>Ana</b></i></span>
+                    <span class="n fl fl3"><span class="v c1" style="--d:3"><span class="old">1,890</span><span class="new">2,390</span></span></span>
+                    <span class="fl fl3"><span class="v c2" style="--d:3"><span class="old">West</span><span class="new">South</span></span></span>
+
+                    <span class="h r">6</span>
+                    <span class="b"><span class="v c1" style="--d:4">Total</span></span>
+                    <span class="n b sel sel1 fl fl1"><span class="v c1" style="--d:5">4,650</span></span>
+                    <span class="n b fl fl1 fl3"><span class="v c1" style="--d:6"><span class="old">5,240</span><span class="new">5,740</span></span></span>
+                    <span class="n b fl fl1 fl3"><span class="v c1" style="--d:7"><span class="old">9,890</span><span class="new">10,390</span></span></span>
+                    <span></span>
+                  </div>
+                </div>
+                <div class="ss-fmts"><i>.xlsx</i><i>.ods</i><i>.csv</i></div>
+                <div class="ss-save">
+                  <span class="ok"><svg viewBox="0 0 20 20" focusable="false"><path fill="currentColor" d="M15.8 5.3a1 1 0 0 1 0 1.4l-7.5 7.5a1 1 0 0 1-1.4 0L3.2 10.5a1 1 0 1 1 1.4-1.4l3 3 6.8-6.8a1 1 0 0 1 1.4 0Z"/></svg></span>
+                  <span><b>Saved as .xlsx</b> <span>· nothing dropped</span></span>
+                </div>
+              </div>
+              <div class="story-bar">
+                <ol class="story-steps">
+                  <li class="k0">Type</li><li class="k1">Calculate</li><li class="k2">Spill</li><li class="k3">Co-edit</li><li class="k4">Save</li>
+                </ol>
+                <button class="story-toggle" type="button" aria-pressed="false" hidden><svg viewBox="0 0 20 20" aria-hidden="true" focusable="false"><path fill="currentColor" d="M6 4.5a1 1 0 0 1 1 1v9a1 1 0 1 1-2 0v-9a1 1 0 0 1 1-1Zm8 0a1 1 0 0 1 1 1v9a1 1 0 1 1-2 0v-9a1 1 0 0 1 1-1Z"/></svg><span>Pause</span><span class="sr-only"> the animation</span></button>
+              </div>
+            </figure>
           </div>
-          <p class="hero-note">Nothing is uploaded — the engine runs on your machine. Apache-2.0.</p>
-        </div>
 
-        <!-- Live product embed -->
-        <div class="window">
-          <div class="window-bar">
-            <span class="wdot"></span><span class="wdot"></span><span class="wdot"></span>
-            <span class="window-title">OpenCalc — running in this page, client-side</span>
+          <div class="proof">
+            <div class="rv" style="--i:0"><b data-count="347">347</b><span>worksheet functions, with dynamic arrays and LAMBDA</span></div>
+            <div class="rv" style="--i:1"><b data-count="6">6</b><span>file formats it opens: .xlsx .xlsm .ods .csv .tsv .psv</span></div>
+            <div class="rv" style="--i:2"><b>0</b><span>things dropped silently — what isn't modelled is kept or named</span></div>
+            <div class="rv" style="--i:3"><b>1M<small>+</small></b><span>cells: the capacity the grid is built for, at 60 fps</span></div>
           </div>
-          <!-- `?mode=standalone` because this is a demo of the full editor, and a
-               frame that says nothing is now an embed (`UX-EMBED-02`) — which
-               would hide the branding strip and the downloads this is showing off. -->
-          <iframe src="./editor.html?mode=standalone" title="OpenCalc editor" loading="lazy"></iframe>
         </div>
+      </section>
 
-        <!-- Stat strip -->
-        <div class="stats">
-          <div class="stat"><b>347</b><span>worksheet functions</span></div>
-          <div class="stat"><b>.xlsx</b><span>semantic round-trip, gated</span></div>
-          <div class="stat"><b>1M+</b><span>cell capacity target</span></div>
-          <div class="stat"><b>60 fps</b><span>virtualized scrolling</span></div>
-          <div class="stat"><b>0</b><span>network calls</span></div>
+      <!-- ── Live product ──────────────────────────────────────────────────── -->
+      <section id="preview" class="section" aria-labelledby="preview-h">
+        <div class="wrap">
+          <div class="section-head split">
+            <div>
+              <p class="eyebrow"><span class="num">01</span> The product, not a mock-up</p>
+              <h2 id="preview-h">It's running right here. Click in and type.</h2>
+            </div>
+            <p>This is the real editor — the same ribbon, formula bar and grid you get at <a href="./editor.html">editor.html</a> — calculating in this page with WebAssembly. Nothing you type leaves your browser.</p>
+          </div>
+          <div class="window rv">
+            <div class="window-bar">
+              <span class="wdot"></span><span class="wdot"></span><span class="wdot"></span>
+              <span class="window-title">OpenCalc — running in this page, client-side</span>
+              <span class="grow"></span>
+              <a class="link-arrow small" href="./editor.html">Full screen <span class="arr" aria-hidden="true">→</span></a>
+            </div>
+            <!-- `?mode=standalone` because this is a demo of the full editor, and a
+                 frame that says nothing is now an embed (`UX-EMBED-02`) — which
+                 would hide the branding strip and the downloads this is showing off. -->
+            <iframe src="./editor.html?mode=standalone" title="OpenCalc editor, live" loading="lazy"></iframe>
+          </div>
+          <div class="preview-foot">
+            <span>Try <kbd>Ctrl</kbd>+<kbd>Z</kbd>, <kbd>F2</kbd>, a <code>=XLOOKUP</code>, or open an <code>.xlsx</code> of your own from the File tab.</span>
+            <a class="btn btn-secondary btn-sm" href="./embed.html">See it embedded with the SDK</a>
+          </div>
         </div>
-      </div>
-    </section>
+      </section>
 
-    <!-- Product -->
-    <section id="product" class="section">
-      <div class="wrap">
-        <p class="eyebrow">Why OpenCalc</p>
-        <h2>Built like a compiler, not a widget.</h2>
-        <p class="section-lede">Every layer is testable in isolation, and every byte it writes is reproducible. That is what makes it safe to embed in something you ship.</p>
-        <div class="feature-grid">
-          <article class="feature">
-            <span class="ficon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10Z"/><path d="m9 12 2 2 4-4"/></svg></span>
-            <h3>Loss-aware by design</h3>
-            <p>Anything the model can't yet represent — a chart, a pivot cache, a rare style bit — is reproduced verbatim or reported. Never silently discarded.</p>
-          </article>
-          <article class="feature">
-            <span class="ficon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7V4h16v3"/><path d="M9 20h6M12 4v16"/></svg></span>
-            <h3>Deterministic output</h3>
-            <p>The same input and engine version produce the same model, values, layout, and bytes — so both calc and render are regression-tested against golden files.</p>
-          </article>
-          <article class="feature">
-            <span class="ficon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="m8 3-4 4 4 4M16 3l4 4-4 4"/><path d="M4 21h16"/></svg></span>
-            <h3>No host requirements</h3>
-            <p>No mandatory DOM, server, UI framework, or collaboration provider. Rust hosts, <code>wasm32</code>, desktop, and headless services all consume the same core.</p>
-          </article>
-          <article class="feature">
-            <span class="ficon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 9h18M9 20V9"/></svg></span>
-            <h3>A grid that feels native</h3>
-            <p>A canvas grid with real selection, drag-fill, merges, freeze panes, number formats and keyboard navigation — drawn from the engine's own layout, not the DOM.</p>
-          </article>
-          <article class="feature">
-            <span class="ficon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v4M12 17v4M3 12h4M17 12h4"/><circle cx="12" cy="12" r="4"/></svg></span>
-            <h3>Safe with untrusted files</h3>
-            <p>Packages are admitted under explicit entry, path, size, expansion and resource limits. No macro execution, no automatic external fetches.</p>
-          </article>
-          <article class="feature">
-            <span class="ficon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M16 18l6-6-6-6M8 6l-6 6 6 6"/></svg></span>
-            <h3>Open, in Rust</h3>
-            <p>A layered crate DAG from model and parser up to layout and render, <code>unsafe</code> forbidden, Apache-2.0. Read every line before you depend on it.</p>
-          </article>
+      <!-- ── What it is ────────────────────────────────────────────────────── -->
+      <section id="product" class="section tint" aria-labelledby="product-h">
+        <div class="wrap">
+          <div class="section-head">
+            <p class="eyebrow"><span class="num">02</span> What it is</p>
+            <h2 id="product-h">An Excel-compatible spreadsheet, built in the open.</h2>
+            <p class="section-lede">Everything you reach for in a spreadsheet, with the file formats, ribbon and keyboard you already know — plus the parts a closed product can't give you.</p>
+          </div>
+
+          <div class="bento">
+            <article class="tile w7 rv" style="--i:0">
+              <div class="tile-art il-wrap">
+                <svg class="il" viewBox="0 0 360 200" role="img" aria-label="Three files — .xlsx, .ods and .csv — flow into the OpenCalc engine, which produces a compatibility report: cells, charts and tables kept, one part carried verbatim, nothing dropped." focusable="false">
+                  <g class="pop" style="--d:0"><rect class="sh" x="20" y="28" width="74" height="42" rx="6"/><rect class="pp" x="16" y="24" width="74" height="42" rx="6"/><text class="tb mono" x="26" y="41" font-size="11" font-weight="700">.xlsx</text><rect class="ln" x="26" y="50" width="52" height="4" rx="2"/><rect class="ln" x="26" y="57" width="36" height="4" rx="2"/></g>
+                  <g class="pop" style="--d:1"><rect class="sh" x="20" y="83" width="74" height="42" rx="6"/><rect class="pp" x="16" y="79" width="74" height="42" rx="6"/><text class="tbl mono" x="26" y="96" font-size="11" font-weight="700">.ods</text><rect class="ln" x="26" y="105" width="52" height="4" rx="2"/><rect class="ln" x="26" y="112" width="30" height="4" rx="2"/></g>
+                  <g class="pop" style="--d:2"><rect class="sh" x="20" y="138" width="74" height="42" rx="6"/><rect class="pp" x="16" y="134" width="74" height="42" rx="6"/><text class="ta mono" x="26" y="151" font-size="11" font-weight="700">.csv</text><rect class="ln" x="26" y="160" width="46" height="4" rx="2"/><rect class="ln" x="26" y="167" width="38" height="4" rx="2"/></g>
+                  <path class="flow" d="M92 45 C122 45 124 92 146 96"/>
+                  <path class="flow" d="M92 100 L146 100"/>
+                  <path class="flow" d="M92 155 C122 155 124 108 146 104"/>
+                  <g class="pop" style="--d:3"><rect class="sh" x="153" y="73" width="56" height="56" rx="10"/><rect class="bs" x="149" y="69" width="56" height="56" rx="10"/><rect class="bk" x="149" y="69" width="56" height="56" rx="10"/><rect class="bk" x="163" y="83" width="28" height="28" rx="3"/><path class="bk" d="M163 93h28M173 83v28"/><text class="tm mono" x="177" y="142" font-size="8.5" text-anchor="middle">engine</text></g>
+                  <path class="flow" d="M208 98 L236 98"/>
+                  <g class="pop" style="--d:4"><rect class="sh" x="244" y="24" width="104" height="156" rx="8"/><rect class="pp" x="240" y="20" width="104" height="156" rx="8"/>
+                    <text class="t" x="251" y="38" font-size="9" font-weight="650">Compatibility report</text>
+                    <path class="k" d="M240 46h104" opacity=".25"/>
+                    <circle class="bs" cx="256" cy="60" r="6"/><path class="bk" d="M253 60l2 2 4-4" stroke-width="1.5"/><text class="t" x="268" y="63" font-size="9">1,204 cells</text>
+                    <circle class="bs" cx="256" cy="80" r="6"/><path class="bk" d="M253 80l2 2 4-4" stroke-width="1.5"/><text class="t" x="268" y="83" font-size="9">3 charts</text>
+                    <circle class="bs" cx="256" cy="100" r="6"/><path class="bk" d="M253 100l2 2 4-4" stroke-width="1.5"/><text class="t" x="268" y="103" font-size="9">2 tables</text>
+                    <circle class="ams" cx="256" cy="120" r="6"/><circle class="am" cx="256" cy="120" r="2"/><text class="t" x="268" y="123" font-size="9">1 kept verbatim</text>
+                    <path class="k" d="M240 138h104" opacity=".25"/>
+                    <text class="tb" x="251" y="161" font-size="17" font-weight="700">0</text><text class="t" x="266" y="160" font-size="9.5">dropped</text>
+                  </g>
+                </svg>
+              </div>
+              <div class="tile-body">
+                <span class="tag">.xlsx · .xlsm · .ods · .csv</span>
+                <h3>Opens your files. Never drops anything quietly.</h3>
+                <p>Formatting, tables, charts, validation, protection, print setup and defined names survive the round-trip. Anything the model can't hold yet is carried through byte for byte or counted and named in a compatibility report — never silently discarded.</p>
+              </div>
+            </article>
+
+            <article class="tile w5 rv" style="--i:1">
+              <div class="tile-art il-wrap">
+                <svg class="il" viewBox="0 0 320 200" role="img" aria-label="A ribbon with File, Home, Insert, Formulas and Data tabs above familiar command groups, and the keyboard shortcuts Ctrl+Shift+L, F2 and F4 being pressed." focusable="false">
+                  <rect class="sh" x="20" y="22" width="288" height="104" rx="8"/><rect class="pp" x="16" y="18" width="288" height="104" rx="8"/>
+                  <text class="tm" x="30" y="37" font-size="9">File</text>
+                  <text class="tb" x="58" y="37" font-size="9" font-weight="650">Home</text>
+                  <rect class="br" x="57" y="41" width="27" height="2" rx="1"/>
+                  <text class="tm" x="96" y="37" font-size="9">Insert</text>
+                  <text class="tm" x="134" y="37" font-size="9">Formulas</text>
+                  <text class="tm" x="185" y="37" font-size="9">Data</text>
+                  <path class="k" d="M16 47h288" opacity=".2"/>
+                  <g class="pop" style="--d:0"><rect class="ps" x="28" y="56" width="24" height="30" rx="3"/><rect class="ln" x="34" y="62" width="12" height="4" rx="1"/><rect class="ln" x="34" y="70" width="12" height="10" rx="1"/><rect class="ps" x="58" y="56" width="14" height="13" rx="3"/><rect class="ps" x="58" y="73" width="14" height="13" rx="3"/><text class="tm" x="50" y="106" font-size="7" text-anchor="middle">Clipboard</text></g>
+                  <path class="k" d="M84 56v44" opacity=".2"/>
+                  <g class="pop" style="--d:1"><rect class="ps" x="94" y="56" width="58" height="13" rx="3"/><rect class="ps" x="94" y="73" width="13" height="13" rx="3"/><text class="t" x="100.5" y="83" font-size="9" font-weight="700" text-anchor="middle">B</text><rect class="ps" x="111" y="73" width="13" height="13" rx="3"/><text class="t" x="117.5" y="83" font-size="9" font-style="italic" text-anchor="middle">I</text><rect class="ps" x="128" y="73" width="13" height="13" rx="3"/><rect class="br" x="131" y="81" width="7" height="2"/><text class="tm" x="123" y="106" font-size="7" text-anchor="middle">Font</text></g>
+                  <path class="k" d="M162 56v44" opacity=".2"/>
+                  <g class="pop" style="--d:2"><rect class="ps" x="172" y="56" width="13" height="13" rx="3"/><path class="k" d="M175 60h7M175 63h5M175 66h7" stroke-width="1"/><rect class="ps" x="189" y="56" width="13" height="13" rx="3"/><path class="k" d="M192 60h7M193 63h5M192 66h7" stroke-width="1"/><rect class="ps" x="172" y="73" width="30" height="13" rx="3"/><text class="tm" x="187" y="106" font-size="7" text-anchor="middle">Alignment</text></g>
+                  <path class="k" d="M214 56v44" opacity=".2"/>
+                  <g class="pop" style="--d:3"><rect class="bs" x="224" y="56" width="26" height="30" rx="3"/><text class="tb" x="237" y="77" font-size="14" font-weight="700" text-anchor="middle">Σ</text><rect class="ps" x="256" y="56" width="36" height="13" rx="3"/><rect class="ps" x="256" y="73" width="36" height="13" rx="3"/><text class="tm" x="258" y="106" font-size="7" text-anchor="middle">Editing</text></g>
+                  <g class="key" style="--d:0"><rect class="sh" x="22" y="147" width="40" height="26" rx="5"/><rect class="pp" x="22" y="144" width="40" height="26" rx="5"/><text class="t" x="42" y="161" font-size="9" font-weight="600" text-anchor="middle">Ctrl</text></g>
+                  <text class="tm" x="69" y="161" font-size="10" text-anchor="middle">+</text>
+                  <g class="key" style="--d:1"><rect class="sh" x="76" y="147" width="46" height="26" rx="5"/><rect class="pp" x="76" y="144" width="46" height="26" rx="5"/><text class="t" x="99" y="161" font-size="9" font-weight="600" text-anchor="middle">Shift</text></g>
+                  <text class="tm" x="129" y="161" font-size="10" text-anchor="middle">+</text>
+                  <g class="key" style="--d:2"><rect class="sh" x="136" y="147" width="26" height="26" rx="5"/><rect class="bs" x="136" y="144" width="26" height="26" rx="5"/><rect class="bk" x="136" y="144" width="26" height="26" rx="5" stroke-width="1.5"/><text class="tb" x="149" y="161" font-size="10" font-weight="700" text-anchor="middle">L</text></g>
+                  <g class="key" style="--d:5"><rect class="sh" x="196" y="147" width="30" height="26" rx="5"/><rect class="pp" x="196" y="144" width="30" height="26" rx="5"/><text class="t" x="211" y="161" font-size="9" font-weight="600" text-anchor="middle">F2</text></g>
+                  <g class="key" style="--d:8"><rect class="sh" x="234" y="147" width="30" height="26" rx="5"/><rect class="pp" x="234" y="144" width="30" height="26" rx="5"/><text class="t" x="249" y="161" font-size="9" font-weight="600" text-anchor="middle">F4</text></g>
+                  <g class="key" style="--d:11"><rect class="sh" x="272" y="147" width="30" height="26" rx="5"/><rect class="pp" x="272" y="144" width="30" height="26" rx="5"/><text class="t" x="287" y="161" font-size="9" font-weight="600" text-anchor="middle">F9</text></g>
+                </svg>
+              </div>
+              <div class="tile-body">
+                <span class="tag">Ribbon · KeyTips · shortcuts</span>
+                <h3>The ribbon and shortcuts you already know.</h3>
+                <p>The same tabs, groups and dialogs in the same places, Alt-key KeyTips, and the keyboard shortcuts your hands learned years ago. Nothing to relearn.</p>
+              </div>
+            </article>
+
+            <article class="tile rv" style="--i:0">
+              <div class="tile-art il-wrap">
+                <svg class="il" viewBox="0 0 320 200" role="img" aria-label="The formula =SORT(UNIQUE(A2:A8)) spills a sorted list of distinct fruit names into column C, outlined by a dashed spill border." focusable="false">
+                  <rect class="sh" x="20" y="20" width="288" height="26" rx="6"/><rect class="pp" x="16" y="16" width="288" height="26" rx="6"/>
+                  <text class="tm" x="27" y="33" font-size="10" font-style="italic" font-family="Georgia, serif">fx</text>
+                  <path class="k" d="M44 20v18" opacity=".25"/>
+                  <text class="mono t" x="52" y="33" font-size="10">=<tspan class="tbl">SORT</tspan>(<tspan class="tbl">UNIQUE</tspan>(<tspan class="tb">A2:A8</tspan>))</text>
+                  <rect class="br blink" x="203" y="23" width="1.5" height="13"/>
+                  <rect class="sh" x="20" y="58" width="288" height="132" rx="6"/><rect class="pp" x="16" y="54" width="288" height="132" rx="6"/>
+                  <rect class="ps" x="16.75" y="54.75" width="286.5" height="16" rx="5" stroke="none"/>
+                  <text class="tm" x="27" y="66" font-size="8" text-anchor="middle">&#160;</text>
+                  <text class="tm" x="88" y="66" font-size="8" text-anchor="middle">A</text>
+                  <text class="tm" x="173" y="66" font-size="8" text-anchor="middle">B</text>
+                  <text class="tb" x="250" y="66" font-size="8" text-anchor="middle" font-weight="700">C</text>
+                  <path class="gr" d="M38 71v114M138 71v114M208 71v114M16 71h288M16 87h288M16 103h288M16 119h288M16 135h288M16 151h288M16 167h288"/>
+                  <text class="tm" x="27" y="82" font-size="7.5" text-anchor="middle">1</text><text class="tm" x="27" y="98" font-size="7.5" text-anchor="middle">2</text><text class="tm" x="27" y="114" font-size="7.5" text-anchor="middle">3</text><text class="tm" x="27" y="130" font-size="7.5" text-anchor="middle">4</text><text class="tm" x="27" y="146" font-size="7.5" text-anchor="middle">5</text><text class="tm" x="27" y="162" font-size="7.5" text-anchor="middle">6</text><text class="tm" x="27" y="178" font-size="7.5" text-anchor="middle">7</text>
+                  <text class="t" x="44" y="82" font-size="8.5" font-weight="650">Fruit</text>
+                  <text class="t" x="44" y="98" font-size="8.5">Pear</text><text class="t" x="44" y="114" font-size="8.5">Fig</text><text class="t" x="44" y="130" font-size="8.5">Pear</text><text class="t" x="44" y="146" font-size="8.5">Apple</text><text class="t" x="44" y="162" font-size="8.5">Kiwi</text><text class="t" x="44" y="178" font-size="8.5">Fig</text>
+                  <text class="t" x="214" y="82" font-size="8.5" font-weight="650">Distinct</text>
+                  <text class="t pop" style="--d:0" x="214" y="98" font-size="8.5">Apple</text>
+                  <text class="t pop" style="--d:1" x="214" y="114" font-size="8.5">Fig</text>
+                  <text class="t pop" style="--d:2" x="214" y="130" font-size="8.5">Kiwi</text>
+                  <text class="t pop" style="--d:3" x="214" y="146" font-size="8.5">Pear</text>
+                  <rect class="blk pop" style="--d:4" x="209" y="88" width="94" height="62"/>
+                  <rect class="bk" x="208.5" y="87.5" width="95" height="16"/>
+                </svg>
+              </div>
+              <div class="tile-body">
+                <span class="tag">347 functions</span>
+                <h3>Formulas that spill.</h3>
+                <p>Dynamic arrays — FILTER, SORT, UNIQUE, XLOOKUP — LET and LAMBDA with MAP, REDUCE and SCAN, structured references, and autocomplete with signatures.</p>
+              </div>
+            </article>
+
+            <article class="tile rv" style="--i:1">
+              <div class="tile-art il-wrap">
+                <svg class="il" viewBox="0 0 320 200" role="img" aria-label="A shared sheet with three people present. Ana's violet cursor and Kofi's amber cursor move between cells as they edit at the same time." focusable="false">
+                  <rect class="sh" x="20" y="18" width="288" height="168" rx="8"/><rect class="pp" x="16" y="14" width="288" height="168" rx="8"/>
+                  <text class="t" x="28" y="31" font-size="9" font-weight="650">Team plan.xlsx</text>
+                  <circle class="bs" cx="262" cy="27" r="8"/><text class="tb" x="262" y="30" font-size="7.5" font-weight="700" text-anchor="middle">Me</text>
+                  <circle class="vis" cx="276" cy="27" r="8"/><text class="tv" x="276" y="30" font-size="8" font-weight="700" text-anchor="middle">A</text>
+                  <circle class="ams" cx="290" cy="27" r="8"/><text class="ta" x="290" y="30" font-size="8" font-weight="700" text-anchor="middle">K</text>
+                  <path class="k" d="M16 40h288" opacity=".2"/>
+                  <path class="gr" d="M56 40v142M116 40v142M176 40v142M236 40v142M16 60h288M16 80h288M16 100h288M16 120h288M16 140h288M16 160h288"/>
+                  <rect class="ln" x="64" y="68" width="34" height="5" rx="2"/><rect class="ln" x="124" y="68" width="40" height="5" rx="2"/><rect class="ln" x="184" y="68" width="30" height="5" rx="2"/><rect class="ln" x="244" y="68" width="38" height="5" rx="2"/>
+                  <rect class="ln" x="64" y="88" width="28" height="5" rx="2"/><rect class="ln" x="184" y="88" width="44" height="5" rx="2"/>
+                  <rect class="ln" x="64" y="108" width="38" height="5" rx="2"/><rect class="ln" x="124" y="108" width="24" height="5" rx="2"/><rect class="ln" x="244" y="108" width="30" height="5" rx="2"/>
+                  <rect class="ln" x="64" y="128" width="30" height="5" rx="2"/><rect class="ln" x="184" y="128" width="36" height="5" rx="2"/>
+                  <rect class="ln" x="64" y="148" width="40" height="5" rx="2"/><rect class="ln" x="124" y="148" width="34" height="5" rx="2"/><rect class="ln" x="244" y="148" width="26" height="5" rx="2"/>
+                  <rect class="bk" x="56" y="40" width="60" height="20"/>
+                  <g class="glide"><rect class="vk" x="116" y="80" width="60" height="20"/><path class="ptr" d="M168 94l11 5.5-4.7 1.3-2.3 4.7Z"/><rect class="vi" x="178" y="102" width="28" height="13" rx="3"/><text class="tw" x="192" y="111.5" font-size="8" font-weight="700" text-anchor="middle">Ana</text></g>
+                  <g class="glide2"><rect class="ak" x="176" y="120" width="60" height="20"/><path class="ptr2" d="M228 134l11 5.5-4.7 1.3-2.3 4.7Z"/><rect class="am" x="238" y="142" width="30" height="13" rx="3"/><text class="tw" x="253" y="151.5" font-size="8" font-weight="700" text-anchor="middle">Kofi</text></g>
+                </svg>
+              </div>
+              <div class="tile-body">
+                <span class="tag">Real-time · self-hosted</span>
+                <h3>Edit together, live.</h3>
+                <p>Share a link and see each other's cursors and edits as they happen — on a collaboration server you run yourself, with presence and reconnect built in.</p>
+              </div>
+            </article>
+
+            <article class="tile rv" style="--i:2">
+              <div class="tile-art il-wrap">
+                <svg class="il" viewBox="0 0 320 200" role="img" aria-label="A desktop monitor running OpenCalc in a native window, a spreadsheet file being opened with a double-click, and a badge saying it works offline." focusable="false">
+                  <rect class="sh" x="44" y="18" width="240" height="140" rx="10"/><rect class="pp" x="40" y="14" width="240" height="140" rx="10"/>
+                  <path class="k" d="M140 154l-8 22h56l-8-22"/><path class="k" d="M118 177h84"/>
+                  <rect class="ps" x="56" y="28" width="208" height="112" rx="5"/>
+                  <rect class="pp" x="56" y="28" width="208" height="16" rx="5"/>
+                  <circle class="ln" cx="66" cy="36" r="2.5"/><circle class="ln" cx="74" cy="36" r="2.5"/><circle class="ln" cx="82" cy="36" r="2.5"/>
+                  <text class="t" x="160" y="39" font-size="7.5" font-weight="650" text-anchor="middle">Q3 budget.xlsx — OpenCalc</text>
+                  <path class="gr" d="M120 44v96M168 44v96M216 44v96M56 60h208M56 76h208M56 92h208M56 108h208M56 124h208" style="stroke: var(--il-line)"/>
+                  <rect class="bk" x="168" y="76" width="48" height="16"/>
+                  <g class="pop" style="--d:1"><rect class="sh" x="73" y="94" width="30" height="36" rx="3"/><rect class="pp" x="70" y="91" width="30" height="36" rx="3"/><rect class="br" x="70" y="91" width="30" height="10" rx="3"/><text class="tw mono" x="85" y="99" font-size="6.5" font-weight="700" text-anchor="middle">xlsx</text><rect class="ln" x="75" y="106" width="20" height="3" rx="1.5"/><rect class="ln" x="75" y="112" width="14" height="3" rx="1.5"/></g>
+                  <circle class="bk ring" cx="85" cy="109" r="22" stroke-width="1.5"/>
+                  <g class="pop" style="--d:3"><rect class="bs" x="214" y="2" width="84" height="20" rx="10"/><circle class="br" cx="226" cy="12" r="3.5"/><text class="tb" x="234" y="15.5" font-size="8.5" font-weight="650">Works offline</text></g>
+                </svg>
+              </div>
+              <div class="tile-body">
+                <span class="tag">macOS · Windows · Linux</span>
+                <h3>A real desktop app.</h3>
+                <p>The engine as native Rust in its own window. Double-click an <code>.xlsx</code>, <code>.xlsm</code>, <code>.ods</code> or <code>.csv</code> to open it; no network needed.</p>
+              </div>
+            </article>
+
+            <article class="tile w12 row rv" style="--i:0">
+              <div class="tile-art il-wrap">
+                <svg class="il" viewBox="0 0 360 170" role="img" aria-label="An open-source history: commits on a main branch, a contributed branch merging back in with its tests passing, and an Apache-2.0 licence card." focusable="false">
+                  <path class="k" d="M20 110h220" stroke-width="2"/>
+                  <path class="bk" d="M70 110c20 0 20-42 44-42h48c24 0 24 42 44 42" stroke-width="2"/>
+                  <g class="pop" style="--d:0"><circle class="pp" cx="40" cy="110" r="7"/></g>
+                  <g class="pop" style="--d:1"><circle class="pp" cx="70" cy="110" r="7"/></g>
+                  <g class="pop" style="--d:2"><circle class="bs" cx="118" cy="68" r="7"/><circle class="bk" cx="118" cy="68" r="7"/></g>
+                  <g class="pop" style="--d:3"><circle class="bs" cx="158" cy="68" r="7"/><circle class="bk" cx="158" cy="68" r="7"/></g>
+                  <g class="pop" style="--d:3"><circle class="pp" cx="136" cy="110" r="7"/></g>
+                  <g class="pop" style="--d:4"><circle class="br" cx="206" cy="110" r="8"/><path d="M202 110l3 3 5-5.5" fill="none" stroke="var(--il-paper)" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></g>
+                  <text class="tm mono" x="20" y="132" font-size="8.5">main</text>
+                  <g class="pop" style="--d:4"><rect class="bs" x="118" y="34" width="62" height="18" rx="9"/><text class="tb mono" x="149" y="46" font-size="8" font-weight="700" text-anchor="middle">tests ✓</text></g>
+                  <g class="pop" style="--d:5"><rect class="sh" x="262" y="34" width="84" height="106" rx="8"/><rect class="pp" x="258" y="30" width="84" height="106" rx="8"/><text class="t" x="300" y="52" font-size="9.5" font-weight="700" text-anchor="middle">Apache-2.0</text><rect class="ln" x="270" y="62" width="60" height="4" rx="2"/><rect class="ln" x="270" y="71" width="52" height="4" rx="2"/><rect class="ln" x="270" y="80" width="58" height="4" rx="2"/><rect class="ln" x="270" y="89" width="40" height="4" rx="2"/><circle class="bs" cx="300" cy="115" r="11"/><circle class="bk" cx="300" cy="115" r="11"/><path class="bk" d="M295 115l3.5 3.5 6-6.5"/></g>
+                </svg>
+              </div>
+              <div class="tile-body">
+                <span class="tag">Apache-2.0 · Rust · no telemetry</span>
+                <h3>Open source, all the way down.</h3>
+                <p>Every line is on GitHub — the engine, the editor, the desktop shell and the servers. CI-gated, fuzzed and benchmarked; <code>unsafe</code> is forbidden. No licence check, nothing phones home, and fidelity bugs with a file attached are the most useful thing you can send.</p>
+                <p><a class="link-arrow" href="https://github.com/CasualOffice/opencalc">Read the source <span class="arr" aria-hidden="true">→</span></a></p>
+              </div>
+            </article>
+          </div>
         </div>
-      </div>
-    </section>
+      </section>
 
-    <!-- What works today -->
-    <section id="today" class="section alt">
-      <div class="wrap">
-        <div class="today-head">
+      <!-- ── What works today ──────────────────────────────────────────────── -->
+      <section id="today" class="section" aria-labelledby="today-h">
+        <div class="wrap">
+          <div class="section-head split">
+            <div>
+              <p class="eyebrow"><span class="num">03</span> Shipping now</p>
+              <h2 id="today-h">What works today</h2>
+            </div>
+            <p>A verified list, not a roadmap — everything here is exercised by the editor above. What is still pending is in the roadmap below.</p>
+          </div>
+          <div class="checks">
+            <div class="check-col rv" style="--i:0">
+              <h3><span class="ic"><svg viewBox="0 0 20 20" aria-hidden="true" focusable="false"><use href="./icons.fluent.svg#fi-textbox"/></svg></span>Editing</h3>
+              <ul>
+                <li>Inline and formula-bar editing</li>
+                <li>Rich clipboard — formulas and formats travel</li>
+                <li>Drag-fill with reference shifting</li>
+                <li>Find and replace across the sheet</li>
+                <li>Right-click insert / delete rows and columns</li>
+                <li>Undo and redo, one step per edit</li>
+              </ul>
+            </div>
+            <div class="check-col rv" style="--i:1">
+              <h3><span class="ic"><svg viewBox="0 0 20 20" aria-hidden="true" focusable="false"><use href="./icons.fluent.svg#fi-math_formula"/></svg></span>Formulas &amp; calc</h3>
+              <ul>
+                <li>347 of the 356 functions in the spec</li>
+                <li>Dynamic arrays that spill — FILTER, SORT, UNIQUE, XLOOKUP</li>
+                <li>LET and LAMBDA, with MAP, REDUCE, SCAN and BYROW</li>
+                <li>Autocomplete with signatures; click or drag to insert refs</li>
+                <li>Cross-sheet and whole-row/column references</li>
+                <li>Automatic or manual calculation, as the file asks</li>
+              </ul>
+            </div>
+            <div class="check-col rv" style="--i:2">
+              <h3><span class="ic"><svg viewBox="0 0 20 20" aria-hidden="true" focusable="false"><use href="./icons.fluent.svg#fi-paint_brush"/></svg></span>Format &amp; structure</h3>
+              <ul>
+                <li>Fonts, colors, alignment, borders, wrap, rich text</li>
+                <li>Number formats: currency, percent, dates, custom</li>
+                <li>Conditional formatting, data validation, protection</li>
+                <li>Tables with structured references and banding</li>
+                <li>Sort, per-column filter, outlines, freeze panes</li>
+                <li>Page setup, print areas and manual page breaks</li>
+              </ul>
+            </div>
+            <div class="check-col rv" style="--i:3">
+              <h3><span class="ic"><svg viewBox="0 0 20 20" aria-hidden="true" focusable="false"><use href="./icons.fluent.svg#fi-data_bar_vertical"/></svg></span>Analysis</h3>
+              <ul>
+                <li>Pivot tables — build, filter, refresh, GETPIVOTDATA</li>
+                <li>Drag fields between Rows, Columns, Filters and Values</li>
+                <li>Eleven aggregates, subtotals and grand totals</li>
+                <li>Charts: column, bar, line, area, pie, doughnut, scatter</li>
+                <li>Insert, retitle, move and resize on the grid</li>
+                <li>Charts written as real chart parts, not pictures</li>
+              </ul>
+            </div>
+          </div>
+          <p class="io-note">Reads and writes <b>.xlsx</b> and <b>.xlsm</b> · reads and writes <b>.ods</b> (values and formulas; what it cannot carry is counted) · imports and exports <b>CSV, TSV, PSV</b>. Formatting, tables, charts, validation, protection, print setup and defined names survive the round-trip — and anything not yet modelled is carried through byte for byte rather than dropped.</p>
+        </div>
+      </section>
+
+      <!-- ── Embed / SDK ───────────────────────────────────────────────────── -->
+      <section id="embed" class="section tint" aria-labelledby="embed-h">
+        <div class="wrap split-2 top">
           <div>
-            <p class="eyebrow">Shipping now</p>
-            <h2>What works today</h2>
+            <p class="eyebrow"><span class="num">04</span> Embed it</p>
+            <h2 id="embed-h" class="h2" style="margin-top:.875rem">Ship a spreadsheet inside your product.</h2>
+            <p class="section-lede" style="margin-top:1rem">
+              One custom element and your users get the editor above — <code>.xlsx</code>
+              in and out, 347 functions, pivot tables and charts, all client-side. React,
+              Next.js, Vue, Svelte or plain HTML.
+            </p>
+            <ol class="steps">
+              <li><h3>Install</h3><p>The element and, on React, its wrapper. No UI framework peer dependency.</p>
+<pre class="term"><span class="c"># the editor as a custom element</span>
+npm install @opencalc/sheet</pre></li>
+              <li><h3>Serve the engine yourself</h3><p>The WebAssembly binary is copied into your build and served from your origin — never from a CDN we run.</p>
+<pre class="term"><span class="c"># package.json → postinstall</span>
+opencalc-assets ./public/opencalc</pre></li>
+              <li><h3>Mount it</h3><p>Give it a height and it boots. Open a workbook, get bytes back, listen for changes.</p></li>
+            </ol>
           </div>
-          <p class="today-sub">A verified list, not a roadmap — everything here is exercised by the editor you just used. What is still pending is in the roadmap below.</p>
-        </div>
-        <div class="checks">
-          <div class="check-col">
-            <h4>Editing</h4>
-            <ul>
-              <li>Inline and formula-bar editing</li>
-              <li>Rich clipboard — formulas and formats travel</li>
-              <li>Drag-fill with reference shifting</li>
-              <li>Find and replace across the sheet</li>
-              <li>Right-click insert / delete rows and columns</li>
-              <li>Undo and redo, one step per edit</li>
-            </ul>
-          </div>
-          <div class="check-col">
-            <h4>Formulas &amp; calc</h4>
-            <ul>
-              <li>347 of the 356 functions in the spec</li>
-              <li>Dynamic arrays that spill — FILTER, SORT, UNIQUE, XLOOKUP</li>
-              <li>LET and LAMBDA, with MAP, REDUCE, SCAN and BYROW</li>
-              <li>Autocomplete with signatures; click or drag to insert refs</li>
-              <li>Cross-sheet and whole-row/column references</li>
-              <li>Automatic or manual calculation, as the file asks</li>
-            </ul>
-          </div>
-          <div class="check-col">
-            <h4>Format &amp; structure</h4>
-            <ul>
-              <li>Fonts, colors, alignment, borders, wrap, rich text</li>
-              <li>Number formats: currency, percent, dates, custom</li>
-              <li>Conditional formatting, data validation, protection</li>
-              <li>Tables with structured references and banding</li>
-              <li>Sort, per-column filter, outlines, freeze panes</li>
-              <li>Page setup, print areas and manual page breaks</li>
-            </ul>
-          </div>
-          <div class="check-col">
-            <h4>Analysis</h4>
-            <ul>
-              <li>Pivot tables — build, filter, refresh, GETPIVOTDATA</li>
-              <li>Drag fields between Rows, Columns, Filters and Values</li>
-              <li>Eleven aggregates, subtotals and grand totals</li>
-              <li>Charts: column, bar, line, area, pie, doughnut, scatter</li>
-              <li>Insert, retitle, move and resize on the grid</li>
-              <li>Charts written as real chart parts, not pictures</li>
-            </ul>
-          </div>
-        </div>
-        <p class="io-note">Reads and writes <b>.xlsx</b> · imports and exports <b>CSV, TSV, PSV</b> · formatting, tables, charts, validation, protection, print setup and defined names survive the round-trip — and anything not yet modelled is carried through byte for byte rather than dropped.</p>
-      </div>
-    </section>
-
-    <!-- Which of the three -->
-    <section id="choose" class="section">
-      <div class="wrap">
-        <div class="today-head">
           <div>
-            <p class="eyebrow">Three products, one engine</p>
-            <h2>Which one do you want?</h2>
+            <div class="il-wrap rv" style="margin-bottom:1rem">
+              <svg class="il" viewBox="0 0 360 200" role="img" aria-label="Your web application in a browser, with an opencalc-sheet element embedded in its page showing a spreadsheet." focusable="false">
+                <rect class="sh" x="14" y="14" width="340" height="182" rx="10"/><rect class="pp" x="10" y="10" width="340" height="182" rx="10"/>
+                <path class="k" d="M10 32h340" opacity=".25"/>
+                <circle class="ln" cx="24" cy="21" r="3"/><circle class="ln" cx="34" cy="21" r="3"/><circle class="ln" cx="44" cy="21" r="3"/>
+                <rect class="ps" x="96" y="15" width="168" height="12" rx="6" stroke="none"/><text class="tm mono" x="180" y="24" font-size="7.5" text-anchor="middle">your-app.example/reports</text>
+                <rect class="ln" x="22" y="46" width="48" height="6" rx="3"/><rect class="ln" x="22" y="60" width="40" height="5" rx="2.5"/><rect class="ln" x="22" y="72" width="44" height="5" rx="2.5"/><rect class="ln" x="22" y="84" width="36" height="5" rx="2.5"/>
+                <rect class="ln" x="90" y="44" width="110" height="7" rx="3.5"/>
+                <g class="pop" style="--d:0"><rect class="pp" x="90" y="62" width="248" height="118" rx="6"/>
+                  <rect class="ps" x="90.75" y="62.75" width="246.5" height="18" rx="5" stroke="none"/>
+                  <rect class="ln" x="98" y="69" width="14" height="5" rx="1"/><rect class="ln" x="116" y="69" width="14" height="5" rx="1"/><rect class="ln" x="134" y="69" width="14" height="5" rx="1"/>
+                  <path class="gr" d="M118 81v99M170 81v99M222 81v99M274 81v99M90 96h248M90 110h248M90 124h248M90 138h248M90 152h248M90 166h248" style="stroke: var(--il-line)"/>
+                  <rect class="bk" x="170" y="110" width="52" height="14"/>
+                  <rect class="bs" x="226" y="140" width="44" height="26" rx="2"/><rect class="br" x="232" y="154" width="6" height="10"/><rect class="br" x="242" y="148" width="6" height="16"/><rect class="br" x="252" y="144" width="6" height="20"/>
+                </g>
+                <rect fill="none" stroke="var(--il-brand)" stroke-width="1.5" stroke-dasharray="5 4" x="84" y="56" width="260" height="130" rx="8"/>
+                <g class="pop" style="--d:2"><rect class="br" x="236" y="48" width="104" height="16" rx="8"/><text class="tw mono" x="288" y="59" font-size="8" font-weight="700" text-anchor="middle">&lt;opencalc-sheet&gt;</text></g>
+              </svg>
+            </div>
+            <div class="code-card rv">
+              <div class="code-head"><span>Load a file, react to edits, save it back</span><span class="code-crate">@opencalc/sheet</span></div>
+<pre><code><span class="k">import</span> <span class="s">"@opencalc/sheet"</span>;
+<span class="c">// &lt;opencalc-sheet style="height:600px"&gt;&lt;/opencalc-sheet&gt;</span>
+<span class="k">const</span> sheet = document.querySelector(<span class="s">"opencalc-sheet"</span>);
+
+sheet.theme({ light: { accentColor: <span class="s">"#7c3aed"</span> } }); <span class="c">// typed CSS tokens</span>
+sheet.chrome({ statusbar: <span class="n">false</span> });                 <span class="c">// hide whole regions…</span>
+sheet.commands({ hidden: [<span class="s">"file.open"</span>] });         <span class="c">// …or single controls</span>
+
+<span class="k">await</span> sheet.configure({ access: <span class="s">"view"</span> });         <span class="c">// "edit" | "view" | "preview"</span>
+<span class="k">await</span> sheet.open(bytes, <span class="s">"budget.xlsx"</span>);
+
+sheet.on(<span class="s">"cellsChanged"</span>, <span class="k">async</span> (e) =&gt; {
+  <span class="k">if</span> (e.source !== <span class="s">"api"</span>) persist(<span class="k">await</span> sheet.save()); <span class="c">// deterministic .xlsx</span>
+});</code></pre>
+            </div>
+            <p class="small muted" style="margin-top:1rem">
+              The element isolates itself in a shadow root: your CSS cannot reach in and
+              ours cannot reach out. Read-only and preview refuse writes <b>in the engine</b>,
+              not by hiding buttons. <b>Alpha:</b> published as <code>0.0.x</code> — pin what
+              you test against.
+            </p>
+            <div class="cta-row" style="margin-top:1.25rem">
+              <a class="btn btn-primary" href="./docs.html">Read the integration guide</a>
+              <a class="btn btn-secondary" href="./embed.html">Try the live embed demo</a>
+              <a class="btn btn-quiet link-arrow" href="https://github.com/CasualOffice/opencalc/tree/main/sdk/examples">Runnable examples <span class="arr" aria-hidden="true">→</span></a>
+            </div>
           </div>
-          <p class="today-sub">The engine above is the same in all three — the same import, the same 347 functions, the same writer. What differs is where it runs and what it is allowed to reach.</p>
         </div>
+      </section>
 
-        <div class="matrix-scroll">
-          <table class="matrix">
-            <thead>
-              <tr>
-                <th scope="col"><span class="matrix-rowhead">&nbsp;</span></th>
-                <th scope="col">SDK<br /><span class="matrix-sub">@opencalc/sheet · 0.0.1</span></th>
-                <th scope="col">Desktop app<br /><span class="matrix-sub">0.0.3</span></th>
-                <th scope="col">Self&#8209;hosted<br /><span class="matrix-sub">three images · 0.0.1</span></th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr>
-                <th scope="row">Where it runs</th>
-                <td>Your web page, as WebAssembly</td>
-                <td>macOS (Apple&nbsp;Silicon), Windows&nbsp;x64, Linux&nbsp;x64 — the engine as native Rust</td>
-                <td>Your servers — amd64 and arm64</td>
-              </tr>
-              <tr>
-                <th scope="row">How you get it</th>
-                <td><code>npm i @opencalc/sheet</code></td>
-                <td><code>.dmg</code> · <code>.exe</code> · <code>.deb</code> · <code>.AppImage</code></td>
-                <td><code>docker run casualoffice/calc</code></td>
-              </tr>
-              <tr>
-                <th scope="row">The whole engine — .xlsx, formulas, charts, pivots</th>
-                <td class="yes">Yes</td>
-                <td class="yes">Yes</td>
-                <td class="yes">Yes</td>
-              </tr>
-              <tr>
-                <th scope="row">Opening a file from the operating system</th>
-                <td>Through your own code — you hand it the bytes</td>
-                <td class="yes">Native dialogs, and double&#8209;click on <code>.xlsx .xlsm .ods .csv .tsv</code></td>
-                <td>Through the document host, or your own storage</td>
-              </tr>
-              <tr>
-                <th scope="row">Several people in one sheet at once</th>
-                <td class="no">No — a single&#8209;user editing surface</td>
-                <td class="yes">Yes, as a participant</td>
-                <td class="yes">Yes — this <em>is</em> the server that orders and relays</td>
-              </tr>
-              <tr>
-                <th scope="row">Fits into</th>
-                <td>A web component, or the React wrapper</td>
-                <td>The file types above</td>
-                <td>Nextcloud, ownCloud, SharePoint, Moodle, Alfresco — one discovery URL</td>
-              </tr>
-              <tr>
-                <th scope="row">Signed by the operating system</th>
-                <td class="na">Not applicable</td>
-                <td class="no">Not yet — <a href="download.html#mac">the bypass is two clicks</a>, and the download page walks through it</td>
-                <td class="na">Not applicable</td>
-              </tr>
-              <tr>
-                <th scope="row">Worth knowing</th>
-                <td>Each element carries its own engine, so page a long list in and out rather than mounting fifty. A pivot built here exports as its cells, not as a live Excel pivot.</td>
-                <td>Pasting <em>from</em> another application arrives as values without formatting. The <code>.deb</code> needs Ubuntu&nbsp;23.04 or newer; the AppImage runs on 22.04.</td>
-                <td>No Helm chart yet, and Redis is a single node. Prometheus metrics are on <code>/metrics</code>.</td>
-              </tr>
-            </tbody>
-          </table>
+      <!-- ── Agents (MCP) ──────────────────────────────────────────────────── -->
+      <section id="agents" class="section" aria-labelledby="agents-h">
+        <div class="wrap split-2">
+          <div>
+            <p class="eyebrow"><span class="num">05</span> For AI agents</p>
+            <h2 id="agents-h" class="h2" style="margin-top:.875rem">Hand a workbook to an agent.</h2>
+            <p class="section-lede" style="margin-top:1rem">
+              <code>casual-calc-mcp</code> is an MCP server that lets Claude, or any MCP
+              client, open, read, write, recalculate and save spreadsheets with the same
+              engine — and get back the same compatibility report you would.
+            </p>
+            <div class="chips" aria-label="The server's tools">
+              <code>open_workbook</code><code>list_sheets</code><code>read_range</code><code>write_cells</code><code>evaluate</code><code>recalculate</code><code>run</code><code>save</code><code>close</code>
+            </div>
+            <ol class="steps">
+              <li><h3>Sandboxed to the folders you name</h3><p>It touches files only under <code>--root</code>, every path canonicalised; with no root, every file tool refuses. It speaks stdio and has no network code.</p></li>
+              <li><h3>Bounded</h3><p>File size, cells per call and open workbooks are all capped, so a runaway agent cannot exhaust the machine.</p></li>
+              <li><h3>Build it from source today</h3>
+<pre class="term">cargo build --release -p casual-calc-mcp
+claude mcp add opencalc -- ./target/release/casual-calc-mcp --root ~/Sheets</pre></li>
+            </ol>
+            <p style="margin-top:1.25rem"><a class="link-arrow" href="https://github.com/CasualOffice/opencalc/tree/main/server/casual-calc-mcp">The MCP server's README <span class="arr" aria-hidden="true">→</span></a></p>
+          </div>
+          <div class="agent rv" role="img" aria-label="An example agent session: asked to add a Q4 column and total it, the agent opens budget.xlsx, writes six cells, recalculates and saves; the save report says nothing was lost.">
+            <div class="agent-head" aria-hidden="true">
+              <svg class="mark" viewBox="0 0 32 32" focusable="false"><rect class="m-bg" width="32" height="32" rx="7"/><rect class="m-ln" x="7.5" y="7.5" width="17" height="17" rx="2"/><path class="m-ln" d="M7.5 13.5h17M13.5 7.5v17"/></svg>
+              Agent session · opencalc
+            </div>
+            <ol class="agent-log seq" aria-hidden="true">
+              <li class="msg" style="--d:0">Add a Q4 column to budget.xlsx and total it.</li>
+              <li class="call" style="--d:1"><span class="tick"><svg viewBox="0 0 20 20" focusable="false"><use href="./icons.fluent.svg#fi-checkmark"/></svg></span><code><b>open_workbook</b>("budget.xlsx")</code><span class="res">2 sheets</span></li>
+              <li class="call" style="--d:2"><span class="tick"><svg viewBox="0 0 20 20" focusable="false"><use href="./icons.fluent.svg#fi-checkmark"/></svg></span><code><b>write_cells</b>("Summary!E1", [["Q4"], …, ["=SUM(E2:E5)"]])</code><span class="res">6 cells</span></li>
+              <li class="call" style="--d:3"><span class="tick"><svg viewBox="0 0 20 20" focusable="false"><use href="./icons.fluent.svg#fi-checkmark"/></svg></span><code><b>recalculate</b>()</code><span class="res">E6 = 4,310</span></li>
+              <li class="call" style="--d:4"><span class="tick"><svg viewBox="0 0 20 20" focusable="false"><use href="./icons.fluent.svg#fi-checkmark"/></svg></span><code><b>save</b>()</code><span class="res">0 lost</span></li>
+              <li class="reply" style="--d:5">Done — Q4 is in column E with its total in E6, and the save report says <strong>nothing was lost</strong>.</li>
+            </ol>
+          </div>
         </div>
+      </section>
 
-        <p class="io-note"><b>Not yet, in any of the three.</b> PDF export is written and tested in the engine but is not reachable from a published product — it ships when the Rust SDK does. <b>.xls</b> (the pre&#8209;2007 binary format) is refused rather than half&#8209;read; <b>.xlsm</b> opens, and its macros survive a round&#8209;trip byte for byte, but nothing here executes them. Custom worksheet functions written in JavaScript are deliberately absent — they would make a recalculation unrepeatable. Menus and toolbar tooltips are localized; panels and dialogs are still English.</p>
-      </div>
-    </section>
+      <!-- ── Which one ─────────────────────────────────────────────────────── -->
+      <section id="choose" class="section tint" aria-labelledby="choose-h">
+        <div class="wrap">
+          <div class="section-head split">
+            <div>
+              <p class="eyebrow"><span class="num">06</span> Three products, one engine</p>
+              <h2 id="choose-h">Which one do you want?</h2>
+            </div>
+            <p>The engine is the same in all three — the same import, the same 347 functions, the same writer. What differs is where it runs and what it is allowed to reach.</p>
+          </div>
 
-    <!-- Engine -->
-    <section id="engine" class="section">
-      <div class="wrap">
-        <p class="eyebrow">Under the hood</p>
-        <h2>One pipeline. Three hosts.</h2>
-        <p class="section-lede">Parsing sits below evaluation, so import and editing use the formula AST without pulling in the calc engine at all.</p>
-        <div class="pipeline">
-          <span class="stage">.xlsx · csv · tsv</span><span class="arrow">→</span>
-          <span class="stage">bounded admission</span><span class="arrow">→</span>
-          <span class="stage">import</span><span class="arrow">→</span>
-          <span class="stage accent">workbook model</span><span class="arrow">→</span>
-          <span class="stage">recalc</span><span class="arrow">→</span>
-          <span class="stage">layout</span><span class="arrow">→</span>
-          <span class="stage">render · write</span>
+          <div class="matrix-scroll rv" tabindex="0" role="region" aria-label="Comparison of the SDK, the desktop app and the self-hosted server">
+            <table class="matrix">
+              <thead>
+                <tr>
+                  <th scope="col"><span class="sr-only">Question</span></th>
+                  <th scope="col">SDK<span class="matrix-sub">@opencalc/sheet · 0.0.1</span></th>
+                  <th scope="col">Desktop app<span class="matrix-sub">0.0.3</span></th>
+                  <th scope="col">Self&#8209;hosted<span class="matrix-sub">three images · 0.0.1</span></th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <th scope="row">Where it runs</th>
+                  <td>Your web page, as WebAssembly</td>
+                  <td>macOS (Apple&nbsp;Silicon), Windows&nbsp;x64, Linux&nbsp;x64 — the engine as native Rust</td>
+                  <td>Your servers — amd64 and arm64</td>
+                </tr>
+                <tr>
+                  <th scope="row">How you get it</th>
+                  <td><code>npm i @opencalc/sheet</code></td>
+                  <td><code>.dmg</code> · <code>.exe</code> · <code>.deb</code> · <code>.AppImage</code></td>
+                  <td><code>docker run casualoffice/calc</code></td>
+                </tr>
+                <tr>
+                  <th scope="row">The whole engine — .xlsx, formulas, charts, pivots</th>
+                  <td class="yes">Yes</td>
+                  <td class="yes">Yes</td>
+                  <td class="yes">Yes</td>
+                </tr>
+                <tr>
+                  <th scope="row">Opening a file from the operating system</th>
+                  <td>Through your own code — you hand it the bytes</td>
+                  <td class="yes">Native dialogs, and double&#8209;click on <code>.xlsx .xlsm .ods .csv .tsv</code></td>
+                  <td>Through the document host, or your own storage</td>
+                </tr>
+                <tr>
+                  <th scope="row">Several people in one sheet at once</th>
+                  <td class="no">No — a single&#8209;user editing surface</td>
+                  <td class="yes">Yes, as a participant</td>
+                  <td class="yes">Yes — this <em>is</em> the server that orders and relays</td>
+                </tr>
+                <tr>
+                  <th scope="row">Fits into</th>
+                  <td>A web component, or the React wrapper</td>
+                  <td>The file types above</td>
+                  <td>Nextcloud, ownCloud, SharePoint, Moodle, Alfresco — one discovery URL</td>
+                </tr>
+                <tr>
+                  <th scope="row">Signed by the operating system</th>
+                  <td class="na">Not applicable</td>
+                  <td class="no">Not yet — <a href="./download.html#mac">the bypass is two clicks</a>, and the download page walks through it</td>
+                  <td class="na">Not applicable</td>
+                </tr>
+                <tr>
+                  <th scope="row">Worth knowing</th>
+                  <td>Each element carries its own engine, so page a long list in and out rather than mounting fifty. A pivot built here exports as its cells, not as a live Excel pivot.</td>
+                  <td>Pasting <em>from</em> another application arrives as values without formatting. The <code>.deb</code> needs Ubuntu&nbsp;23.04 or newer; the AppImage runs on 22.04.</td>
+                  <td>No Helm chart yet, and Redis is a single node. Prometheus metrics are on <code>/metrics</code>.</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <p class="io-note"><b>Not yet, in any of the three.</b> PDF export is written and tested in the engine but is not reachable from a published product — it ships when the Rust SDK does. <b>.xls</b> (the pre&#8209;2007 binary format) is refused rather than half&#8209;read; <b>.xlsm</b> opens, and its macros survive a round&#8209;trip byte for byte, but nothing here executes them. Custom worksheet functions written in JavaScript are deliberately absent — they would make a recalculation unrepeatable. Menus and toolbar tooltips are localized; panels and dialogs are still English.</p>
         </div>
-        <div class="hosts">
-          <div class="host"><h4>Native desktop</h4><p>A Tauri host where the whole engine — including calc — runs as native Rust at full speed.</p></div>
-          <div class="host"><h4>WebAssembly</h4><p>The same core compiled to <code>wasm32</code>, driving a canvas grid entirely client-side. The editor above is the proof.</p></div>
-          <div class="host"><h4>Headless</h4><p>No UI at all — batch convert, recalculate, and rasterize a viewport to a deterministic PNG on a server.</p></div>
-        </div>
-        <div class="code-card">
-          <div class="code-head"><span>Embed the engine</span><span class="code-crate">casual-calc-sdk</span></div>
+      </section>
+
+      <!-- ── Engine ────────────────────────────────────────────────────────── -->
+      <section id="engine" class="section" aria-labelledby="engine-h">
+        <div class="wrap">
+          <div class="section-head">
+            <p class="eyebrow"><span class="num">07</span> Under the hood</p>
+            <h2 id="engine-h">One pipeline. Three hosts.</h2>
+            <p class="section-lede">A layered Rust core. Parsing sits below evaluation, so import and editing use the formula AST without pulling in the calc engine at all — and the same input always produces the same model, values, layout and bytes.</p>
+          </div>
+          <ol class="pipe" aria-label="The engine pipeline">
+            <li style="--d:0"><span class="node">.xlsx · .ods · csv</span></li>
+            <li style="--d:1"><span class="node">bounded admission</span></li>
+            <li style="--d:2"><span class="node">import</span></li>
+            <li style="--d:3"><span class="node hub">workbook model</span></li>
+            <li style="--d:4"><span class="node">recalc</span></li>
+            <li style="--d:5"><span class="node">layout</span></li>
+            <li style="--d:6"><span class="node">render · write</span></li>
+          </ol>
+          <div class="hosts">
+            <div class="host rv" style="--i:0"><h3><svg viewBox="0 0 20 20" aria-hidden="true" focusable="false"><use href="./icons.fluent.svg#fi-tab_desktop_multiple"/></svg>Native desktop</h3><p>A Tauri host where the whole engine — including calc — runs as native Rust at full speed.</p></div>
+            <div class="host rv" style="--i:1"><h3><svg viewBox="0 0 20 20" aria-hidden="true" focusable="false"><use href="./icons.fluent.svg#fi-grid"/></svg>WebAssembly</h3><p>The same core compiled to <code>wasm32</code>, driving a canvas grid entirely client-side. The editor above is the proof.</p></div>
+            <div class="host rv" style="--i:2"><h3><svg viewBox="0 0 20 20" aria-hidden="true" focusable="false"><use href="./icons.fluent.svg#fi-settings"/></svg>Headless</h3><p>No UI at all — batch convert, recalculate, and rasterize a viewport to a deterministic PNG on a server.</p></div>
+          </div>
+          <div class="code-card rv">
+            <div class="code-head"><span class="dots" aria-hidden="true"><i></i><i></i><i></i></span><span>Embed the engine</span><span class="code-crate">casual-calc-sdk</span></div>
 <pre><code><span class="c">// One session composes every layer: open, edit, recalc, render, save.</span>
 <span class="k">let mut</span> session = WorkbookSession::open(bytes)?;
 session.edit(Operation::SetCell { sheet: <span class="n">0</span>, at: a1(<span class="s">"B2"</span>), cell })?;
 <span class="k">let</span> png  = session.render_png(<span class="n">0</span>, &amp;viewport)?;   <span class="c">// virtualized grid → PNG</span>
 <span class="k">let</span> xlsx = session.save()?;                     <span class="c">// deterministic bytes</span></code></pre>
+          </div>
         </div>
-      </div>
-    </section>
+      </section>
 
-    <!-- Embed / SDK -->
-    <section id="embed" class="section alt">
+      <!-- ── Self-host ─────────────────────────────────────────────────────── -->
+      <section id="selfhost" class="section band-dark" aria-labelledby="selfhost-h">
+        <div class="wrap">
+          <div class="split-2">
+            <div>
+              <p class="eyebrow"><span class="num">08</span> Self-hosted</p>
+              <h2 id="selfhost-h" class="h2" style="margin-top:.875rem">Run the whole thing yourself, before you integrate anything.</h2>
+              <p style="margin-top:1rem">
+                Co-editing is not a feature you should have to take on trust. Two
+                containers, one command, and you are sharing a link with a colleague and
+                typing into the same sheet. Download gives you an <code>.xlsx</code> with
+                what you both typed — the server hands the finished bytes back to the host
+                rather than keeping them.
+              </p>
+              <p style="margin-top:1rem">
+                The <strong>collaboration server</strong> is what OpenCalc supplies —
+                ordering, presence, the socket. The <strong>host</strong> is what your
+                product supplies — documents, identity, tokens, saving: four endpoints and
+                a signature, and the host you just ran is the worked example.
+              </p>
+              <div class="cta-row" style="margin-top:1.75rem">
+                <a class="btn btn-light" href="./deploy.html">The self-hosting guide</a>
+                <a class="btn btn-ondark" href="https://github.com/CasualOffice/opencalc">Clone on GitHub</a>
+              </div>
+            </div>
+            <div class="code-card rv">
+              <div class="code-head"><span class="dots" aria-hidden="true"><i></i><i></i><i></i></span><span>terminal</span><span class="code-crate">docker compose</span></div>
+<pre class="seq"><code><span style="display:block;--d:0"><span class="c"># change OPENCALC_SHARED_SECRET in .env</span></span><span style="display:block;--d:1"><span class="k">$</span> cp .env.example .env</span><span style="display:block;--d:2"><span class="k">$</span> docker compose up</span><span style="display:block;--d:3"><span class="k">$</span> open http://localhost:8080</span><span style="display:block;--d:4"><span class="c"># make a sheet, press Share, send the link</span></span><span style="display:block;--d:5">&#8203;</span><span style="display:block;--d:6"><span class="c"># and a cluster, when one node is not enough</span></span><span style="display:block;--d:7"><span class="k">$</span> docker compose -f docker-compose.cluster.yml up</span></code></pre>
+            </div>
+          </div>
+          <div class="facts">
+            <div><strong>Published images</strong><p><code>casualoffice/calc</code>, <code>calc-host</code> and <code>wopi</code> — pulled, not built. Add <code>--build</code> to build from your checkout.</p></div>
+            <div><strong>amd64 and arm64</strong><p>Each with an SBOM and a build-provenance attestation naming the repository, workflow and commit it came from.</p></div>
+            <div><strong>Your network only</strong><p>Nothing phones home, no licence check, and no document leaves your servers. Prometheus metrics on <code>/metrics</code>.</p></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ── Compare ───────────────────────────────────────────────────────── -->
+      <section id="compare" class="section" aria-labelledby="compare-h">
+        <div class="wrap">
+          <div class="section-head">
+            <p class="eyebrow"><span class="num">09</span> The trade-off everyone else makes</p>
+            <h2 id="compare-h">Fidelity, or embeddability. Pick both.</h2>
+            <p class="section-lede">Most options force a compromise: a suite you can't embed, a converter that quietly drops what it doesn't understand, or a web grid that treats the DOM as the source of truth and calculates on a server.</p>
+          </div>
+          <div class="cmp rv" role="table" aria-label="How OpenCalc compares with other approaches">
+            <div class="cmp-row cmp-head" role="row">
+              <div class="cmp-approach" role="columnheader">Approach</div>
+              <div role="columnheader">Embeddable</div><div role="columnheader">Offline calc</div><div role="columnheader">Loss-aware</div><div role="columnheader">Deterministic bytes</div>
+            </div>
+            <div class="cmp-row" role="row">
+              <div class="cmp-approach" role="rowheader"><b>A full office suite</b><span>Excel, LibreOffice Calc</span></div>
+              <div class="no" role="cell">No</div><div class="yes" role="cell">Yes</div><div class="yes" role="cell">Yes</div><div class="no" role="cell">No</div>
+            </div>
+            <div class="cmp-row" role="row">
+              <div class="cmp-approach" role="rowheader"><b>A converter library</b><span>read or write, no model</span></div>
+              <div class="yes" role="cell">Yes</div><div class="part" role="cell">Partial</div><div class="no" role="cell">No</div><div class="part" role="cell">Varies</div>
+            </div>
+            <div class="cmp-row" role="row">
+              <div class="cmp-approach" role="rowheader"><b>A web grid + server calc</b><span>DOM as source of truth</span></div>
+              <div class="part" role="cell">Partial</div><div class="no" role="cell">No</div><div class="no" role="cell">No</div><div class="no" role="cell">No</div>
+            </div>
+            <div class="cmp-row cmp-hi" role="row">
+              <div class="cmp-approach" role="rowheader"><b>OpenCalc</b><span>one Rust core, any host</span></div>
+              <div class="yes" role="cell">Yes</div><div class="yes" role="cell">Yes</div><div class="yes" role="cell">Yes</div><div class="yes" role="cell">Yes</div>
+            </div>
+          </div>
+          <p class="cmp-note">Categories, not products — Excel and LibreOffice Calc remain our semantics and fidelity oracles, and we study IronCalc, calamine and Univer openly.</p>
+        </div>
+      </section>
+
+      <!-- ── Roadmap ───────────────────────────────────────────────────────── -->
+      <section id="roadmap" class="section tint" aria-labelledby="roadmap-h">
+        <div class="wrap">
+          <div class="section-head">
+            <p class="eyebrow"><span class="num">10</span> Honest status</p>
+            <h2 id="roadmap-h">Where it is, and what's next.</h2>
+            <p class="section-lede">Delivered in capability-gated phases. The workbook has to be read, modeled, preserved, written back, laid out and rendered before a single cell is evaluated.</p>
+          </div>
+          <ol class="phases">
+            <li class="phase is-done">
+              <div class="phase-id">Phase 0–1B</div>
+              <div class="phase-body"><div class="phase-title">Foundation, import and semantic writer</div><div class="phase-detail">Bounded XLSX reader, normalized model, preservation ledger, and a round-trip that is a gated semantic fixed point.</div></div>
+              <span class="status done"><span class="dot"></span>Done</span>
+            </li>
+            <li class="phase is-done">
+              <div class="phase-id">Phase 1C–1D</div>
+              <div class="phase-body"><div class="phase-title">Grid layout and render</div><div class="phase-detail">Column and row geometry, merges, number-format display, display list, CPU raster and viewport virtualization.</div></div>
+              <span class="status done"><span class="dot"></span>Done · glyph shaping pending</span>
+            </li>
+            <li class="phase is-done">
+              <div class="phase-id">Phase 1E</div>
+              <div class="phase-body"><div class="phase-title">Browser grid editor</div><div class="phase-detail">Canvas grid over the WebAssembly engine: selection, formatting, structural ops, undo and redo.</div></div>
+              <span class="status done"><span class="dot"></span>Done</span>
+            </li>
+            <li class="phase is-prog">
+              <div class="phase-id">Phase 2</div>
+              <div class="phase-body"><div class="phase-title">Formula and calc engine</div><div class="phase-detail">347 of the spec's 356 functions, dynamic arrays, LET and LAMBDA. The nine that are missing each need something this cannot have — a live OLAP cube, a COM server — and are named rather than counted. The incremental dependency graph and the sub-50 ms worst case are the remaining work.</div></div>
+              <span class="status prog"><span class="dot"></span>In progress</span>
+            </li>
+            <li class="phase is-done">
+              <div class="phase-id">Phase 3</div>
+              <div class="phase-body"><div class="phase-title">Spreadsheet features</div><div class="phase-detail">Conditional formatting, data validation, protection, tables and structured references, autofilter, print setup, charts and pivot tables — all shipped. A pivot built here still exports as its cells rather than as a live Excel pivot; that part of the writer is deliberately staged.</div></div>
+              <span class="status done"><span class="dot"></span>Done · one gap named</span>
+            </li>
+            <li class="phase is-prog">
+              <div class="phase-id">Phase 4–6</div>
+              <div class="phase-body"><div class="phase-title">SDK, collaboration, desktop, 1.0</div><div class="phase-detail">The SDK is published and takes a configuration; real-time collaboration runs on a clustered server with resume, presence and relay; the desktop shell ships for three platforms. What remains is API stability, the Helm chart, and support guarantees.</div></div>
+              <span class="status prog"><span class="dot"></span>In progress</span>
+            </li>
+          </ol>
+        </div>
+      </section>
+
+      <!-- ── Final ─────────────────────────────────────────────────────────── -->
+      <section class="section final" aria-labelledby="final-h">
+        <div class="wrap">
+          <svg class="mark bigmark" viewBox="0 0 32 32" aria-hidden="true" focusable="false"><rect class="m-bg" width="32" height="32" rx="7"/><rect class="m-ln" x="7.5" y="7.5" width="17" height="17" rx="2" pathLength="1"/><path class="m-ln" d="M7.5 13.5h17M13.5 7.5v17" pathLength="1"/></svg>
+          <h2 id="final-h">Open the editor and start typing.</h2>
+          <p class="lede">No sign-up, no upload, no build step. Bring an <code>.xlsx</code> and watch it round-trip — then take the same thing to your desktop, your servers or your own product.</p>
+          <div class="cta-row" style="justify-content:center">
+            <a class="btn btn-primary btn-lg" href="./editor.html">Open the editor</a>
+            <a class="btn btn-secondary btn-lg" href="./download.html">Download for desktop</a>
+            <a class="btn btn-secondary btn-lg" href="https://github.com/CasualOffice/opencalc"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path fill="currentColor" d="M12 .5a12 12 0 0 0-3.8 23.4c.6.1.8-.3.8-.6v-2c-3.3.7-4-1.6-4-1.6-.6-1.4-1.3-1.8-1.3-1.8-1.1-.7 0-.7 0-.7 1.2 0 1.8 1.2 1.8 1.2 1.1 1.8 2.8 1.3 3.5 1 .1-.8.4-1.3.7-1.6-2.7-.3-5.5-1.3-5.5-5.9 0-1.3.5-2.4 1.2-3.2 0-.4-.5-1.6.2-3.3 0 0 1-.3 3.3 1.2a11.5 11.5 0 0 1 6 0C17.3 5 18.3 5.3 18.3 5.3c.7 1.7.2 2.9.1 3.3.8.8 1.2 1.9 1.2 3.2 0 4.6-2.8 5.6-5.5 5.9.4.4.8 1.1.8 2.2v3.3c0 .3.2.7.8.6A12 12 0 0 0 12 .5Z"/></svg>Star on GitHub</a>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <footer class="site-footer">
       <div class="wrap">
-        <p class="eyebrow">Embed it</p>
-        <h2>Ship a spreadsheet inside your product.</h2>
-        <p class="section-lede">
-          One custom element, one line of markup, and your users get the editor
-          above — <code>.xlsx</code> in and out, 347 functions, pivot tables and
-          charts, all client-side. It works in React, Next.js, Vue, Svelte or
-          plain HTML.
-        </p>
-
-        <div class="steps">
-          <article class="step">
-            <h4>Install</h4>
-            <p>The element and, if you use React, its wrapper. No peer dependency on a UI framework.</p>
-<pre><span class="c"># the editor as a custom element</span>
-npm install @opencalc/sheet</pre>
-          </article>
-          <article class="step">
-            <h4>Serve the engine yourself</h4>
-            <p>The WebAssembly binary is copied into your build and served from your origin — never from a CDN we run.</p>
-<pre><span class="c"># package.json → postinstall</span>
-opencalc-assets ./public/opencalc</pre>
-          </article>
-          <article class="step">
-            <h4>Mount it</h4>
-            <p>Give it a height and it boots. Open a workbook, get bytes back, listen for changes.</p>
-<pre><span class="k">import</span> <span class="s">"@opencalc/sheet"</span>;
-
-&lt;opencalc-sheet style=<span class="s">"height:600px"</span>&gt;</pre>
-          </article>
-        </div>
-
-        <div class="code-card">
-          <div class="code-head"><span>Load a file, react to edits, save it back</span><span class="code-crate">@opencalc/sheet</span></div>
-<pre><code><span class="k">const</span> sheet = document.querySelector(<span class="s">"opencalc-sheet"</span>);
-
-sheet.theme({ light: { accentColor: <span class="s">"#7c3aed"</span> } });  <span class="c">// CSS tokens, scoped by a shadow root</span>
-sheet.chrome({ statusbar: <span class="n">false</span> });                  <span class="c">// hide whole regions…</span>
-sheet.commands({ hidden: [<span class="s">"file.open"</span>] });          <span class="c">// …or single controls, by id</span>
-
-<span class="k">await</span> sheet.configure({ access: <span class="s">"view"</span> });          <span class="c">// "edit" | "view" | "preview"</span>
-<span class="k">await</span> sheet.open(bytes, <span class="s">"budget.xlsx"</span>);
-
-sheet.on(<span class="s">"cellsChanged"</span>, (e) =&gt; {
-  <span class="k">if</span> (e.source !== <span class="s">"api"</span>) persist(<span class="k">await</span> sheet.save());  <span class="c">// deterministic .xlsx</span>
-});</code></pre>
-        </div>
-
-        <p class="embed-note">
-          Your CSS cannot reach in and its CSS cannot reach out — the element
-          isolates itself in a shadow root, and theming happens through typed
-          custom properties rather than by overriding our selectors. Read-only
-          and preview refuse writes <b>in the engine</b>, not by hiding buttons.
-          <b>Alpha:</b> published as <code>0.0.x</code> — everything here
-          works, but the API is not stable until 1.0, so pin what you test
-          against.
-        </p>
-
-        <div class="embed-more">
-          <a class="btn btn-ink btn-lg" href="./docs.html">Read the integration guide</a>
-          <a class="btn btn-outline btn-lg" href="./embed.html">Try the live embed demo</a>
-          <a class="btn btn-outline btn-lg" href="https://github.com/CasualOffice/opencalc/tree/main/sdk/examples">Runnable examples</a>
-        </div>
-      </div>
-    </section>
-
-    <!-- Compare -->
-    <!-- Self-host / try it -->
-    <section id="selfhost" class="section">
-      <div class="wrap">
-        <p class="eyebrow">Try it</p>
-        <h2>Run the whole thing yourself, before you integrate anything.</h2>
-        <p class="section-lede">
-          Co-editing is not a feature you should have to take on trust. Two containers,
-          one command, and you are sharing a link with a colleague and typing into the
-          same sheet.
-        </p>
-
-        <div class="steps">
-          <article class="step">
-            <h4>Bring it up</h4>
-            <p>The editor, a collaboration server and a reference host. Nothing else to install.</p>
-<pre><span class="c"># change OPENCALC_SHARED_SECRET in .env</span>
-cp .env.example .env
-docker compose up</pre>
-          </article>
-          <article class="step">
-            <h4>Share a link</h4>
-            <p>Open <code>localhost:8080</code>, make a spreadsheet, press <strong>Share</strong>, send the link. You will both see each other's cursors and each other's edits.</p>
-<pre><span class="c"># and a cluster, when one node is not enough</span>
-docker compose -f docker-compose.cluster.yml up</pre>
-          </article>
-          <article class="step">
-            <h4>Take the file away</h4>
-            <p>Download gives you an <code>.xlsx</code> with what you both typed — the server hands the finished bytes back to the host rather than keeping them.</p>
-          </article>
-        </div>
-
-        <p class="section-lede" style="margin-top:28px">
-          <strong>The images are published</strong>, so that pulls rather than builds:
-        </p>
-<pre>docker pull casualoffice/calc<span class="c">        # the collaboration server</span>
-docker pull casualoffice/calc-host<span class="c">   # the editor, and your documents</span>
-docker pull casualoffice/wopi<span class="c">        # the WOPI adapter, if you need one</span></pre>
-        <p class="section-lede">
-          Each is <code>linux/amd64</code> and <code>linux/arm64</code>, and each ships an
-          SBOM and a build-provenance attestation naming the repository, workflow and
-          commit it came from — so what you pull can be traced back to what is here.
-          Add <code>--build</code> to any compose command to build from your own checkout
-          instead.
-        </p>
-
-        <p class="section-lede">
-          The two containers are the integration boundary, not a demo artefact. The
-          <strong>collaboration server</strong> is what OpenCalc supplies — ordering,
-          presence, the socket. The <strong>host</strong> is what your product supplies —
-          documents, identity, tokens, saving. It holds no per-document state and cannot
-          mint tokens, so it is told, per join, by a party that already knows. That is
-          four endpoints and a signature, and the host you just ran is the worked example
-          of the one you would write.
-        </p>
-        <p class="section-lede">
-          <a href="./deploy.html">The self-hosting guide</a>
-          covers reverse proxies, TLS, every setting, monitoring, backup and what the demo
-          defaults are not safe for.
-        </p>
-      </div>
-    </section>
-
-    <section id="compare" class="section">
-      <div class="wrap">
-        <p class="eyebrow">The trade-off everyone else makes</p>
-        <h2>Fidelity, or embeddability. Pick both.</h2>
-        <p class="section-lede">Most options force a compromise: a suite you can't embed, a converter that quietly drops what it doesn't understand, or a web grid that treats the DOM as the source of truth and calculates on a server.</p>
-        <div class="cmp">
-          <div class="cmp-row cmp-head">
-            <div class="cmp-approach">Approach</div>
-            <div>Embeddable</div><div>Offline calc</div><div>Loss-aware</div><div>Deterministic bytes</div>
+        <div class="foot-grid">
+          <div>
+            <a class="brand" href="./index.html"><svg class="mark" viewBox="0 0 32 32" aria-hidden="true" focusable="false"><rect class="m-bg" width="32" height="32" rx="7"/><rect class="m-ln" x="7.5" y="7.5" width="17" height="17" rx="2"/><path class="m-ln" d="M7.5 13.5h17M13.5 7.5v17"/></svg>OpenCalc</a>
+            <p class="foot-tag">An open-source, Excel-compatible spreadsheet — and the engine behind it, for anyone to embed.</p>
           </div>
-          <div class="cmp-row">
-            <div class="cmp-approach"><b>A full office suite</b><span>Excel, LibreOffice Calc</span></div>
-            <div class="no">No</div><div class="yes">Yes</div><div class="yes">Yes</div><div class="no">No</div>
-          </div>
-          <div class="cmp-row">
-            <div class="cmp-approach"><b>A converter library</b><span>read or write, no model</span></div>
-            <div class="yes">Yes</div><div class="part">Partial</div><div class="no">No</div><div class="part">Varies</div>
-          </div>
-          <div class="cmp-row">
-            <div class="cmp-approach"><b>A web grid + server calc</b><span>DOM as source of truth</span></div>
-            <div class="part">Partial</div><div class="no">No</div><div class="no">No</div><div class="no">No</div>
-          </div>
-          <div class="cmp-row cmp-hi">
-            <div class="cmp-approach"><b>OpenCalc</b><span>one Rust core, any host</span></div>
-            <div class="yes">Yes</div><div class="yes">Yes</div><div class="yes">Yes</div><div class="yes">Yes</div>
-          </div>
+          <nav class="foot-col" aria-labelledby="f-product">
+            <h2 id="f-product">Product</h2>
+            <ul>
+              <li><a href="./editor.html">Open the editor</a></li>
+              <li><a href="./download.html">Download for desktop</a></li>
+              <li><a href="./index.html#today">What works today</a></li>
+              <li><a href="./index.html#roadmap">Roadmap</a></li>
+            </ul>
+          </nav>
+          <nav class="foot-col" aria-labelledby="f-dev">
+            <h2 id="f-dev">Developers</h2>
+            <ul>
+              <li><a href="./docs.html">SDK integration guide</a></li>
+              <li><a href="./docs.html#quick">Quick start</a></li>
+              <li><a href="./embed.html">Live embed demo</a></li>
+              <li><a href="./deploy.html">Self-hosting guide</a></li>
+              <li><a href="https://github.com/CasualOffice/opencalc/tree/main/server/casual-calc-mcp">MCP server</a></li>
+            </ul>
+          </nav>
+          <nav class="foot-col" aria-labelledby="f-project">
+            <h2 id="f-project">Project</h2>
+            <ul>
+              <li><a href="https://github.com/CasualOffice/opencalc">GitHub</a></li>
+              <li><a href="https://github.com/CasualOffice/opencalc/blob/main/docs/02-ARCHITECTURE.md">Architecture</a></li>
+              <li><a href="https://github.com/CasualOffice/opencalc/blob/main/docs/52-FIDELITY-TRACKER.md">Fidelity ledger</a></li>
+              <li><a href="https://github.com/CasualOffice/opencalc/blob/main/docs/14-EXECUTION-TRACKER.md">Execution tracker</a></li>
+              <li><a href="https://github.com/CasualOffice/opencalc/blob/main/LICENSE">License</a></li>
+            </ul>
+          </nav>
         </div>
-        <p class="cmp-note">Categories, not products — Excel and LibreOffice Calc remain our semantics and fidelity oracles, and we study IronCalc, calamine and Univer openly.</p>
-      </div>
-    </section>
-
-    <!-- Roadmap -->
-    <section id="roadmap" class="section alt">
-      <div class="wrap">
-        <p class="eyebrow">Honest status</p>
-        <h2>Where it is, and what's next.</h2>
-        <p class="section-lede">Delivered in capability-gated phases. The workbook has to be read, modeled, preserved, written back, laid out and rendered before a single cell is evaluated.</p>
-        <div class="phases">
-          <div class="phase">
-            <div class="phase-id">Phase 0–1B</div>
-            <div class="phase-body"><div class="phase-title">Foundation, import and semantic writer</div><div class="phase-detail">Bounded XLSX reader, normalized model, preservation ledger, and a round-trip that is a gated semantic fixed point.</div></div>
-            <span class="status done"><span class="dot"></span>Done</span>
-          </div>
-          <div class="phase">
-            <div class="phase-id">Phase 1C–1D</div>
-            <div class="phase-body"><div class="phase-title">Grid layout and render</div><div class="phase-detail">Column and row geometry, merges, number-format display, display list, CPU raster and viewport virtualization.</div></div>
-            <span class="status done"><span class="dot"></span>Done · glyph shaping pending</span>
-          </div>
-          <div class="phase">
-            <div class="phase-id">Phase 1E</div>
-            <div class="phase-body"><div class="phase-title">Browser grid editor</div><div class="phase-detail">Canvas grid over the WebAssembly engine: selection, formatting, structural ops, undo and redo.</div></div>
-            <span class="status done"><span class="dot"></span>Done</span>
-          </div>
-          <div class="phase">
-            <div class="phase-id">Phase 2</div>
-            <div class="phase-body"><div class="phase-title">Formula and calc engine</div><div class="phase-detail">347 of the spec's 356 functions, dynamic arrays, LET and LAMBDA. The nine that are missing each need something this cannot have — a live OLAP cube, a COM server — and are named rather than counted. The incremental dependency graph and the sub-50 ms worst case are the remaining work.</div></div>
-            <span class="status prog"><span class="dot"></span>In progress</span>
-          </div>
-          <div class="phase">
-            <div class="phase-id">Phase 3</div>
-            <div class="phase-body"><div class="phase-title">Spreadsheet features</div><div class="phase-detail">Conditional formatting, data validation, protection, tables and structured references, autofilter, print setup, charts and pivot tables — all shipped. A pivot built here still exports as its cells rather than as a live Excel pivot; that part of the writer is deliberately staged.</div></div>
-            <span class="status done"><span class="dot"></span>Done · one gap named</span>
-          </div>
-          <div class="phase">
-            <div class="phase-id">Phase 4–6</div>
-            <div class="phase-body"><div class="phase-title">SDK beta, collaboration, 1.0</div><div class="phase-detail">The host surface now takes a configuration: admission limits for untrusted files, calculation mode, the clock and seed calculations read, and how far undo reaches. Next is the concurrency model for shared editing, then support guarantees.</div></div>
-            <span class="status prog"><span class="dot"></span>In progress</span>
-          </div>
+        <div class="foot-bottom">
+          <span>© 2026 CasualOffice · Apache-2.0 · Alpha — the API is not yet stable.</span>
+          <span>Not affiliated with Microsoft. Excel is a trademark of Microsoft Corporation.</span>
         </div>
-      </div>
-    </section>
-
-    <!-- Dark CTA band -->
-    <section class="cta-band">
-      <div class="wrap cta-grid">
-        <div>
-          <h2>Open the editor and start typing.</h2>
-          <p>No sign-up, no upload, no build step. Bring an <code>.xlsx</code> and watch it round-trip — then put the same thing in your own product.</p>
-          <div class="cta">
-            <a class="btn btn-light btn-lg" href="./editor.html">Open the editor</a>
-            <a class="btn btn-ondark btn-lg" href="./download.html">Download for desktop</a>
-            <a class="btn btn-ondark btn-lg" href="./docs.html">Integration guide</a>
-            <a class="btn btn-ondark btn-lg" href="https://github.com/CasualOffice/opencalc">Star on GitHub</a>
-          </div>
-        </div>
-        <div class="contrib">
-          <h4>Contributing</h4>
-          <p>Apache-2.0, CI-gated, fuzzed and benchmarked. Fidelity bugs with a fixture attached are the most valuable thing you can send.</p>
-          <div class="contrib-cmd">cargo test --workspace</div>
-        </div>
-      </div>
-    </section>
-
-    <!-- Footer -->
-    <footer class="foot">
-      <div class="wrap foot-grid">
-        <div>
-          <span class="brand"><span class="logo" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18M9 3v18"/></svg></span>OpenCalc</span>
-          <p class="foot-tag">The spreadsheet engine behind Casual Sheets, and an SDK others can embed.</p>
-        </div>
-        <div class="foot-col">
-          <span class="foot-h">SDK</span>
-          <a href="./docs.html">Integration guide</a>
-          <a href="./docs.html#quick">Quick start</a>
-          <a href="./embed.html">Live embed demo</a>
-          <a href="https://github.com/CasualOffice/opencalc/tree/main/sdk/examples">Framework examples</a>
-        </div>
-        <div class="foot-col">
-          <span class="foot-h">Docs</span>
-          <a href="https://github.com/CasualOffice/opencalc/blob/main/docs/02-ARCHITECTURE.md">Architecture</a>
-          <a href="https://github.com/CasualOffice/opencalc/blob/main/docs/40-FORMULA-AND-CALC-ENGINE-ARCHITECTURE.md">Calc engine design</a>
-          <a href="https://github.com/CasualOffice/opencalc/blob/main/docs/52-FIDELITY-TRACKER.md">Fidelity ledger</a>
-          <a href="https://github.com/CasualOffice/opencalc/blob/main/docs/30-PERFORMANCE-AND-CAPACITY-TARGETS.md">Performance targets</a>
-        </div>
-        <div class="foot-col">
-          <span class="foot-h">Project</span>
-          <a href="https://github.com/CasualOffice/opencalc/blob/main/docs/48-FEATURE-PIPELINE.md">Roadmap &amp; delivery</a>
-          <a href="https://github.com/CasualOffice/opencalc/blob/main/docs/14-EXECUTION-TRACKER.md">Execution tracker</a>
-          <a href="https://github.com/CasualOffice/opencalc/blob/main/docs/18-SUPPORT-MATRIX.md">Editor parity</a>
-          <a href="https://github.com/CasualOffice/opencalc/blob/main/docs/46-COMPETITIVE-PARITY-ANALYSIS.md">Competitive analysis</a>
-        </div>
-        <div class="foot-col">
-          <span class="foot-h">Source</span>
-          <a href="https://github.com/CasualOffice/opencalc">GitHub</a>
-          <a href="./editor.html">Live WASM demo</a>
-          <a href="https://github.com/CasualOffice/opencalc/blob/main/LICENSE">License</a>
-          <a href="https://github.com/CasualOffice">CasualOffice</a>
-        </div>
-      </div>
-      <div class="wrap foot-bottom">
-        <span>© 2026 CasualOffice · Apache-2.0 · built in Rust</span>
-        <span>Alpha — the API is not yet stable.</span>
       </div>
     </footer>
   </body>
