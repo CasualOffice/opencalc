@@ -63,7 +63,13 @@ pub(crate) fn eval_matrix(
                 (Ok(x), Ok(y)) => (x, y),
                 (Err(e), _) | (_, Err(e)) => return Value::Error(e),
             };
-            let mut cells = Vec::with_capacity(a.rows * b.cols);
+            // The result is rows(a) × cols(b): two modest inputs can ask for
+            // an enormous product.
+            let size = match checked_array_size(a.rows, b.cols) {
+                Ok(n) => n,
+                Err(e) => return Value::Error(e),
+            };
+            let mut cells = Vec::with_capacity(size);
             for r in 0..a.rows {
                 for c in 0..b.cols {
                     let mut sum = 0.0;
@@ -520,18 +526,19 @@ pub(crate) fn eval_dynamic(
                 Ok(v) => v,
                 Err(e) => return e,
             };
-            let (rows, cols, start, step) = (v[0] as i64, v[1] as i64, v[2], v[3]);
+            let (rows, cols, start, step) =
+                (array_dimension(v[0]), array_dimension(v[1]), v[2], v[3]);
             if rows < 1 || cols < 1 {
                 return Value::Error(ErrorValue::Value);
             }
-            let cells = (0..rows * cols)
+            let size = match checked_array_size(rows, cols) {
+                Ok(n) => n,
+                Err(e) => return Value::Error(e),
+            };
+            let cells = (0..size)
                 .map(|i| Value::Number(start + step * i as f64))
                 .collect();
-            Value::Array {
-                rows: rows as usize,
-                cols: cols as usize,
-                cells,
-            }
+            Value::Array { rows, cols, cells }
         }
         "XMATCH" | "XLOOKUP" => {
             let min = if name == "XMATCH" { 2 } else { 3 };
@@ -776,15 +783,19 @@ pub(crate) fn eval_lambda_helper(
             if args.len() != 3 {
                 return Value::Error(ErrorValue::Value);
             }
-            let rows = ev.eval_expr(sheet, &args[0]).as_number().unwrap_or(0.0) as i64;
-            let cols = ev.eval_expr(sheet, &args[1]).as_number().unwrap_or(0.0) as i64;
-            if rows < 1 || cols < 1 || rows * cols > 1_000_000 {
+            let rows = array_dimension(ev.eval_expr(sheet, &args[0]).as_number().unwrap_or(0.0));
+            let cols = array_dimension(ev.eval_expr(sheet, &args[1]).as_number().unwrap_or(0.0));
+            if rows < 1 || cols < 1 {
                 return Value::Error(ErrorValue::Value);
             }
+            let size = match checked_array_size(rows, cols) {
+                Ok(n) => n,
+                Err(e) => return Value::Error(e),
+            };
             let Some(f) = lambda_arg(ev, sheet, &args[2]) else {
                 return Value::Error(ErrorValue::Value);
             };
-            let mut cells = Vec::with_capacity((rows * cols) as usize);
+            let mut cells = Vec::with_capacity(size);
             for r in 1..=rows {
                 for c in 1..=cols {
                     // One-based, because the lambda is written in spreadsheet
@@ -796,11 +807,7 @@ pub(crate) fn eval_lambda_helper(
                     ));
                 }
             }
-            Value::Array {
-                rows: rows as usize,
-                cols: cols as usize,
-                cells,
-            }
+            Value::Array { rows, cols, cells }
         }
         "MAP" => {
             if args.len() < 2 {

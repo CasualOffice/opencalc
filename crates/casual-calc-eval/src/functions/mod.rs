@@ -41,6 +41,51 @@ pub(crate) use text::*;
 /// range buckets is the Phase-2 optimization; this bounds the naive scan).
 pub(crate) const MAX_RANGE_CELLS: u64 = 2_000_000;
 
+/// The most rows an array result may have: the grid's, 1,048,576.
+pub(crate) const MAX_ARRAY_ROWS: usize = casual_calc_formula::MAX_ROW as usize + 1;
+/// The most columns an array result may have: the grid's, 16,384.
+pub(crate) const MAX_ARRAY_COLS: usize = casual_calc_formula::MAX_COL as usize + 1;
+/// The most cells any one array result may hold.
+///
+/// The same budget [`MAX_RANGE_CELLS`] puts on reading a range, so a function
+/// cannot *produce* more than the engine would agree to *read*. Two million
+/// values is some 80 MB of [`Value`]s — large, and survivable in a browser
+/// tab; the whole grid (17 billion cells) is not, and asking for it aborted
+/// the process.
+pub(crate) const MAX_ARRAY_CELLS: usize = MAX_RANGE_CELLS as usize;
+
+/// The one bound every array-producing function checks **before**
+/// allocating: no more rows or columns than the grid, and no more cells than
+/// [`MAX_ARRAY_CELLS`], multiplied without overflow. `#NUM!` otherwise —
+/// the error the engine already gives a range too large to read.
+///
+/// `SEQUENCE(1E10,1E10)` used to overflow `rows * cols` and panic, and
+/// `SEQUENCE(1048576,16384)` to abort on allocation; both are reachable from
+/// any opened file.
+pub(crate) fn checked_array_size(rows: usize, cols: usize) -> Result<usize, ErrorValue> {
+    if rows > MAX_ARRAY_ROWS || cols > MAX_ARRAY_COLS {
+        return Err(ErrorValue::Num);
+    }
+    rows.checked_mul(cols)
+        .filter(|&n| n <= MAX_ARRAY_CELLS)
+        .ok_or(ErrorValue::Num)
+}
+
+/// A user-supplied dimension as a count: truncated, and 0 for anything below
+/// one or not a number (the caller decides what 0 means). Saturates rather
+/// than wrapping, so a huge request stays huge and [`checked_array_size`]
+/// refuses it.
+pub(crate) fn array_dimension(n: f64) -> usize {
+    if n.is_finite() && n >= 1.0 {
+        n.trunc() as usize
+    } else {
+        0
+    }
+}
+
+/// The longest text Excel will hold in a cell, 32,767 characters.
+pub(crate) const MAX_TEXT_CHARS: usize = 32_767;
+
 /// Whether a name is a builtin, so a defined name cannot shadow one.
 ///
 /// A LAMBDA named `SUM` must not replace `SUM` — Excel refuses the name, and

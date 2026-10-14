@@ -189,6 +189,15 @@ pub(crate) fn eval_rept(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -> 
     if count < 0 {
         return Value::Error(ErrorValue::Value);
     }
+    // Excel's cap on any text, checked before building it: `REPT("x",1E9)`
+    // was a gigabyte allocated on request, and a large enough count aborted
+    // the process.
+    let fits = (text.chars().count() as u64)
+        .checked_mul(count as u64)
+        .is_some_and(|n| n <= MAX_TEXT_CHARS as u64);
+    if !fits {
+        return Value::Error(ErrorValue::Value);
+    }
     Value::Text(text.repeat(count as usize))
 }
 
@@ -338,6 +347,9 @@ pub(crate) fn eval_clean(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) ->
     }
 }
 
+/// The most decimals `FIXED` and `DOLLAR` accept, as Excel documents.
+const MAX_FIXED_DECIMALS: i32 = 127;
+
 /// `FIXED(number, [decimals], [no_commas])` — fixed-point text.
 pub(crate) fn eval_fixed(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -> Value {
     if args.is_empty() || args.len() > 3 {
@@ -363,6 +375,11 @@ pub(crate) fn eval_fixed(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) ->
     };
     // A negative `decimals` rounds to the left of the point: FIXED(1234.5,-2)
     // is "1,200". Clamping it to zero instead would quietly change the answer.
+    // Excel allows at most 127 decimals. Unchecked, the count went straight
+    // into a format width: `FIXED(1,1E9)` built a gigabyte of zeros.
+    if decimals > MAX_FIXED_DECIMALS {
+        return Value::Error(ErrorValue::Value);
+    }
     let (rounded, places) = if decimals < 0 {
         let factor = 10f64.powi(-decimals);
         ((value / factor).round() * factor, 0usize)
@@ -393,6 +410,11 @@ pub(crate) fn eval_dollar(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -
         },
         None => 2,
     };
+    // Excel allows at most 127 decimals. Unchecked, the count went straight
+    // into a format width: `FIXED(1,1E9)` built a gigabyte of zeros.
+    if decimals > MAX_FIXED_DECIMALS {
+        return Value::Error(ErrorValue::Value);
+    }
     let (rounded, places) = if decimals < 0 {
         let factor = 10f64.powi(-decimals);
         ((value / factor).round() * factor, 0usize)

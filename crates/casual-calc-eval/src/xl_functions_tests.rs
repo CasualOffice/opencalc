@@ -808,3 +808,58 @@ fn the_error_function_is_precise_to_the_last_digit() {
     num("NORMSDIST(-6)", 9.865_876_450_376_98e-10);
     num("NORM.S.DIST(1,TRUE)", 0.841344746068543);
 }
+
+// --- Security: every array result is bounded ---------------------------------
+
+/// Evaluate, and fail if it took long enough to mean something was
+/// materialised: an over-sized array must be refused from its dimensions, not
+/// discovered by allocating it.
+#[track_caller]
+fn refused_quickly(formula: &str, expected: ErrorValue) {
+    let started = std::time::Instant::now();
+    error(formula, expected);
+    let took = started.elapsed();
+    assert!(
+        took < std::time::Duration::from_secs(2),
+        "{formula} took {took:?} — it built the array before refusing it"
+    );
+}
+
+/// `SEQUENCE(1E10,1E10)` overflowed `rows * cols` and panicked; a size inside
+/// `i64` but past memory — the whole grid, 17 billion cells — aborted the
+/// process on allocation. Either is reachable from a file someone opens, in
+/// the browser, the desktop shell or the collaboration server.
+#[test]
+fn an_array_larger_than_the_engine_can_hold_is_an_error_not_a_crash() {
+    refused_quickly("SEQUENCE(1E10,1E10)", ErrorValue::Num);
+    refused_quickly("SEQUENCE(1048576,16384)", ErrorValue::Num);
+    // Past the grid on one axis, whatever the total.
+    refused_quickly("SEQUENCE(1048577)", ErrorValue::Num);
+    refused_quickly("SEQUENCE(1,16385)", ErrorValue::Num);
+    // MAKEARRAY multiplied in i64 and could overflow the same way.
+    refused_quickly("MAKEARRAY(1E10,1E10,LAMBDA(r,c,1))", ErrorValue::Num);
+    // MMULT's result is rows(a) × cols(b): two modest inputs, an enormous
+    // product.
+    refused_quickly("MMULT(SEQUENCE(4000,1),SEQUENCE(1,4000))", ErrorValue::Num);
+    // Within the budget is unchanged.
+    num("SUM(SEQUENCE(1000,1000))", 500_000_500_000.0);
+    num("ROWS(SEQUENCE(1048576))", 1_048_576.0);
+}
+
+/// REPT's text is capped where Excel caps every string, 32,767 characters —
+/// `REPT("x",1E9)` was a gigabyte allocated on request.
+#[test]
+fn rept_cannot_build_a_string_past_excels_limit() {
+    refused_quickly("REPT(\"ab\",1E15)", ErrorValue::Value);
+    error("REPT(\"ab\",16384)", ErrorValue::Value);
+    num("LEN(REPT(\"a\",32767))", 32767.0);
+}
+
+/// FIXED and DOLLAR passed `decimals` straight into a format width.
+#[test]
+fn fixed_and_dollar_refuse_more_than_127_decimals() {
+    refused_quickly("FIXED(1,1E9)", ErrorValue::Value);
+    refused_quickly("DOLLAR(1,1E9)", ErrorValue::Value);
+    error("FIXED(1,128)", ErrorValue::Value);
+    num("LEN(FIXED(1,127))", 129.0);
+}
