@@ -148,7 +148,7 @@ impl Tools {
             {
                 "name": "read_range",
                 "title": "Read a range",
-                "description": "Read an A1 range (B7, A1:C10, A:C, 2:5, Sheet2!A1:B3, 'My Sheet'!A1) as a grid of rows. mode=values (default) gives each cell's value: number, string, boolean, null for empty, or {\"error\":\"#DIV/0!\"}. mode=formulas gives what the formula bar shows (\"=SUM(A1:A3)\", or the constant as typed). mode=both gives {value, formula?, display} per non-empty cell, where display is the text the grid shows with its number format applied. Whole columns/rows are clipped to the used range. At most 10,000 cells per call: a larger range is truncated to whole rows, with truncated=true and `next` naming the remaining range.",
+                "description": "Read an A1 range (B7, A1:C10, A:C, 2:5, Sheet2!A1:B3, 'My Sheet'!A1) as a grid of rows. mode=values (default) gives each cell's value: number, string, boolean, null for empty, or {\"error\":\"#DIV/0!\"}. mode=formulas gives what the formula bar shows (\"=SUM(A1:A3)\", or the constant as typed). mode=both gives {value, formula?, display} per non-empty cell, where display is the text the grid shows with its number format applied. Whole columns/rows are clipped to the used range. At most 10,000 cells per call: a larger range is truncated to whole rows, with truncated=true and `next` listing the range(s) still to read.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -398,13 +398,17 @@ impl Tools {
             "sheet": name,
             "range": rect.to_string(),
             "returned": returned.to_string(),
-            "truncated": next.is_some(),
+            "truncated": !next.is_empty(),
             "rows": rows,
         });
-        if let Some(next) = next {
-            result["next"] = json!(format!("{}!{next}", quote_sheet(&name)));
+        if !next.is_empty() {
+            let quoted = quote_sheet(&name);
+            result["next"] = next
+                .iter()
+                .map(|r| Value::String(format!("{quoted}!{r}")))
+                .collect();
             result["note"] = json!(format!(
-                "range has {} cells; at most {MAX_CELLS} are returned per call — read `next` for the rest",
+                "range has {} cells; at most {MAX_CELLS} are returned per call — read the ranges in `next` for the rest",
                 rect.cells()
             ));
         }
@@ -573,6 +577,20 @@ impl Tools {
                     _ => "deleteColumns",
                 };
                 refuse_if_protected(session, sheet, action)?;
+                // The transaction layer shifts cells past the last row or
+                // column rather than refusing, leaving them at addresses no
+                // file can hold. Excel refuses, and so does this.
+                if op.starts_with("insert")
+                    && let Some(used) = used_range(&session.workbook().sheets[sheet])
+                {
+                    let last = if rows { used.end.row } else { used.end.col };
+                    if last >= at && u64::from(last) + u64::from(count) > u64::from(max) {
+                        return Err(
+                            "cannot insert: it would push non-empty cells off the end of the sheet"
+                                .to_owned(),
+                        );
+                    }
+                }
                 let edit = match op {
                     "insert_rows" => EditOperation::InsertRows { sheet, at, count },
                     "delete_rows" => EditOperation::DeleteRows { sheet, at, count },
@@ -904,9 +922,14 @@ fn resolve_range(
 
 /// The part of `rect` one call returns — whole rows, at most [`MAX_CELLS`]
 /// cells — and the rest of it, if any.
-fn clip_to_budget(rect: Rect) -> (Rect, Option<Rect>) {
+///
+/// The rest is a list because a range wider than the budget leaves an
+/// L-shape — the end of the first row, and every row below — which no single
+/// rectangle names. Saying only the first piece would skip the second
+/// silently.
+fn clip_to_budget(rect: Rect) -> (Rect, Vec<Rect>) {
     if rect.cells() <= MAX_CELLS {
-        return (rect, None);
+        return (rect, Vec::new());
     }
     let cols = rect.cols().min(MAX_CELLS);
     let rows = (MAX_CELLS / cols).max(1);
@@ -917,18 +940,20 @@ fn clip_to_budget(rect: Rect) -> (Rect, Option<Rect>) {
         start: rect.start,
         end: CellRef::new(last_row, last_col),
     };
-    let next = if last_row < rect.end.row {
-        Some(Rect {
+    let mut next = Vec::new();
+    if last_col < rect.end.col {
+        // Wider than the budget (then `rows` is 1): the rest of that row.
+        next.push(Rect {
+            start: CellRef::new(rect.start.row, last_col + 1),
+            end: CellRef::new(last_row, rect.end.col),
+        });
+    }
+    if last_row < rect.end.row {
+        next.push(Rect {
             start: CellRef::new(last_row + 1, rect.start.col),
             end: rect.end,
-        })
-    } else {
-        // Wider than the budget: the rest of the first row's columns.
-        Some(Rect {
-            start: CellRef::new(rect.start.row, last_col + 1),
-            end: rect.end,
-        })
-    };
+        });
+    }
     (returned, next)
 }
 
@@ -1288,4 +1313,288 @@ fn write_atomically(target: &Path, bytes: &[u8]) -> std::io::Result<()> {
         let _ = std::fs::remove_file(&tmp);
     }
     written
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn rect(a: &str, b: &str) -> Rect {
+        Rect {
+            start: a1::parse_cell(a).unwrap(),
+            end: a1::parse_cell(b).unwrap(),
+        }
+    }
+
+    /// Whatever a read returns plus whatever it says is left must be the
+    /// whole range — truncation stated, never silent, and nothing skipped.
+    #[test]
+    fn a_truncated_read_names_exactly_what_it_left_out() {
+        for r in [
+            rect("A1", "C3"),
+            rect("A1", "Z1000"),
+            rect("B2", "B20000"),
+            rect("A1", "XFD1"),
+            rect("A1", "XFD3"),
+        ] {
+            let (returned, next) = clip_to_budget(r);
+            assert!(returned.cells() <= MAX_CELLS, "{r}");
+            let rest: u64 = next.iter().map(Rect::cells).sum();
+            assert_eq!(returned.cells() + rest, r.cells(), "{r} lost cells");
+        }
+    }
+
+    // -- the tools against a real file -------------------------------------
+
+    use casual_calc_model::{DataValidation, DvOperator, SheetProtection, Style};
+    use casual_calc_sdk::Cell;
+
+    struct Fixture {
+        tools: Tools,
+        wb: String,
+        dir: PathBuf,
+    }
+
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    impl Fixture {
+        /// A one-sheet workbook shaped by `build`, saved as `.xlsx` and opened
+        /// through the tool, so whatever the test relies on has survived a file.
+        fn new(build: impl FnOnce(&mut WorkbookSession)) -> Self {
+            static N: AtomicU64 = AtomicU64::new(0);
+            let dir = std::env::temp_dir().join(format!(
+                "casual-calc-mcp-tools-{}-{}",
+                std::process::id(),
+                N.fetch_add(1, Ordering::Relaxed)
+            ));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            let mut s = WorkbookSession::with_sheet();
+            build(&mut s);
+            std::fs::write(dir.join("book.xlsx"), s.save().unwrap()).unwrap();
+            let mut tools = Tools::new(Sandbox::new(std::slice::from_ref(&dir)).unwrap());
+            let opened = done(tools.call("open_workbook", &json!({ "path": "book.xlsx" })));
+            let wb = opened.unwrap()["handle"].as_str().unwrap().to_owned();
+            Self { tools, wb, dir }
+        }
+
+        fn call(&mut self, name: &str, mut args: Value) -> Result<Value, String> {
+            args["handle"] = json!(self.wb);
+            done(self.tools.call(name, &args))
+        }
+    }
+
+    fn done(call: Call) -> Result<Value, String> {
+        match call {
+            Call::Done(r) => r,
+            Call::Unknown => panic!("unknown tool"),
+        }
+    }
+
+    fn type_into(s: &mut WorkbookSession, cell: &str, text: &str) {
+        let op = s.input_edit(0, a1::parse_cell(cell).unwrap(), text);
+        s.edit(op).unwrap();
+    }
+
+    #[test]
+    fn a_protected_sheet_refuses_locked_cells_and_structural_edits() {
+        let mut f = Fixture::new(|s| {
+            type_into(s, "A1", "1");
+            let unlocked = s.workbook_mut().intern_style(Style {
+                locked: Some(false),
+                ..Style::default()
+            });
+            let mut cell = Cell::value(CellValue::Empty);
+            cell.style = Some(unlocked);
+            s.workbook_mut().sheets[0]
+                .cells
+                .set(CellRef::new(0, 1), cell);
+            s.workbook_mut().sheets[0].protection = Some(SheetProtection::enabled());
+        });
+        let r = f
+            .call("write_cells", json!({ "anchor": "A1", "values": [[5, 6]] }))
+            .unwrap();
+        assert_eq!(r["written"], 1, "{r}");
+        assert_eq!(r["refused"][0]["cell"], "A1");
+        assert!(
+            r["refused"][0]["reason"]
+                .as_str()
+                .unwrap()
+                .contains("locked")
+        );
+        assert_eq!(r["values"], json!([[1.0, 6.0]]));
+        let e = f
+            .call("run", json!({ "op": "insert_rows", "at": 1 }))
+            .unwrap_err();
+        assert!(e.contains("protected"), "{e}");
+        let e = f
+            .call(
+                "run",
+                json!({ "op": "set_number_format", "range": "B1", "format": "0%" }),
+            )
+            .unwrap_err();
+        assert!(e.contains("formatCells"), "{e}");
+    }
+
+    #[test]
+    fn data_validation_refuses_a_stop_rule_and_warns_for_the_others() {
+        let mut f = Fixture::new(|s| {
+            let rule = |col: u32, style: Option<&str>| DataValidation {
+                range: casual_calc_model::CellRange::new(
+                    CellRef::new(0, col),
+                    CellRef::new(9, col),
+                ),
+                values: Vec::new(),
+                kind: DvKind::Whole,
+                operator: DvOperator::Between,
+                formula1: "1".to_owned(),
+                formula2: "10".to_owned(),
+                allow_blank: true,
+                error_style: style.map(str::to_owned),
+                hide_dropdown: false,
+                ime_mode: None,
+                error_title: String::new(),
+                error_text: String::new(),
+                prompt_title: String::new(),
+                prompt_text: String::new(),
+            };
+            let sheet = &mut s.workbook_mut().sheets[0];
+            sheet.validations.push(rule(0, None));
+            sheet.validations.push(rule(1, Some("warning")));
+            // Keep the sheet non-empty so it saves with its rules.
+            type_into(s, "D1", "x");
+        });
+        let r = f
+            .call(
+                "write_cells",
+                json!({ "anchor": "A1", "values": [["11", 99], [5, null], ["50%", null]] }),
+            )
+            .unwrap();
+        let refused: Vec<&str> = r["refused"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|x| x["cell"].as_str().unwrap())
+            .collect();
+        assert_eq!(refused, ["A1", "A3"], "{r}");
+        assert_eq!(r["warnings"][0]["cell"], "B1", "{r}");
+        assert_eq!(
+            r["values"],
+            json!([[null, 99.0], [5.0, null], [null, null]])
+        );
+    }
+
+    #[test]
+    fn a_write_past_the_grid_is_refused_cell_by_cell() {
+        let mut f = Fixture::new(|_| {});
+        let r = f
+            .call(
+                "write_cells",
+                json!({ "anchor": "XFD1", "values": [[1, 2]] }),
+            )
+            .unwrap();
+        assert_eq!(r["written"], 1, "{r}");
+        assert_eq!(r["refused"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn sheets_are_added_and_renamed_under_excel_rules() {
+        let mut f = Fixture::new(|s| type_into(s, "A1", "7"));
+        f.call("run", json!({ "op": "add_sheet", "name": "Data" }))
+            .unwrap();
+        let e = f
+            .call("run", json!({ "op": "add_sheet", "name": "data" }))
+            .unwrap_err();
+        assert!(e.contains("already"), "{e}");
+        let e = f
+            .call(
+                "run",
+                json!({ "op": "rename_sheet", "sheet": "Data", "name": "a/b" }),
+            )
+            .unwrap_err();
+        assert!(e.contains('/'), "{e}");
+        f.call(
+            "run",
+            json!({ "op": "rename_sheet", "sheet": "Sheet1", "name": "Q1 Sales" }),
+        )
+        .unwrap();
+        let r = f
+            .call(
+                "write_cells",
+                json!({ "anchor": "Data!A1", "values": [["='Q1 Sales'!A1*2"]] }),
+            )
+            .unwrap();
+        assert_eq!(r["values"], json!([[14.0]]), "{r}");
+        let r = f
+            .call("read_range", json!({ "range": "'Q1 Sales'!A:A" }))
+            .unwrap();
+        assert_eq!(r["range"], "A1");
+        assert_eq!(r["rows"], json!([[7.0]]));
+    }
+
+    #[test]
+    fn number_formats_change_what_the_grid_shows() {
+        let mut f = Fixture::new(|s| type_into(s, "A1", "0.5"));
+        f.call(
+            "run",
+            json!({ "op": "set_number_format", "range": "A1", "format": "0.00%" }),
+        )
+        .unwrap();
+        let r = f
+            .call("read_range", json!({ "range": "A1", "mode": "both" }))
+            .unwrap();
+        assert_eq!(r["rows"][0][0]["display"], "50.00%");
+        assert_eq!(r["rows"][0][0]["value"], 0.5);
+    }
+
+    /// Excel: "can't insert new cells because it would push non-empty cells
+    /// off the end of the worksheet". Pushing them off is silent data loss.
+    #[test]
+    fn an_insert_that_would_push_data_off_the_grid_is_refused() {
+        let mut f = Fixture::new(|s| {
+            type_into(s, "A1", "keep");
+            type_into(s, "C1", "keep too");
+        });
+        let e = f
+            .call(
+                "run",
+                json!({ "op": "insert_rows", "at": 1, "count": 1_048_576 }),
+            )
+            .unwrap_err();
+        assert!(e.contains("off the end"), "{e}");
+        let e = f
+            .call(
+                "run",
+                json!({ "op": "insert_columns", "at": "B", "count": 16_383 }),
+            )
+            .unwrap_err();
+        assert!(e.contains("off the end"), "{e}");
+        // Up to the edge is fine.
+        f.call(
+            "run",
+            json!({ "op": "insert_columns", "at": "B", "count": 16_381 }),
+        )
+        .unwrap();
+        let r = f.call("read_range", json!({ "range": "A1:A1" })).unwrap();
+        assert_eq!(r["rows"], json!([["keep"]]));
+        let r = f.call("read_range", json!({ "range": "XFD1" })).unwrap();
+        assert_eq!(r["rows"], json!([["keep too"]]));
+    }
+
+    #[test]
+    fn a_locked_workbook_structure_refuses_sheet_changes() {
+        let mut f = Fixture::new(|s| {
+            type_into(s, "A1", "1");
+            s.workbook_mut()
+                .settings
+                .protection
+                .insert("lockStructure".to_owned(), "1".to_owned());
+        });
+        let e = f.call("run", json!({ "op": "add_sheet" })).unwrap_err();
+        assert!(e.contains("structure"), "{e}");
+    }
 }
