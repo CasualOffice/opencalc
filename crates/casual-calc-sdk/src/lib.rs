@@ -356,6 +356,39 @@ pub enum SdkError {
     /// here are different mistakes: an id from another document, or an id the
     /// retention ring has since evicted. Both need saying.
     NoSuchVersion(VersionId),
+    /// Text handed to [`WorkbookSession::evaluate`] is not a formula this
+    /// engine can parse. Carries the parser's message.
+    Formula(String),
+}
+
+/// The value of a formula from [`WorkbookSession::evaluate`].
+///
+/// Its own type rather than [`CellValue`], because a cell's text is an id into
+/// the workbook's string table and an evaluated formula's text is not in that
+/// table — interning it would write to the workbook, which `evaluate` promises
+/// not to do.
+#[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
+pub enum Evaluated {
+    /// Blank — what a reference to an empty cell yields.
+    Empty,
+    /// A number.
+    Number(f64),
+    /// `TRUE` or `FALSE`.
+    Bool(bool),
+    /// Text.
+    Text(String),
+    /// An error, named as Excel names it (`#DIV/0!`, `#REF!`).
+    Error(String),
+    /// A block of values, row-major — what a range or an array formula yields.
+    Array {
+        /// Row count.
+        rows: usize,
+        /// Column count.
+        cols: usize,
+        /// `rows × cols` scalar values, row by row.
+        cells: Vec<Evaluated>,
+    },
 }
 
 impl core::fmt::Display for SdkError {
@@ -369,6 +402,7 @@ impl core::fmt::Display for SdkError {
             SdkError::Edit(e) => write!(f, "{e}"),
             SdkError::Model(e) => write!(f, "{e}"),
             SdkError::ReadOnly => f.write_str("this workbook is open for reading only"),
+            SdkError::Formula(e) => write!(f, "not a formula: {e}"),
             SdkError::Version(e) => write!(f, "{e}"),
             SdkError::NoSuchVersion(id) => {
                 write!(f, "there is no version {id} in this document's history")
@@ -1754,6 +1788,59 @@ impl WorkbookSession {
         outcome
     }
 
+    /// Evaluate a formula against this workbook **without writing it
+    /// anywhere** (`AGENT-01`, docs/97 `evaluate`).
+    ///
+    /// `formula` is what would be typed into a cell, with or without the
+    /// leading `=`. References are read as written — `A1` is A1 — on sheet
+    /// `sheet`, which is also the sheet an unqualified reference names.
+    ///
+    /// The answer is the live one: formula cells the expression reads are
+    /// computed afresh rather than taken from their cached values, so a
+    /// session in manual calculation mode still gets the value the formula
+    /// *would* have, not the stale one in the grid. An expression that yields
+    /// a block (`=A1:B2*2`, `=SEQUENCE(3)`) is answered as an
+    /// [`Evaluated::Array`] rather than collapsed to its corner, because a
+    /// caller asking "what is this?" should see the whole answer.
+    ///
+    /// Nothing is recorded: no undo step, no outgoing operation, and
+    /// [`edits_applied`](Self::edits_applied) does not move.
+    ///
+    /// # Errors
+    ///
+    /// [`SdkError::Formula`] when the text does not parse as a formula, and
+    /// [`SdkError::Edit`] (`SheetNotFound`) for a sheet index past the end.
+    pub fn evaluate(&self, sheet: usize, formula: &str) -> Result<Evaluated, SdkError> {
+        if sheet >= self.workbook.sheets.len() {
+            return Err(SdkError::Edit(TxnError::SheetNotFound { index: sheet }));
+        }
+        let text = formula.trim();
+        let body = text.strip_prefix('=').unwrap_or(text);
+        let expr = parse(body).map_err(|e| SdkError::Formula(e.to_string()))?;
+        // A parsed tree is in the absolute form (`ABSOLUTE` is A1), which is
+        // exactly "references read as written"; the evaluator with no holding
+        // cell evaluates it in that form. A fresh evaluator with no dirty set
+        // computes every formula it reaches rather than trusting caches.
+        let mut evaluator = casual_calc_eval::Evaluator::new(&self.workbook);
+        Ok(evaluated(evaluator.eval_expr_array(sheet, &expr)))
+    }
+
+    /// A cell's value as the grid shows it, with its number format applied
+    /// (`50%`, `$5.00`, `12/31/2026`) — the companion to
+    /// [`cell_input`](Self::cell_input), which is what the formula bar shows.
+    ///
+    /// Empty for an empty cell or a sheet index past the end. Reads the cached
+    /// value, so in manual calculation mode it is what the grid shows rather
+    /// than what a recalculation would produce.
+    pub fn cell_display(&self, sheet: usize, at: CellRef) -> String {
+        self.workbook
+            .sheets
+            .get(sheet)
+            .and_then(|s| s.cells.get(at))
+            .map(|cell| casual_calc_layout::display_text(&self.workbook, cell))
+            .unwrap_or_default()
+    }
+
     fn recalculate_if_automatic(&mut self) {
         if self.calculation == CalculationMode::Automatic {
             self.recalculate();
@@ -2883,6 +2970,27 @@ fn delimited_carries_style(style: &Style) -> bool {
     let mut bare = style.clone();
     let format = bare.number_format.take();
     bare == Style::default() && format.is_none_or(|code| casual_calc_io::is_date_format(&code))
+}
+
+/// An evaluator value as the SDK's [`Evaluated`].
+///
+/// A `LAMBDA` that was never called has no value a cell could hold, and
+/// Excel shows `#CALC!` for exactly that, so that is what it is reported as.
+fn evaluated(value: casual_calc_eval::Value) -> Evaluated {
+    use casual_calc_eval::Value;
+    match value {
+        Value::Empty => Evaluated::Empty,
+        Value::Number(n) => Evaluated::Number(n),
+        Value::Bool(b) => Evaluated::Bool(b),
+        Value::Text(t) => Evaluated::Text(t),
+        Value::Error(e) => Evaluated::Error(e.to_string()),
+        Value::Lambda(_) => Evaluated::Error("#CALC!".to_owned()),
+        Value::Array { rows, cols, cells } => Evaluated::Array {
+            rows,
+            cols,
+            cells: cells.into_iter().map(|v| evaluated(v.scalar())).collect(),
+        },
+    }
 }
 
 /// Install the configured clock and seed on the workbook.

@@ -4312,3 +4312,100 @@ mod typed_entry {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// `evaluate` and `cell_display` (`AGENT-01`): what an agent asks of a workbook
+// without writing to it.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn evaluate_reads_the_workbook_and_writes_nothing() {
+    use crate::Evaluated;
+    let session = session_with_formula();
+    let before = session.edits_applied();
+    // A1 = 10, A2 = A1*2.
+    assert_eq!(
+        session.evaluate(0, "=A1*2").unwrap(),
+        Evaluated::Number(20.0)
+    );
+    assert_eq!(
+        session.evaluate(0, "A2+1").unwrap(),
+        Evaluated::Number(21.0)
+    );
+    assert_eq!(
+        session.evaluate(0, "=Sheet1!A1+A2").unwrap(),
+        Evaluated::Number(30.0)
+    );
+    assert_eq!(
+        session.evaluate(0, "=\"a\"&\"b\"").unwrap(),
+        Evaluated::Text("ab".to_owned())
+    );
+    assert_eq!(session.evaluate(0, "=A1>5").unwrap(), Evaluated::Bool(true));
+    assert_eq!(
+        session.evaluate(0, "=1/0").unwrap(),
+        Evaluated::Error("#DIV/0!".to_owned())
+    );
+    assert_eq!(session.evaluate(0, "=B9").unwrap(), Evaluated::Empty);
+    // Nothing reached the document: no edit, no new cell.
+    assert_eq!(session.edits_applied(), before);
+    assert_eq!(session.workbook().sheets[0].cells.iter().count(), 2);
+}
+
+#[test]
+fn evaluate_answers_a_block_whole_rather_than_its_corner() {
+    use crate::Evaluated;
+    let session = session_with_formula();
+    assert_eq!(
+        session.evaluate(0, "=A1:A2*2").unwrap(),
+        Evaluated::Array {
+            rows: 2,
+            cols: 1,
+            cells: vec![Evaluated::Number(20.0), Evaluated::Number(40.0)],
+        }
+    );
+}
+
+#[test]
+fn evaluate_refuses_what_is_not_a_formula_and_a_missing_sheet() {
+    let session = session_with_formula();
+    assert!(matches!(
+        session.evaluate(0, "=SUM(1,"),
+        Err(crate::SdkError::Formula(_))
+    ));
+    assert!(matches!(
+        session.evaluate(7, "=1"),
+        Err(crate::SdkError::Edit(_))
+    ));
+}
+
+#[test]
+fn evaluate_sees_the_live_value_in_manual_mode() {
+    use crate::{CalculationMode, Evaluated};
+    let mut session = session_with_formula();
+    session.set_calculation_mode(CalculationMode::Manual);
+    session
+        .edit(EditOperation::SetValue {
+            sheet: 0,
+            at: CellRef::new(0, 0),
+            value: CellValue::Number(1.0),
+        })
+        .unwrap();
+    // The grid still holds the stale 20; the question gets the true answer.
+    assert_eq!(value(&session, CellRef::new(1, 0)), CellValue::Number(20.0));
+    assert_eq!(session.evaluate(0, "=A2").unwrap(), Evaluated::Number(2.0));
+}
+
+#[test]
+fn cell_display_applies_the_number_format() {
+    let mut session = WorkbookSession::with_sheet();
+    let at = CellRef::new(0, 0);
+    let op = session.input_edit(0, at, "50%");
+    session.edit(op).unwrap();
+    assert_eq!(session.cell_input(0, at), "0.5");
+    assert_eq!(session.cell_display(0, at), "50%");
+    let op = session.input_edit(0, CellRef::new(1, 0), "1234.5");
+    session.edit(op).unwrap();
+    assert_eq!(session.cell_display(0, CellRef::new(1, 0)), "1234.5");
+    assert_eq!(session.cell_display(0, CellRef::new(5, 5)), "");
+    assert_eq!(session.cell_display(9, at), "");
+}
