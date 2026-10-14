@@ -47,7 +47,7 @@ test.describe("date and time stamps, against a fixed host clock", () => {
     await page.keyboard.press("Control+Shift+Semicolon");
     // Shift changes the character the key sends: this arrives as `e.key === ":"`.
     // The handler tested only for ";", so the whole time branch was unreachable.
-    await expect.poll(() => input(page, 10, 0)).toBe("14:07");
+    await expect.poll(() => input(page, 10, 0)).toBe("2:07 PM");
   });
 
   test("Ctrl+; still writes today's date from the same clock", async ({ page }) => {
@@ -55,7 +55,7 @@ test.describe("date and time stamps, against a fixed host clock", () => {
     await boot(page);
     await page.evaluate(() => window.opencalcEditor.selectForTest(11, 0));
     await page.keyboard.press("Control+Semicolon");
-    await expect.poll(() => input(page, 11, 0)).toBe("2026-08-30");
+    await expect.poll(() => input(page, 11, 0)).toBe("8/30/2026");
   });
 });
 

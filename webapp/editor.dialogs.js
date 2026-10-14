@@ -2370,7 +2370,8 @@ export function textToColumnsDialog() {
 export function openNameBoxList() {
   closeSheetMenu();
   let names = [];
-  try { names = JSON.parse(wasm.session_names()); } catch {}
+  // Hidden names (add-in and macro plumbing) are not offered, as in Excel.
+  try { names = JSON.parse(wasm.session_names()).filter((n) => !n.hidden); } catch {}
   const menu = document.createElement("div");
   menu.className = "popmenu ctx-menu";
   menu.id = "sheet-ctx";
@@ -3302,7 +3303,7 @@ export function goToDialog() {
   body.textContent = "";
 
   let names = [];
-  try { names = JSON.parse(wasm.session_names()).map((n) => n.name).filter(Boolean); } catch {}
+  try { names = JSON.parse(wasm.session_names()).filter((n) => !n.hidden).map((n) => n.name).filter(Boolean); } catch {}
   names.sort((a, b) => a.localeCompare(b));
 
   const listLabel = el("label", "oc-form-label", "Go to:");
@@ -3660,7 +3661,7 @@ const nmState = { filter: "all", selected: null };
 /// as Excel writes it, and whether that value is an error.
 function nameRows() {
   let names = [];
-  try { names = JSON.parse(wasm.session_names()); } catch {}
+  try { names = JSON.parse(wasm.session_names()).filter((n) => !n.hidden); } catch {}
   return names.map((n) => {
     const at = n.sheet >= 0 ? n.sheet : state.sheet;
     let value = "";

@@ -8747,10 +8747,16 @@ function wireEvents() {
       // the whole class of bug that reading cannot see — the code is correct and
       // the door to it is locked.
       if (e.key === ";" || e.key === ":") {
+        // Stamped as en-US Excel types them — `10/14/2026` and `3:07 PM` — so
+        // typed entry gives them Excel's own formats (m/d/yyyy, h:mm AM/PM);
+        // ISO text came out as `2026-10-14` (XL-UX-153). en-US because typed
+        // entry reads en-US (XL-FEAT-001); a locale's own short date follows
+        // with locale support (XL-FEAT-022).
         const now = hostNow();
+        const h12 = now.getHours() % 12 || 12;
         const text = e.shiftKey
-          ? `${now.getHours()}:${String(now.getMinutes()).padStart(2, "0")}`
-          : `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
+          ? `${h12}:${String(now.getMinutes()).padStart(2, "0")} ${now.getHours() < 12 ? "AM" : "PM"}`
+          : `${now.getMonth() + 1}/${now.getDate()}/${now.getFullYear()}`;
         // Excel widens a default-width column for the stamp rather than
         // showing ##### (`XL-UX-036`), in the same undo step.
         tryEdit(() => {

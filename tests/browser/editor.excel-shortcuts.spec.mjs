@@ -59,7 +59,20 @@ test("Ctrl+; writes today's date", async ({ page }) => {
   await page.keyboard.press("Control+Semicolon");
   // The value, not a specific date: asserting today's date makes a test that
   // fails at midnight for no reason anybody can act on.
-  await expect.poll(() => input(page, 8, 0)).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+  // en-US Excel stamps the locale's short date — 10/14/2026, formatted
+  // m/d/yyyy — not ISO text (XL-UX-153).
+  await expect.poll(() => input(page, 8, 0)).toMatch(/^\d{1,2}\/\d{1,2}\/\d{4}$/);
+  const nf = await page.evaluate(() => JSON.parse(window.opencalcEditor.wasmApi().session_cell_format(0, 8, 0)).nf);
+  expect(nf).toBe("m/d/yyyy");
+});
+
+test("Ctrl+Shift+; writes the time as Excel does", async ({ page }) => {
+  await boot(page);
+  await page.evaluate(() => window.opencalcEditor.selectForTest(9, 0));
+  await page.keyboard.press("Control+Shift+Semicolon");
+  await expect.poll(() => input(page, 9, 0)).toMatch(/^\d{1,2}:\d{2} (AM|PM)$/);
+  const nf = await page.evaluate(() => JSON.parse(window.opencalcEditor.wasmApi().session_cell_format(0, 9, 0)).nf);
+  expect(nf).toBe("h:mm AM/PM");
 });
 
 test("Ctrl+Space selects the column, Shift+Space the row", async ({ page }) => {

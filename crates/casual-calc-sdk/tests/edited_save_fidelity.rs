@@ -66,8 +66,10 @@ fn sheet1() -> String {
             r#"<row r="3"><c r="A3"><f>SUM(Sheet1:Sheet2!B1)</f><v>7</v></c><c r="B3"><v>2</v></c></row>"#,
             r#"<row r="4"><c r="A4"><f>A1+1</f><v>43</v></c></row>"#,
             // 005, the probe's own case: a real Excel function this engine
-            // does not implement, written without a prefix.
-            r#"<row r="5"><c r="A5" t="b"><f>XOR(TRUE,FALSE)</f><v>1</v></c></row>"#,
+            // does not implement, written without a prefix. (It was `XOR`
+            // until XL-FEAT-012 implemented that; `PHONETIC` is out of scope
+            // there and predates the `_xlfn.` prefix, so it is written bare.)
+            r#"<row r="5"><c r="A5"><f>PHONETIC(B1)</f><v>7</v></c></row>"#,
             "</sheetData>@EXT@</worksheet>"
     )
     .replace("@EXT@", SPARKLINES)
@@ -122,15 +124,16 @@ fn an_unsupported_function_opens_showing_its_cached_value() {
     );
     assert_eq!(
         number(&session, 0, CellRef::new(4, 0)),
-        CellValue::Bool(true),
-        "XOR(TRUE,FALSE)"
+        CellValue::Number(7.0),
+        "PHONETIC(B1)"
     );
     // Kept, and said so: a value this engine did not compute is stale the
     // moment its inputs change.
     let report = session.compatibility_report();
     let named: Vec<String> = report.entries().into_iter().map(|e| e.feature).collect();
     assert!(
-        named.iter().any(|f| f.contains("FUTUREFN")) && named.iter().any(|f| f.contains("XOR")),
+        named.iter().any(|f| f.contains("FUTUREFN"))
+            && named.iter().any(|f| f.contains("PHONETIC")),
         "the import report does not name the unsupported functions: {named:?}"
     );
 }

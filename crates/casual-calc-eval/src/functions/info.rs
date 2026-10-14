@@ -205,6 +205,59 @@ pub(crate) fn eval_is_formula(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr
     Value::Bool(has)
 }
 
+/// `FORMULATEXT(reference)` — the formula in the referenced cell, as text.
+///
+/// Printed **at that cell** (`PERF-11`): a stored tree's references are
+/// offsets from the cell that holds it, so printing it anywhere else would
+/// shift every relative reference. The text is the display form — `TRUE`
+/// rather than LibreOffice's `TRUE()`, and no `_xlfn.` prefixes, which belong
+/// to the file and not to what the user sees. A range answers for its
+/// upper-left cell; a cell with no formula is `#N/A`; anything that is not a
+/// reference is `#VALUE!`.
+///
+/// The cell is read, never evaluated: `FORMULATEXT(A1)` written in `A1` is its
+/// own text, not a circular reference.
+pub(crate) fn eval_formulatext(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -> Value {
+    let reference = match args {
+        [Expr::Reference(r)] | [Expr::Range(r, _)] => r,
+        _ => return Value::Error(ErrorValue::Value),
+    };
+    let Some(target) = ev.resolve_sheet(&reference.sheet, sheet) else {
+        return Value::Error(ErrorValue::Ref);
+    };
+    let Some(resolved) = reference.resolve(ev.origin()) else {
+        return Value::Error(ErrorValue::Ref);
+    };
+    // For a range, the upper-left corner is the smaller of the two ends.
+    let (row, col) = match args {
+        [Expr::Range(a, b)] => {
+            let (r0, c0, _, _) = ev.range_bounds(target, a, b);
+            (r0, c0)
+        }
+        _ => (resolved.row, resolved.col),
+    };
+    let workbook = ev.workbook();
+    let text = workbook
+        .sheets
+        .get(target)
+        .and_then(|s| s.cells.get(CellRef::new(row, col)))
+        .and_then(|c| c.formula)
+        .and_then(|handle| workbook.formula(handle))
+        .map(|expr| {
+            format!(
+                "={}",
+                casual_calc_formula::print_at(
+                    expr,
+                    casual_calc_formula::stored::Origin::at(row, col)
+                )
+            )
+        });
+    match text {
+        Some(t) => Value::Text(t),
+        None => Value::Error(ErrorValue::Na),
+    }
+}
+
 // --- Date and time helpers -------------------------------------------------
 
 /// Whether a character occupies two bytes in a double-byte character set.

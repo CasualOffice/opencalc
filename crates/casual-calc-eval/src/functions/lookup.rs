@@ -263,7 +263,10 @@ pub(crate) fn eval_choose(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -
 // --- Extra text -----------------------------------------------------------
 
 /// ROWS / COLUMNS: the row/column count of a range (a lone cell ref is 1×1).
-pub(crate) fn eval_dim(_ev: &mut Evaluator<'_>, _sheet: usize, args: &[Expr], rows: bool) -> Value {
+pub(crate) fn eval_dim(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr], rows: bool) -> Value {
+    if args.len() != 1 {
+        return Value::Error(ErrorValue::Value);
+    }
     match args.first() {
         Some(Expr::Range(a, b)) => {
             let n = if rows {
@@ -274,7 +277,17 @@ pub(crate) fn eval_dim(_ev: &mut Evaluator<'_>, _sheet: usize, args: &[Expr], ro
             Value::Number(n as f64)
         }
         Some(Expr::Reference(_)) => Value::Number(1.0),
-        _ => Value::Error(ErrorValue::Value),
+        // A computed array has a shape too: `ROWS(VSTACK(a, b))` is how a
+        // formula asks how far a spill reaches. Only an error is refused —
+        // a scalar is a 1x1 array, as Excel counts it.
+        Some(other) => match ev.eval_expr_array(sheet, other) {
+            Value::Error(e) => Value::Error(e),
+            v => {
+                let (r, c) = v.shape();
+                Value::Number(if rows { r } else { c } as f64)
+            }
+        },
+        None => Value::Error(ErrorValue::Value),
     }
 }
 

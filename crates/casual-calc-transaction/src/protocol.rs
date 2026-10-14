@@ -55,7 +55,18 @@ use crate::wire::WireOperation;
 /// one that loses says nothing. `COL-54`'s new enum variant was the loud kind,
 /// and loud is better. So the version moves for a change that does not look
 /// like a wire change at all, which is exactly when this rule earns its keep.
-pub const PROTOCOL_VERSION: u32 = 8;
+///
+/// **9 is a defined-name change** (`COL-65`, with `XL-FEAT-124`'s attributes
+/// under the same bump). `DefinedName` gained `comment` and then the rest of
+/// `<definedName>`'s attributes, and it is `deny_unknown_fields` — deliberately,
+/// because `SetDefinedNames` is a whole-list replace, so a peer that skipped
+/// the field would write the list back without it and erase the comment or the
+/// `hidden` flag for everyone (the `CHT-07` quiet break). Kept loud, a
+/// protocol-8 peer refused the *whole batch* — but only on the first edit to a
+/// commented name, mid-session with work in flight. Moving the version moves
+/// that refusal to the handshake. Pinned by
+/// `a_new_defined_name_field_is_a_protocol_change`.
+pub const PROTOCOL_VERSION: u32 = 9;
 
 /// What somebody is typing, before they have decided to keep it.
 ///

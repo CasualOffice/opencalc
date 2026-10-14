@@ -376,3 +376,279 @@ pub(crate) fn eval_roman(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) ->
 pub(crate) fn ymd_to_serial_for_test(y: i64, m: i64, d: i64) -> i64 {
     ymd_to_serial(y, m, d)
 }
+
+/// Whether an expression calls `SUBTOTAL` or `AGGREGATE` anywhere.
+///
+/// A cell whose formula does is a *subtotal*, and both functions skip it so a
+/// total over a block of subtotals does not count each figure twice.
+pub(crate) fn contains_subtotal(expr: &Expr) -> bool {
+    match expr {
+        Expr::Function { name, args } => {
+            name == "SUBTOTAL" || name == "AGGREGATE" || args.iter().any(contains_subtotal)
+        }
+        Expr::Call { callee, args } => {
+            contains_subtotal(callee) || args.iter().any(contains_subtotal)
+        }
+        Expr::Unary { operand, .. } => contains_subtotal(operand),
+        Expr::Binary { left, right, .. } => contains_subtotal(left) || contains_subtotal(right),
+        _ => false,
+    }
+}
+
+/// `AGGREGATE(function_num, options, ref1, …)` and
+/// `AGGREGATE(function_num, options, array, k)`.
+///
+/// Nineteen aggregates under one name, each able to skip what `options`
+/// selects: hidden rows (1, 3, 5, 7), error values (2, 3, 6, 7), and nested
+/// `SUBTOTAL`/`AGGREGATE` cells (0–3). The skipping is the point of the
+/// function — `AGGREGATE(14,6,r/(c>5),1)` is the usual way to take a maximum
+/// of the rows a condition keeps — so it is applied as the values are read,
+/// not afterwards.
+///
+/// Two forms, and Excel restricts each:
+///
+/// * `1`–`13` take **references**; a computed array is `#VALUE!`.
+/// * `14`–`19` take one array and a required `k` (`#VALUE!` without it). The
+///   array may be computed, but then — Microsoft's words — "the function will
+///   not ignore hidden rows, nested subtotals or nested aggregates": a
+///   computed value has no row to be hidden and no formula to inspect. Errors
+///   in it can still be skipped.
+pub(crate) fn eval_aggregate(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -> Value {
+    if args.len() < 3 {
+        return Value::Error(ErrorValue::Value);
+    }
+    let code = match ev.eval_expr(sheet, &args[0]).as_number() {
+        Ok(n) => n.trunc(),
+        Err(e) => return Value::Error(e),
+    };
+    let options = match &args[1] {
+        Expr::Empty => 0.0,
+        a => match ev.eval_expr(sheet, a).as_number() {
+            Ok(n) => n.trunc(),
+            Err(e) => return Value::Error(e),
+        },
+    };
+    if !(1.0..=19.0).contains(&code) || !(0.0..=7.0).contains(&options) {
+        return Value::Error(ErrorValue::Value);
+    }
+    let (code, options) = (code as u8, options as u8);
+    let skip = Skip {
+        hidden: matches!(options, 1 | 3 | 5 | 7),
+        errors: matches!(options, 2 | 3 | 6 | 7),
+        nested: options <= 3,
+    };
+    if code <= 13 {
+        let mut values = Vec::new();
+        for arg in &args[2..] {
+            if !matches!(
+                arg,
+                Expr::Reference(_) | Expr::Range(..) | Expr::StructuredRef { .. }
+            ) {
+                return Value::Error(ErrorValue::Value);
+            }
+            if let Err(e) = aggregate_values(ev, sheet, arg, skip, &mut values) {
+                return Value::Error(e);
+            }
+        }
+        return aggregate_reduce(code, &values);
+    }
+    if args.len() != 4 {
+        return Value::Error(ErrorValue::Value);
+    }
+    let mut values = Vec::new();
+    if let Err(e) = aggregate_values(ev, sheet, &args[2], skip, &mut values) {
+        return Value::Error(e);
+    }
+    let k = match ev.eval_expr(sheet, &args[3]).as_number() {
+        Ok(n) => n,
+        Err(e) => return Value::Error(e),
+    };
+    let mut ns: Vec<f64> = values
+        .iter()
+        .filter_map(|v| match v {
+            Value::Number(n) => Some(*n),
+            _ => None,
+        })
+        .collect();
+    ns.sort_by(|a, b| a.partial_cmp(b).unwrap_or(Ordering::Equal));
+    let result = match code {
+        14 | 15 => {
+            let k = k.trunc();
+            if k < 1.0 || k as usize > ns.len() {
+                None
+            } else {
+                let k = k as usize;
+                Some(if code == 14 {
+                    ns[ns.len() - k]
+                } else {
+                    ns[k - 1]
+                })
+            }
+        }
+        16 => percentile_inclusive(&ns, k),
+        17 => quartile_k(k).and_then(|q| percentile_inclusive(&ns, q)),
+        18 => percentile_exclusive(&ns, k),
+        _ => quartile_k(k).and_then(|q| percentile_exclusive(&ns, q)),
+    };
+    match result {
+        Some(v) => Value::Number(v),
+        None => Value::Error(ErrorValue::Num),
+    }
+}
+
+/// What an `AGGREGATE` option says to leave out.
+#[derive(Clone, Copy)]
+struct Skip {
+    hidden: bool,
+    errors: bool,
+    nested: bool,
+}
+
+/// Read one `AGGREGATE` argument into `out`, leaving out what `skip` says.
+///
+/// A reference is walked cell by cell, so a hidden row or a subtotal cell can
+/// be recognised; anything else is evaluated as an array and only its errors
+/// can be skipped. An error that is not skipped is the answer.
+fn aggregate_values(
+    ev: &mut Evaluator<'_>,
+    sheet: usize,
+    arg: &Expr,
+    skip: Skip,
+    out: &mut Vec<Value>,
+) -> Result<(), ErrorValue> {
+    let cells = match arg {
+        Expr::Reference(r) => {
+            let target = ev.resolve_sheet(&r.sheet, sheet).ok_or(ErrorValue::Ref)?;
+            let at = r.resolve(ev.origin()).ok_or(ErrorValue::Ref)?;
+            Some((target, vec![CellRef::new(at.row, at.col)]))
+        }
+        Expr::Range(..) | Expr::StructuredRef { .. } => {
+            Some(range_cells(ev, sheet, arg).ok_or(ErrorValue::Ref)?)
+        }
+        _ => None,
+    };
+    let Some((target, cells)) = cells else {
+        let items = match ev.eval_expr_array(sheet, arg) {
+            Value::Array { cells, .. } => cells,
+            other => vec![other],
+        };
+        for v in items {
+            match v {
+                Value::Error(_) if skip.errors => {}
+                Value::Error(e) => return Err(e),
+                other => out.push(other),
+            }
+        }
+        return Ok(());
+    };
+    for at in cells {
+        let workbook = ev.workbook();
+        let Some(sheet_ref) = workbook.sheets.get(target) else {
+            return Err(ErrorValue::Ref);
+        };
+        if skip.hidden && sheet_ref.is_row_hidden(at.row) {
+            continue;
+        }
+        if skip.nested
+            && sheet_ref
+                .cells
+                .get(at)
+                .and_then(|c| c.formula)
+                .and_then(|h| workbook.formula(h))
+                .is_some_and(contains_subtotal)
+        {
+            continue;
+        }
+        match ev.eval_cell(target, at) {
+            Value::Error(_) if skip.errors => {}
+            Value::Error(e) => return Err(e),
+            v => out.push(v),
+        }
+    }
+    Ok(())
+}
+
+/// The reference-form reduction, `function_num` 1–13, over the values read.
+///
+/// Each answers as the function it stands for does over a reference: numbers
+/// only (COUNTA aside), and the same empty-input answers — a SUM or MAX of
+/// nothing is 0, a mean of nothing `#DIV/0!`.
+fn aggregate_reduce(code: u8, values: &[Value]) -> Value {
+    if code == 3 {
+        let n = values.iter().filter(|v| !matches!(v, Value::Empty)).count();
+        return Value::Number(n as f64);
+    }
+    let ns: Vec<f64> = values
+        .iter()
+        .filter_map(|v| match v {
+            Value::Number(n) => Some(*n),
+            _ => None,
+        })
+        .collect();
+    let some = |v: Option<f64>, empty: ErrorValue| match v {
+        Some(v) if v.is_finite() => Value::Number(v),
+        Some(_) => Value::Error(ErrorValue::Num),
+        None => Value::Error(empty),
+    };
+    match code {
+        1 => some((!ns.is_empty()).then(|| mean(&ns)), ErrorValue::Div0),
+        2 => Value::Number(ns.len() as f64),
+        4 => Value::Number(ns.iter().copied().reduce(f64::max).unwrap_or(0.0)),
+        5 => Value::Number(ns.iter().copied().reduce(f64::min).unwrap_or(0.0)),
+        6 if ns.is_empty() => Value::Number(0.0),
+        6 => some(Some(ns.iter().product()), ErrorValue::Num),
+        7 => some(variance(&ns, true).map(f64::sqrt), ErrorValue::Div0),
+        8 => some(variance(&ns, false).map(f64::sqrt), ErrorValue::Div0),
+        9 => Value::Number(ns.iter().sum()),
+        10 => some(variance(&ns, true), ErrorValue::Div0),
+        11 => some(variance(&ns, false), ErrorValue::Div0),
+        12 => {
+            let mut sorted = ns;
+            sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(Ordering::Equal));
+            some(percentile_inclusive(&sorted, 0.5), ErrorValue::Num)
+        }
+        _ => some(mode_of(&ns), ErrorValue::Na),
+    }
+}
+
+/// `QUARTILE`'s `quart` as the fraction it names, or `None` outside 0..=4
+/// (truncated after the range check: 4.5 is out of range, not 4).
+pub(crate) fn quartile_k(quart: f64) -> Option<f64> {
+    (0.0..=4.0).contains(&quart).then(|| quart.trunc() / 4.0)
+}
+
+/// `PERCENTILE.INC` over sorted data, or `None` for no data or `k` outside
+/// `0..=1`.
+pub(crate) fn percentile_inclusive(sorted: &[f64], k: f64) -> Option<f64> {
+    if sorted.is_empty() || !(0.0..=1.0).contains(&k) {
+        return None;
+    }
+    Some(percentile_of(sorted, k))
+}
+
+/// `PERCENTILE.EXC` over sorted data: the rank is `k·(n+1)`, and it must fall
+/// within `1..=n` — the exclusive form never extrapolates past the data, so a
+/// `k` below `1/(n+1)` or above `n/(n+1)` has no answer.
+pub(crate) fn percentile_exclusive(sorted: &[f64], k: f64) -> Option<f64> {
+    let n = sorted.len();
+    if n == 0 || k <= 0.0 || k >= 1.0 {
+        return None;
+    }
+    let rank = k * (n as f64 + 1.0);
+    // A rank within a rounding error of an integer is that integer: `1/11`
+    // times 11 must not land a hair below 1 and be refused.
+    let rank = if (rank - rank.round()).abs() < 1e-12 {
+        rank.round()
+    } else {
+        rank
+    };
+    if rank < 1.0 || rank > n as f64 {
+        return None;
+    }
+    let lower = rank.floor() as usize;
+    if lower >= n {
+        return Some(sorted[n - 1]);
+    }
+    let frac = rank - lower as f64;
+    Some(sorted[lower - 1] + frac * (sorted[lower] - sorted[lower - 1]))
+}

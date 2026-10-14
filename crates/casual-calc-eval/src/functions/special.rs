@@ -349,4 +349,274 @@ pub(crate) fn eval_betainv(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) 
     Value::Number(lo + (hi - lo) * (a + b) / 2.0)
 }
 
+// --- The 2010 distribution names (XL-FEAT-013) -----------------------------
+//
+// Excel 2010 renamed the distributions and, in renaming them, changed what
+// several of them answer: `CHIDIST`, `FDIST` and `TDIST` are upper tails, while
+// `CHISQ.DIST`, `F.DIST` and `T.DIST` are the ordinary left-tailed CDF *or*
+// density, chosen by a required `cumulative` flag. Aliasing the new names to
+// the old functions would have answered the wrong tail without any visible
+// error, so each is its own function over the same kernels.
+//
+// The degrees of freedom truncate, as Excel's documentation says for each of
+// these; below 1 after truncation is `#NUM!`.
+
+/// `N` numbers followed by a required logical `cumulative`.
+pub(crate) fn numbers_then_flag<const N: usize>(
+    ev: &mut Evaluator<'_>,
+    sheet: usize,
+    args: &[Expr],
+) -> Result<([f64; N], bool), ErrorValue> {
+    if args.len() != N + 1 {
+        return Err(ErrorValue::Value);
+    }
+    let mut out = [0.0; N];
+    for (slot, arg) in out.iter_mut().zip(args) {
+        *slot = ev.eval_expr(sheet, arg).as_number()?;
+    }
+    let flag = ev.eval_expr(sheet, &args[N]).as_bool()?;
+    Ok((out, flag))
+}
+
+/// A degrees-of-freedom argument: truncated, and at least 1.
+fn degrees(df: f64) -> Option<f64> {
+    let df = df.trunc();
+    (df >= 1.0).then_some(df)
+}
+
+/// A finite result, or `#NUM!`.
+fn number_or_num(v: f64) -> Value {
+    if v.is_finite() {
+        Value::Number(v)
+    } else {
+        Value::Error(ErrorValue::Num)
+    }
+}
+
+/// The Student's t density.
+pub(crate) fn t_pdf(x: f64, df: f64) -> f64 {
+    (ln_gamma((df + 1.0) / 2.0)
+        - ln_gamma(df / 2.0)
+        - 0.5 * (df * std::f64::consts::PI).ln()
+        - (df + 1.0) / 2.0 * (x * x / df).ln_1p())
+    .exp()
+}
+
+/// The probability beyond `|t|` in one tail of the t distribution — computed
+/// directly from the incomplete beta rather than as `1 - CDF`, which would
+/// lose every significant digit of a small tail.
+pub(crate) fn t_upper_tail(t: f64, df: f64) -> f64 {
+    0.5 * beta_i(df / 2.0, 0.5, df / (df + t * t))
+}
+
+/// `T.DIST(x, df, cumulative)` — the left-tailed CDF or the density.
+pub(crate) fn eval_t_dist(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -> Value {
+    let ([x, df], cumulative) = match numbers_then_flag::<2>(ev, sheet, args) {
+        Ok(v) => v,
+        Err(e) => return Value::Error(e),
+    };
+    let Some(df) = degrees(df) else {
+        return Value::Error(ErrorValue::Num);
+    };
+    number_or_num(if cumulative {
+        t_cdf(x, df)
+    } else {
+        t_pdf(x, df)
+    })
+}
+
+/// `T.DIST.2T(x, df)` (both tails, `x ≥ 0`) and `T.DIST.RT(x, df)` (right
+/// tail, any `x`).
+pub(crate) fn eval_t_dist_tail(
+    ev: &mut Evaluator<'_>,
+    sheet: usize,
+    args: &[Expr],
+    two_tailed: bool,
+) -> Value {
+    let [x, df] = match pair_of_numbers(ev, sheet, args) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let Some(df) = degrees(df) else {
+        return Value::Error(ErrorValue::Num);
+    };
+    if two_tailed && x < 0.0 {
+        return Value::Error(ErrorValue::Num);
+    }
+    let tail = t_upper_tail(x, df);
+    number_or_num(if two_tailed {
+        2.0 * tail
+    } else if x >= 0.0 {
+        tail
+    } else {
+        1.0 - tail
+    })
+}
+
+/// `T.INV(p, df)` — the left-tailed inverse, so negative below one half.
+pub(crate) fn eval_t_inv(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -> Value {
+    let [p, df] = match pair_of_numbers(ev, sheet, args) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let Some(df) = degrees(df) else {
+        return Value::Error(ErrorValue::Num);
+    };
+    if p <= 0.0 || p >= 1.0 {
+        return Value::Error(ErrorValue::Num);
+    }
+    t_quantile(p, df).map_or(Value::Error(ErrorValue::Num), Value::Number)
+}
+
+/// The t quantile, by symmetry from the upper half `invert_cdf` searches.
+pub(crate) fn t_quantile(p: f64, df: f64) -> Option<f64> {
+    if p == 0.5 {
+        return Some(0.0);
+    }
+    if p > 0.5 {
+        invert_cdf(p, |x| t_cdf(x, df))
+    } else {
+        invert_cdf(1.0 - p, |x| t_cdf(x, df)).map(|x| -x)
+    }
+}
+
+/// `F.DIST(x, d1, d2, cumulative)`.
+pub(crate) fn eval_f_dist(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -> Value {
+    let ([x, d1, d2], cumulative) = match numbers_then_flag::<3>(ev, sheet, args) {
+        Ok(v) => v,
+        Err(e) => return Value::Error(e),
+    };
+    let (Some(d1), Some(d2)) = (degrees(d1), degrees(d2)) else {
+        return Value::Error(ErrorValue::Num);
+    };
+    if x < 0.0 {
+        return Value::Error(ErrorValue::Num);
+    }
+    if cumulative {
+        return number_or_num(f_cdf(x, d1, d2));
+    }
+    if x == 0.0 {
+        // The density's limit at zero: unbounded for d1 = 1, 1 for d1 = 2,
+        // and 0 above.
+        return match d1 {
+            1.0 => Value::Error(ErrorValue::Num),
+            2.0 => Value::Number(1.0),
+            _ => Value::Number(0.0),
+        };
+    }
+    let ln_beta = ln_gamma(d1 / 2.0) + ln_gamma(d2 / 2.0) - ln_gamma((d1 + d2) / 2.0);
+    let ln = 0.5 * (d1 * (d1 * x).ln() + d2 * d2.ln() - (d1 + d2) * (d1 * x + d2).ln())
+        - x.ln()
+        - ln_beta;
+    number_or_num(ln.exp())
+}
+
+/// `F.INV(p, d1, d2)` — the left-tailed inverse.
+pub(crate) fn eval_f_inv(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -> Value {
+    let Some(v) = three_numbers(ev, sheet, args) else {
+        return Value::Error(ErrorValue::Value);
+    };
+    let [p, d1, d2] = match v {
+        Ok(v) => v,
+        Err(e) => return Value::Error(e),
+    };
+    let (Some(d1), Some(d2)) = (degrees(d1), degrees(d2)) else {
+        return Value::Error(ErrorValue::Num);
+    };
+    // p = 1 is the point at infinity: `#NUM!`, where bisection would stop
+    // wherever the CDF first rounds to 1.
+    if !(0.0..1.0).contains(&p) {
+        return Value::Error(ErrorValue::Num);
+    }
+    if p == 0.0 {
+        return Value::Number(0.0);
+    }
+    invert_cdf(p, |x| f_cdf(x, d1, d2)).map_or(Value::Error(ErrorValue::Num), Value::Number)
+}
+
+/// `CHISQ.DIST(x, df, cumulative)`.
+pub(crate) fn eval_chisq_dist(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -> Value {
+    let ([x, df], cumulative) = match numbers_then_flag::<2>(ev, sheet, args) {
+        Ok(v) => v,
+        Err(e) => return Value::Error(e),
+    };
+    let Some(df) = degrees(df) else {
+        return Value::Error(ErrorValue::Num);
+    };
+    if x < 0.0 {
+        return Value::Error(ErrorValue::Num);
+    }
+    let k = df / 2.0;
+    if cumulative {
+        return number_or_num(gamma_p(k, x / 2.0));
+    }
+    if x == 0.0 {
+        // As for F: unbounded for one degree of freedom, ½ for two, else 0.
+        return match df {
+            1.0 => Value::Error(ErrorValue::Num),
+            2.0 => Value::Number(0.5),
+            _ => Value::Number(0.0),
+        };
+    }
+    number_or_num(((k - 1.0) * x.ln() - x / 2.0 - k * std::f64::consts::LN_2 - ln_gamma(k)).exp())
+}
+
+/// `CHISQ.INV(p, df)` — the left-tailed inverse.
+pub(crate) fn eval_chisq_inv(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -> Value {
+    let [p, df] = match pair_of_numbers(ev, sheet, args) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let Some(df) = degrees(df) else {
+        return Value::Error(ErrorValue::Num);
+    };
+    // As F.INV: p = 1 is infinite, not wherever the CDF rounds to 1.
+    if !(0.0..1.0).contains(&p) {
+        return Value::Error(ErrorValue::Num);
+    }
+    if p == 0.0 {
+        return Value::Number(0.0);
+    }
+    invert_cdf(p, |x| gamma_p(df / 2.0, x / 2.0))
+        .map_or(Value::Error(ErrorValue::Num), Value::Number)
+}
+
+/// `BETA.DIST(x, alpha, beta, cumulative, [A], [B])`.
+///
+/// Unlike `BETADIST` the flag is required and selects the density.
+pub(crate) fn eval_beta_dist(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -> Value {
+    if args.len() < 4 || args.len() > 6 {
+        return Value::Error(ErrorValue::Value);
+    }
+    let ([x, alpha, beta], cumulative) = match numbers_then_flag::<3>(ev, sheet, &args[..4]) {
+        Ok(v) => v,
+        Err(e) => return Value::Error(e),
+    };
+    let mut bound = |i: usize, default: f64| match args.get(i) {
+        None | Some(Expr::Empty) => Ok(default),
+        Some(a) => ev.eval_expr(sheet, a).as_number(),
+    };
+    let (lo, hi) = match (bound(4, 0.0), bound(5, 1.0)) {
+        (Ok(lo), Ok(hi)) => (lo, hi),
+        (Err(e), _) | (_, Err(e)) => return Value::Error(e),
+    };
+    if alpha <= 0.0 || beta <= 0.0 || hi <= lo || x < lo || x > hi {
+        return Value::Error(ErrorValue::Num);
+    }
+    let z = (x - lo) / (hi - lo);
+    if cumulative {
+        return number_or_num(beta_i(alpha, beta, z));
+    }
+    // `(α-1)·ln z` is 0·−∞ at an edge when α is 1; the factor is 1 there.
+    let part = |exponent: f64, base: f64| {
+        if exponent == 0.0 {
+            0.0
+        } else {
+            exponent * base.ln()
+        }
+    };
+    let ln_beta = ln_gamma(alpha) + ln_gamma(beta) - ln_gamma(alpha + beta);
+    number_or_num((part(alpha - 1.0, z) + part(beta - 1.0, 1.0 - z) - ln_beta).exp() / (hi - lo))
+}
+
 // --- Statistical tests -----------------------------------------------------

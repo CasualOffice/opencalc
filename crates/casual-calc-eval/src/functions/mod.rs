@@ -14,6 +14,7 @@ use crate::value::{Value, number_to_text};
 // the comments had been asserting. Re-exported flat so the dispatch below —
 // and every sibling — names a function exactly as it always did.
 mod aggregate;
+mod arrays;
 mod datetime;
 mod engineering;
 mod financial;
@@ -26,6 +27,7 @@ mod stats;
 mod text;
 
 pub(crate) use aggregate::*;
+pub(crate) use arrays::*;
 pub(crate) use datetime::*;
 pub(crate) use engineering::*;
 pub(crate) use financial::*;
@@ -40,6 +42,51 @@ pub(crate) use text::*;
 /// Guard against pathological full-range aggregates (a dependency-graph with
 /// range buckets is the Phase-2 optimization; this bounds the naive scan).
 pub(crate) const MAX_RANGE_CELLS: u64 = 2_000_000;
+
+/// The most rows an array result may have: the grid's, 1,048,576.
+pub(crate) const MAX_ARRAY_ROWS: usize = casual_calc_formula::MAX_ROW as usize + 1;
+/// The most columns an array result may have: the grid's, 16,384.
+pub(crate) const MAX_ARRAY_COLS: usize = casual_calc_formula::MAX_COL as usize + 1;
+/// The most cells any one array result may hold.
+///
+/// The same budget [`MAX_RANGE_CELLS`] puts on reading a range, so a function
+/// cannot *produce* more than the engine would agree to *read*. Two million
+/// values is some 80 MB of [`Value`]s — large, and survivable in a browser
+/// tab; the whole grid (17 billion cells) is not, and asking for it aborted
+/// the process.
+pub(crate) const MAX_ARRAY_CELLS: usize = MAX_RANGE_CELLS as usize;
+
+/// The one bound every array-producing function checks **before**
+/// allocating: no more rows or columns than the grid, and no more cells than
+/// [`MAX_ARRAY_CELLS`], multiplied without overflow. `#NUM!` otherwise —
+/// the error the engine already gives a range too large to read.
+///
+/// `SEQUENCE(1E10,1E10)` used to overflow `rows * cols` and panic, and
+/// `SEQUENCE(1048576,16384)` to abort on allocation; both are reachable from
+/// any opened file.
+pub(crate) fn checked_array_size(rows: usize, cols: usize) -> Result<usize, ErrorValue> {
+    if rows > MAX_ARRAY_ROWS || cols > MAX_ARRAY_COLS {
+        return Err(ErrorValue::Num);
+    }
+    rows.checked_mul(cols)
+        .filter(|&n| n <= MAX_ARRAY_CELLS)
+        .ok_or(ErrorValue::Num)
+}
+
+/// A user-supplied dimension as a count: truncated, and 0 for anything below
+/// one or not a number (the caller decides what 0 means). Saturates rather
+/// than wrapping, so a huge request stays huge and [`checked_array_size`]
+/// refuses it.
+pub(crate) fn array_dimension(n: f64) -> usize {
+    if n.is_finite() && n >= 1.0 {
+        n.trunc() as usize
+    } else {
+        0
+    }
+}
+
+/// The longest text Excel will hold in a cell, 32,767 characters.
+pub(crate) const MAX_TEXT_CHARS: usize = 32_767;
 
 /// Whether a name is a builtin, so a defined name cannot shadow one.
 ///
@@ -68,7 +115,13 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ),
     ("ACOS", "ACOS(number)"),
     ("ACOSH", "ACOSH(number)"),
+    ("ACOT", "ACOT(number)"),
+    ("ACOTH", "ACOTH(number)"),
     ("ADDRESS", "ADDRESS(row, column, [abs], [a1], [sheet])"),
+    (
+        "AGGREGATE",
+        "AGGREGATE(function_num, options, ref1_or_array, [ref2_or_k], …)",
+    ),
     (
         "AMORDEGRC",
         "AMORDEGRC(cost, date_purchased, first_period, salvage, period, rate, [basis])",
@@ -78,7 +131,9 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
         "AMORLINC(cost, date_purchased, first_period, salvage, period, rate, [basis])",
     ),
     ("AND", "AND(logical1, …)"),
+    ("ARABIC", "ARABIC(text)"),
     ("AREAS", "AREAS(reference)"),
+    ("ARRAYTOTEXT", "ARRAYTOTEXT(array, [format])"),
     ("ASC", "ASC(text)"),
     ("ASIN", "ASIN(number)"),
     ("ASINH", "ASINH(number)"),
@@ -91,10 +146,15 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("AVERAGEIF", "AVERAGEIF(range, criteria, [average_range])"),
     ("AVERAGEIFS", "AVERAGEIFS(avg_range, range1, criteria1, …)"),
     ("BAHTTEXT", "BAHTTEXT(number)"),
+    ("BASE", "BASE(number, radix, [min_length])"),
     ("BESSELI", "BESSELI(x, n)"),
     ("BESSELJ", "BESSELJ(x, n)"),
     ("BESSELK", "BESSELK(x, n)"),
     ("BESSELY", "BESSELY(x, n)"),
+    (
+        "BETA.DIST",
+        "BETA.DIST(x, alpha, beta, cumulative, [A], [B])",
+    ),
     ("BETA.INV", "BETA.INV(probability, alpha, beta, [A], [B])"),
     ("BETADIST", "BETADIST(x, alpha, beta, [A], [B])"),
     ("BETAINV", "BETAINV(probability, alpha, beta, [A], [B])"),
@@ -105,6 +165,11 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
         "BINOM.DIST",
         "BINOM.DIST(number_s, trials, probability_s, cumulative)",
     ),
+    (
+        "BINOM.DIST.RANGE",
+        "BINOM.DIST.RANGE(trials, probability_s, number_s, [number_s2])",
+    ),
+    ("BINOM.INV", "BINOM.INV(trials, probability_s, alpha)"),
     (
         "BINOMDIST",
         "BINOMDIST(number_s, trials, probability_s, cumulative)",
@@ -117,15 +182,24 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("BYCOL", "BYCOL(array, lambda)"),
     ("BYROW", "BYROW(array, lambda)"),
     ("CEILING", "CEILING(number, significance)"),
+    (
+        "CEILING.MATH",
+        "CEILING.MATH(number, [significance], [mode])",
+    ),
+    ("CEILING.PRECISE", "CEILING.PRECISE(number, [significance])"),
     ("CELL", "CELL(info_type, [reference])"),
     ("CHAR", "CHAR(number)"),
     ("CHIDIST", "CHIDIST(x, degrees_freedom)"),
     ("CHIINV", "CHIINV(probability, degrees_freedom)"),
+    ("CHISQ.DIST", "CHISQ.DIST(x, deg_freedom, cumulative)"),
     ("CHISQ.DIST.RT", "CHISQ.DIST.RT(x, degrees_freedom)"),
+    ("CHISQ.INV", "CHISQ.INV(probability, deg_freedom)"),
     ("CHISQ.INV.RT", "CHISQ.INV.RT(probability, degrees_freedom)"),
     ("CHISQ.TEST", "CHISQ.TEST(actual, expected)"),
     ("CHITEST", "CHITEST(actual, expected)"),
     ("CHOOSE", "CHOOSE(index, value1, …)"),
+    ("CHOOSECOLS", "CHOOSECOLS(array, col_num1, …)"),
+    ("CHOOSEROWS", "CHOOSEROWS(array, row_num1, …)"),
     ("CLEAN", "CLEAN(text)"),
     ("CODE", "CODE(text)"),
     ("COLUMN", "COLUMN([reference])"),
@@ -140,6 +214,7 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
         "CONFIDENCE.NORM",
         "CONFIDENCE.NORM(alpha, standard_dev, size)",
     ),
+    ("CONFIDENCE.T", "CONFIDENCE.T(alpha, standard_dev, size)"),
     ("CONVERT", "CONVERT(number, from_unit, to_unit)"),
     ("CORREL", "CORREL(array1, array2)"),
     ("COS", "COS(number)"),
@@ -177,6 +252,7 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ),
     ("COVAR", "COVAR(array1, array2)"),
     ("COVARIANCE.P", "COVARIANCE.P(array1, array2)"),
+    ("COVARIANCE.S", "COVARIANCE.S(array1, array2)"),
     ("CRITBINOM", "CRITBINOM(trials, probability_s, alpha)"),
     ("CSC", "CSC(number)"),
     ("CSCH", "CSCH(number)"),
@@ -196,6 +272,7 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("DEC2BIN", "DEC2BIN(number, [places])"),
     ("DEC2HEX", "DEC2HEX(number, [places])"),
     ("DEC2OCT", "DEC2OCT(number, [places])"),
+    ("DECIMAL", "DECIMAL(text, radix)"),
     ("DEGREES", "DEGREES(angle)"),
     ("DELTA", "DELTA(number1, [number2])"),
     ("DEVSQ", "DEVSQ(number1, …)"),
@@ -210,6 +287,7 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("DOLLARDE", "DOLLARDE(fractional_dollar, fraction)"),
     ("DOLLARFR", "DOLLARFR(decimal_dollar, fraction)"),
     ("DPRODUCT", "DPRODUCT(database, field, criteria)"),
+    ("DROP", "DROP(array, rows, [columns])"),
     ("DSTDEV", "DSTDEV(database, field, criteria)"),
     ("DSTDEVP", "DSTDEVP(database, field, criteria)"),
     ("DSUM", "DSUM(database, field, criteria)"),
@@ -222,19 +300,28 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("ECMA.CEILING", "ECMA.CEILING(number, significance)"),
     ("EDATE", "EDATE(start_date, months)"),
     ("EFFECT", "EFFECT(nominal_rate, npery)"),
+    ("ENCODEURL", "ENCODEURL(text)"),
     ("EOMONTH", "EOMONTH(start_date, months)"),
     ("ERF", "ERF(lower, [upper])"),
+    ("ERF.PRECISE", "ERF.PRECISE(x)"),
     ("ERFC", "ERFC(x)"),
+    ("ERFC.PRECISE", "ERFC.PRECISE(x)"),
     ("ERROR.TYPE", "ERROR.TYPE(error)"),
     ("EVEN", "EVEN(number)"),
     ("EXACT", "EXACT(text1, text2)"),
     ("EXP", "EXP(number)"),
+    ("EXPAND", "EXPAND(array, rows, [columns], [pad_with])"),
     ("EXPON.DIST", "EXPON.DIST(x, lambda, cumulative)"),
     ("EXPONDIST", "EXPONDIST(x, lambda, cumulative)"),
+    (
+        "F.DIST",
+        "F.DIST(x, deg_freedom1, deg_freedom2, cumulative)",
+    ),
     (
         "F.DIST.RT",
         "F.DIST.RT(x, degrees_freedom1, degrees_freedom2)",
     ),
+    ("F.INV", "F.INV(probability, deg_freedom1, deg_freedom2)"),
     (
         "F.INV.RT",
         "F.INV.RT(probability, deg_freedom1, deg_freedom2)",
@@ -252,16 +339,26 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("FISHERINV", "FISHERINV(y)"),
     ("FIXED", "FIXED(number, [decimals], [no_commas])"),
     ("FLOOR", "FLOOR(number, significance)"),
+    ("FLOOR.MATH", "FLOOR.MATH(number, [significance], [mode])"),
+    ("FLOOR.PRECISE", "FLOOR.PRECISE(number, [significance])"),
     ("FORECAST", "FORECAST(x, known_y, known_x)"),
+    (
+        "FORECAST.LINEAR",
+        "FORECAST.LINEAR(x, known_y's, known_x's)",
+    ),
+    ("FORMULATEXT", "FORMULATEXT(reference)"),
     ("FREQUENCY", "FREQUENCY(data_array, bins_array)"),
     ("FTEST", "FTEST(array1, array2)"),
     ("FV", "FV(rate, nper, pmt, [pv], [type])"),
     ("FVSCHEDULE", "FVSCHEDULE(principal, schedule)"),
+    ("GAMMA", "GAMMA(number)"),
     ("GAMMA.DIST", "GAMMA.DIST(x, alpha, beta, cumulative)"),
     ("GAMMA.INV", "GAMMA.INV(probability, alpha, beta)"),
     ("GAMMADIST", "GAMMADIST(x, alpha, beta, cumulative)"),
     ("GAMMAINV", "GAMMAINV(probability, alpha, beta)"),
     ("GAMMALN", "GAMMALN(x)"),
+    ("GAMMALN.PRECISE", "GAMMALN.PRECISE(x)"),
+    ("GAUSS", "GAUSS(z)"),
     ("GCD", "GCD(number1, …)"),
     ("GEOMEAN", "GEOMEAN(number1, …)"),
     ("GESTEP", "GESTEP(number, [step])"),
@@ -276,7 +373,12 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("HEX2OCT", "HEX2OCT(number, [places])"),
     ("HLOOKUP", "HLOOKUP(lookup, table, row, [exact])"),
     ("HOUR", "HOUR(serial_number)"),
+    ("HSTACK", "HSTACK(array1, …)"),
     ("HYPERLINK", "HYPERLINK(link, [friendly])"),
+    (
+        "HYPGEOM.DIST",
+        "HYPGEOM.DIST(sample_s, number_sample, population_s, number_pop, cumulative)",
+    ),
     (
         "HYPGEOMDIST",
         "HYPGEOMDIST(sample_s, number_sample, population_s, number_pop)",
@@ -291,6 +393,9 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("IMCONJUGATE", "IMCONJUGATE(inumber)"),
     ("IMCOS", "IMCOS(inumber)"),
     ("IMCOSH", "IMCOSH(inumber)"),
+    ("IMCOT", "IMCOT(inumber)"),
+    ("IMCSC", "IMCSC(inumber)"),
+    ("IMCSCH", "IMCSCH(inumber)"),
     ("IMDIV", "IMDIV(inumber1, inumber2)"),
     ("IMEXP", "IMEXP(inumber)"),
     ("IMLN", "IMLN(inumber)"),
@@ -299,6 +404,8 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("IMPOWER", "IMPOWER(inumber, number)"),
     ("IMPRODUCT", "IMPRODUCT(inumber1, …)"),
     ("IMREAL", "IMREAL(inumber)"),
+    ("IMSEC", "IMSEC(inumber)"),
+    ("IMSECH", "IMSECH(inumber)"),
     ("IMSIN", "IMSIN(inumber)"),
     ("IMSINH", "IMSINH(inumber)"),
     ("IMSQRT", "IMSQRT(inumber)"),
@@ -382,12 +489,18 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("MMULT", "MMULT(array1, array2)"),
     ("MOD", "MOD(number, divisor)"),
     ("MODE", "MODE(number1, …)"),
+    ("MODE.MULT", "MODE.MULT(number1, …)"),
     ("MODE.SNGL", "MODE.SNGL(number1, …)"),
     ("MONTH", "MONTH(serial_number)"),
     ("MROUND", "MROUND(number, multiple)"),
     ("MULTINOMIAL", "MULTINOMIAL(number1, …)"),
+    ("MUNIT", "MUNIT(dimension)"),
     ("N", "N(value)"),
     ("NA", "NA()"),
+    (
+        "NEGBINOM.DIST",
+        "NEGBINOM.DIST(number_f, number_s, probability_s, cumulative)",
+    ),
     (
         "NEGBINOMDIST",
         "NEGBINOMDIST(number_f, number_s, probability_s)",
@@ -439,14 +552,20 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("PDURATION", "PDURATION(rate, pv, fv)"),
     ("PEARSON", "PEARSON(array1, array2)"),
     ("PERCENTILE", "PERCENTILE(array, k)"),
+    ("PERCENTILE.EXC", "PERCENTILE.EXC(array, k)"),
     ("PERCENTILE.INC", "PERCENTILE.INC(array, k)"),
     ("PERCENTRANK", "PERCENTRANK(array, x, [significance])"),
+    (
+        "PERCENTRANK.EXC",
+        "PERCENTRANK.EXC(array, x, [significance])",
+    ),
     (
         "PERCENTRANK.INC",
         "PERCENTRANK.INC(array, x, [significance])",
     ),
     ("PERMUT", "PERMUT(n, k)"),
     ("PERMUTATIONA", "PERMUTATIONA(n, k)"),
+    ("PHI", "PHI(x)"),
     ("PI", "PI()"),
     ("PMT", "PMT(rate, nper, pv, [fv], [type])"),
     ("POISSON", "POISSON(x, mean, cumulative)"),
@@ -470,12 +589,18 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("PROPER", "PROPER(text)"),
     ("PV", "PV(rate, nper, pmt, [fv], [type])"),
     ("QUARTILE", "QUARTILE(array, quart)"),
+    ("QUARTILE.EXC", "QUARTILE.EXC(array, quart)"),
     ("QUARTILE.INC", "QUARTILE.INC(array, quart)"),
     ("QUOTIENT", "QUOTIENT(numerator, denominator)"),
     ("RADIANS", "RADIANS(angle)"),
     ("RAND", "RAND()"),
+    (
+        "RANDARRAY",
+        "RANDARRAY([rows], [columns], [min], [max], [whole_number])",
+    ),
     ("RANDBETWEEN", "RANDBETWEEN(bottom, top)"),
     ("RANK", "RANK(number, ref, [order])"),
+    ("RANK.AVG", "RANK.AVG(number, ref, [order])"),
     ("RANK.EQ", "RANK.EQ(number, ref, [order])"),
     ("RATE", "RATE(nper, pmt, pv, [fv], [type], [guess])"),
     (
@@ -513,6 +638,7 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("SIN", "SIN(number)"),
     ("SINH", "SINH(number)"),
     ("SKEW", "SKEW(number1, …)"),
+    ("SKEW.P", "SKEW.P(number1, …)"),
     ("SLN", "SLN(cost, salvage, life)"),
     ("SLOPE", "SLOPE(known_y, known_x)"),
     ("SMALL", "SMALL(array, k)"),
@@ -544,8 +670,13 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ),
     ("SYD", "SYD(cost, salvage, life, per)"),
     ("T", "T(value)"),
+    ("T.DIST", "T.DIST(x, deg_freedom, cumulative)"),
+    ("T.DIST.2T", "T.DIST.2T(x, deg_freedom)"),
+    ("T.DIST.RT", "T.DIST.RT(x, deg_freedom)"),
+    ("T.INV", "T.INV(probability, deg_freedom)"),
     ("T.INV.2T", "T.INV.2T(probability, degrees_freedom)"),
     ("T.TEST", "T.TEST(array1, array2, tails, type)"),
+    ("TAKE", "TAKE(array, rows, [columns])"),
     ("TAN", "TAN(number)"),
     ("TANH", "TANH(number)"),
     ("TBILLEQ", "TBILLEQ(settlement, maturity, discount)"),
@@ -553,15 +684,30 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("TBILLYIELD", "TBILLYIELD(settlement, maturity, pr)"),
     ("TDIST", "TDIST(x, degrees_freedom, tails)"),
     ("TEXT", "TEXT(value, format_code)"),
+    (
+        "TEXTAFTER",
+        "TEXTAFTER(text, delimiter, [instance_num], [match_mode], [match_end], [if_not_found])",
+    ),
+    (
+        "TEXTBEFORE",
+        "TEXTBEFORE(text, delimiter, [instance_num], [match_mode], [match_end], [if_not_found])",
+    ),
     ("TEXTJOIN", "TEXTJOIN(delimiter, ignore_empty, text1, …)"),
+    (
+        "TEXTSPLIT",
+        "TEXTSPLIT(text, col_delimiter, [row_delimiter], [ignore_empty], [match_mode], [pad_with])",
+    ),
     ("TIME", "TIME(hour, minute, second)"),
     ("TIMEVALUE", "TIMEVALUE(time_text)"),
     ("TINV", "TINV(probability, degrees_freedom)"),
+    ("TOCOL", "TOCOL(array, [ignore], [scan_by_column])"),
     ("TODAY", "TODAY()"),
+    ("TOROW", "TOROW(array, [ignore], [scan_by_column])"),
     ("TRANSPOSE", "TRANSPOSE(array)"),
     ("TREND", "TREND(known_y, [known_x], [new_x], [const])"),
     ("TRIM", "TRIM(text)"),
     ("TRIMMEAN", "TRIMMEAN(array, percent)"),
+    ("TRIMRANGE", "TRIMRANGE(range, [trim_rows], [trim_cols])"),
     ("TRUE", "TRUE()"),
     ("TRUNC", "TRUNC(number, [num_digits])"),
     ("TTEST", "TTEST(array1, array2, tails, type)"),
@@ -572,6 +718,7 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("UPPER", "UPPER(text)"),
     ("USDOLLAR", "USDOLLAR(number, [decimals])"),
     ("VALUE", "VALUE(text)"),
+    ("VALUETOTEXT", "VALUETOTEXT(value, [format])"),
     ("VAR", "VAR(number1, …)"),
     ("VAR.P", "VAR.P(number1, …)"),
     ("VAR.S", "VAR.S(number1, …)"),
@@ -583,6 +730,7 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
         "VDB(cost, salvage, life, start_period, end_period, [factor], [no_switch])",
     ),
     ("VLOOKUP", "VLOOKUP(lookup, table, col, [exact])"),
+    ("VSTACK", "VSTACK(array1, …)"),
     ("WEEKDAY", "WEEKDAY(serial_number, [type])"),
     ("WEEKNUM", "WEEKNUM(serial, [type])"),
     ("WEIBULL", "WEIBULL(x, alpha, beta, cumulative)"),
@@ -592,6 +740,8 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
         "WORKDAY.INTL",
         "WORKDAY.INTL(start, days, [weekend], [holidays])",
     ),
+    ("WRAPCOLS", "WRAPCOLS(vector, wrap_count, [pad_with])"),
+    ("WRAPROWS", "WRAPROWS(vector, wrap_count, [pad_with])"),
     ("XIRR", "XIRR(values, dates, [guess])"),
     (
         "XLOOKUP",
@@ -602,6 +752,7 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
         "XMATCH(lookup, lookup_array, [match_mode], [search_mode])",
     ),
     ("XNPV", "XNPV(rate, values, dates)"),
+    ("XOR", "XOR(logical1, …)"),
     ("YEAR", "YEAR(serial_number)"),
     ("YEARFRAC", "YEARFRAC(start, end, [basis])"),
     (
@@ -681,6 +832,24 @@ pub fn call_function(ev: &mut Evaluator<'_>, sheet: usize, name: &str, args: &[E
         "SECH" => checked(ev, sheet, args, |n| {
             finite_or(1.0 / n.cosh(), ErrorValue::Div0)
         }),
+        // ACOT's range is (0, π) — π/2 − atan, not atan(1/x), which would
+        // jump to negative values left of zero.
+        "ACOT" => scalar(ev, sheet, args, |n| std::f64::consts::FRAC_PI_2 - n.atan()),
+        "ACOTH" => checked(ev, sheet, args, |n| {
+            if n.abs() <= 1.0 {
+                Value::Error(ErrorValue::Num)
+            } else {
+                Value::Number(0.5 * ((n + 1.0) / (n - 1.0)).ln())
+            }
+        }),
+        "ARABIC" => eval_arabic(ev, sheet, args),
+        "BASE" => eval_base(ev, sheet, args),
+        "DECIMAL" => eval_decimal(ev, sheet, args),
+        "MUNIT" => eval_munit(ev, sheet, args),
+        "ENCODEURL" => eval_encodeurl(ev, sheet, args),
+        "IMCOT" | "IMCSC" | "IMCSCH" | "IMSEC" | "IMSECH" => {
+            eval_complex_reciprocal(ev, sheet, name, args)
+        }
         // Domain-restricted: outside the domain the answer is #NUM!.
         "ASIN" => checked(ev, sheet, args, |n| domain(n.asin())),
         "ACOS" => checked(ev, sheet, args, |n| domain(n.acos())),
@@ -875,7 +1044,7 @@ pub fn call_function(ev: &mut Evaluator<'_>, sheet: usize, name: &str, args: &[E
             slope(ys, xs).map(|m| mean(ys) - m * mean(xs))
         }),
         "STEYX" => paired(ev, sheet, args, steyx),
-        "FORECAST" => eval_forecast(ev, sheet, args),
+        "FORECAST" | "FORECAST.LINEAR" => eval_forecast(ev, sheet, args),
         // Distributions and transforms.
         "FISHER" => checked(ev, sheet, args, |x| {
             if x <= -1.0 || x >= 1.0 {
@@ -888,7 +1057,7 @@ pub fn call_function(ev: &mut Evaluator<'_>, sheet: usize, name: &str, args: &[E
             let e = (2.0 * y).exp();
             (e - 1.0) / (e + 1.0)
         }),
-        "GAMMALN" => checked(ev, sheet, args, |x| {
+        "GAMMALN" | "GAMMALN.PRECISE" => checked(ev, sheet, args, |x| {
             if x <= 0.0 {
                 Value::Error(ErrorValue::Num)
             } else {
@@ -930,7 +1099,31 @@ pub fn call_function(ev: &mut Evaluator<'_>, sheet: usize, name: &str, args: &[E
         "WEIBULL" | "WEIBULL.DIST" => eval_weibull(ev, sheet, args),
         "NEGBINOMDIST" => eval_negbinomdist(ev, sheet, args),
         "HYPGEOMDIST" => eval_hypgeomdist(ev, sheet, args),
-        "CRITBINOM" => eval_critbinom(ev, sheet, args),
+        "CRITBINOM" | "BINOM.INV" => eval_critbinom(ev, sheet, args),
+        "BINOM.DIST.RANGE" => eval_binom_dist_range(ev, sheet, args),
+        "HYPGEOM.DIST" => eval_hypgeom_dist(ev, sheet, args),
+        "NEGBINOM.DIST" => eval_negbinom_dist(ev, sheet, args),
+        "CONFIDENCE.T" => eval_confidence_t(ev, sheet, args),
+        "PERCENTILE.EXC" => eval_percentile_exc(ev, sheet, args, false),
+        "QUARTILE.EXC" => eval_percentile_exc(ev, sheet, args, true),
+        "PERCENTRANK.EXC" => eval_percentrank_exc(ev, sheet, args),
+        "RANK.AVG" => eval_rank_avg(ev, sheet, args),
+        "MODE.MULT" => eval_mode_mult(ev, sheet, args),
+        "SKEW.P" => eval_skew_p(ev, sheet, args),
+        // The sample covariance: n - 1, where COVARIANCE.P divides by n.
+        "COVARIANCE.S" => paired(ev, sheet, args, |xs, ys| {
+            if xs.len() < 2 {
+                return None;
+            }
+            let (mx, my) = (mean(xs), mean(ys));
+            Some(
+                xs.iter()
+                    .zip(ys)
+                    .map(|(x, y)| (x - mx) * (y - my))
+                    .sum::<f64>()
+                    / (xs.len() - 1) as f64,
+            )
+        }),
         "CONFIDENCE" | "CONFIDENCE.NORM" => eval_confidence(ev, sheet, args),
         // Base conversion. Each pair is (from, to) radix; the negative handling
         // lives in the helpers because it is the part that differs.
@@ -955,7 +1148,15 @@ pub fn call_function(ev: &mut Evaluator<'_>, sheet: usize, name: &str, args: &[E
         "GESTEP" => eval_delta(ev, sheet, args, false),
         "GETPIVOTDATA" => eval_getpivotdata(ev, sheet, args),
         "ERF" => eval_erf(ev, sheet, args),
-        "ERFC" => scalar(ev, sheet, args, |x| 1.0 - erf(x)),
+        "ERFC" | "ERFC.PRECISE" => scalar(ev, sheet, args, erfc),
+        // `ERF` with one argument; the `.PRECISE` name exists because the
+        // two-argument form could not be made to accept a negative bound.
+        "ERF.PRECISE" => checked(ev, sheet, args, |x| Value::Number(erf(x))),
+        "GAUSS" => scalar(ev, sheet, args, |z| 0.5 * erf(z / std::f64::consts::SQRT_2)),
+        "PHI" => scalar(ev, sheet, args, |x| {
+            (-x * x / 2.0).exp() / (2.0 * std::f64::consts::PI).sqrt()
+        }),
+        "GAMMA" => checked(ev, sheet, args, gamma_value),
         // The annuity family. All five are the same equation rearranged, so
         // they share `annuity_factor` rather than repeating the algebra.
         "PV" => eval_pv(ev, sheet, args),
@@ -1053,6 +1254,16 @@ pub fn call_function(ev: &mut Evaluator<'_>, sheet: usize, name: &str, args: &[E
         "CHIINV" | "CHISQ.INV.RT" => eval_chiinv(ev, sheet, args),
         "TDIST" => eval_tdist(ev, sheet, args),
         "TINV" | "T.INV.2T" => eval_tinv(ev, sheet, args),
+        // The 2010 forms are left-tailed with a density option; not aliases.
+        "T.DIST" => eval_t_dist(ev, sheet, args),
+        "T.DIST.2T" => eval_t_dist_tail(ev, sheet, args, true),
+        "T.DIST.RT" => eval_t_dist_tail(ev, sheet, args, false),
+        "T.INV" => eval_t_inv(ev, sheet, args),
+        "F.DIST" => eval_f_dist(ev, sheet, args),
+        "F.INV" => eval_f_inv(ev, sheet, args),
+        "CHISQ.DIST" => eval_chisq_dist(ev, sheet, args),
+        "CHISQ.INV" => eval_chisq_inv(ev, sheet, args),
+        "BETA.DIST" => eval_beta_dist(ev, sheet, args),
         "FDIST" | "F.DIST.RT" => eval_fdist(ev, sheet, args),
         "FINV" | "F.INV.RT" => eval_finv(ev, sheet, args),
         "GAMMADIST" | "GAMMA.DIST" => eval_gammadist(ev, sheet, args),
@@ -1065,6 +1276,16 @@ pub fn call_function(ev: &mut Evaluator<'_>, sheet: usize, name: &str, args: &[E
         "CHITEST" | "CHISQ.TEST" => eval_chitest(ev, sheet, args),
         "PROB" => eval_prob(ev, sheet, args),
         "SUBTOTAL" => eval_subtotal(ev, sheet, args),
+        "AGGREGATE" => eval_aggregate(ev, sheet, args),
+        "XOR" => eval_xor(ev, sheet, args),
+        "FORMULATEXT" => eval_formulatext(ev, sheet, args),
+        // The 2010/2013 roundings. `.PRECISE` is `ISO.CEILING`'s rule (and
+        // its floor); `.MATH` adds a mode that flips the direction for a
+        // negative number.
+        "CEILING.MATH" => eval_round_to_multiple(ev, sheet, args, true, true),
+        "FLOOR.MATH" => eval_round_to_multiple(ev, sheet, args, false, true),
+        "CEILING.PRECISE" => eval_round_to_multiple(ev, sheet, args, true, false),
+        "FLOOR.PRECISE" => eval_round_to_multiple(ev, sheet, args, false, false),
         "SUMX2MY2" => paired(ev, sheet, args, |xs, ys| {
             Some(xs.iter().zip(ys).map(|(x, y)| x * x - y * y).sum())
         }),
@@ -1183,6 +1404,12 @@ pub fn call_function(ev: &mut Evaluator<'_>, sheet: usize, name: &str, args: &[E
         "SUMIFS" => eval_ifs_aggregate(ev, sheet, args, IfsKind::Sum),
         "MAXIFS" => eval_ifs_aggregate(ev, sheet, args, IfsKind::Max),
         "MINIFS" => eval_ifs_aggregate(ev, sheet, args, IfsKind::Min),
+        // The 2022 array shapers, which have a module of their own.
+        "VSTACK" | "HSTACK" | "TAKE" | "DROP" | "CHOOSECOLS" | "CHOOSEROWS" | "TOCOL" | "TOROW"
+        | "WRAPROWS" | "WRAPCOLS" | "EXPAND" | "RANDARRAY" | "TEXTSPLIT" | "TEXTBEFORE"
+        | "TEXTAFTER" | "ARRAYTOTEXT" | "VALUETOTEXT" | "TRIMRANGE" => {
+            eval_array_shape(ev, sheet, name, args)
+        }
         "XLOOKUP" | "XMATCH" | "FILTER" | "UNIQUE" | "SORT" | "SORTBY" | "SEQUENCE" => {
             eval_dynamic(ev, sheet, name, args)
         }
@@ -1329,6 +1556,55 @@ pub(crate) fn eval_and_or(
         return Value::Error(ErrorValue::Value);
     }
     Value::Bool(acc)
+}
+
+/// `XOR(logical1, …)` — TRUE when an odd number of the arguments are TRUE.
+///
+/// The coercion is Excel's for the logical functions, and it depends on how a
+/// value arrives: text written as an argument must read as a logical or the
+/// answer is `#VALUE!`, while text (and blanks) inside a reference or an array
+/// are skipped. No logical anywhere is `#VALUE!` too, not FALSE — there was
+/// nothing to count.
+pub(crate) fn eval_xor(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -> Value {
+    let mut seen = false;
+    let mut odd = false;
+    let mut count = |v: &Value, from_block: bool| -> Result<(), ErrorValue> {
+        let truth = match v {
+            Value::Bool(b) => *b,
+            Value::Number(n) => *n != 0.0,
+            Value::Error(e) => return Err(*e),
+            Value::Empty => return Ok(()),
+            Value::Text(_) | Value::Lambda(_) | Value::Array { .. } if from_block => {
+                return Ok(());
+            }
+            other => other.as_bool()?,
+        };
+        seen = true;
+        odd ^= truth;
+        Ok(())
+    };
+    for arg in args {
+        let result = match arg {
+            // A reference, even to one cell, is a reference: its text is skipped.
+            Expr::Reference(_) | Expr::Range(..) | Expr::StructuredRef { .. } => {
+                flatten_values(ev, sheet, arg)
+                    .iter()
+                    .try_for_each(|v| count(v, true))
+            }
+            _ => match ev.eval_expr_array(sheet, arg) {
+                Value::Array { cells, .. } => cells.iter().try_for_each(|v| count(v, true)),
+                v => count(&v, false),
+            },
+        };
+        if let Err(e) = result {
+            return Value::Error(e);
+        }
+    }
+    if seen {
+        Value::Bool(odd)
+    } else {
+        Value::Error(ErrorValue::Value)
+    }
 }
 
 pub(crate) fn eval_not(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -> Value {

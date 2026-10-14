@@ -453,29 +453,39 @@ pub(crate) fn three_numbers(
 
 /// The standard normal CDF, via the error function.
 pub(crate) fn standard_normal_cdf(z: f64) -> f64 {
-    0.5 * (1.0 + erf(z / std::f64::consts::SQRT_2))
+    // Through erfc, so a far left tail keeps its digits rather than being
+    // the difference of two numbers near 1.
+    0.5 * erfc(-z / std::f64::consts::SQRT_2)
 }
 
-#[allow(clippy::excessive_precision)]
-/// Abramowitz & Stegun 7.1.26 — about 1.5e-7 absolute error, which is finer
-/// than the 15 significant digits a spreadsheet displays can distinguish for
-/// probabilities.
+/// The error function, to full double precision.
+///
+/// `erf(x) = P(½, x²)`, the regularized lower incomplete gamma, whose series
+/// and continued fraction converge to 1e-15 — where the Abramowitz & Stegun
+/// rational approximation this replaced was good to only 1.5e-7, visible in
+/// the seventh digit of `NORM.S.DIST`, `ERF` and everything built on them
+/// (`XL-FEAT-013`: `ERF.PRECISE` exists to be precise).
 pub(crate) fn erf(x: f64) -> f64 {
-    // Exact at zero by construction. The rational approximation returns about
-    // 1e-9 there, which makes NORMSDIST(0) read 0.5000000005 — a wart in the
-    // one place every user checks first.
     if x == 0.0 {
         return 0.0;
     }
-    let sign = if x < 0.0 { -1.0 } else { 1.0 };
-    let x = x.abs();
-    let t = 1.0 / (1.0 + 0.327_591_1 * x);
-    let y = 1.0
-        - (((((1.061_405_429 * t - 1.453_152_027) * t) + 1.421_413_741) * t - 0.284_496_736) * t
-            + 0.254_829_592)
-            * t
-            * (-x * x).exp();
-    sign * y
+    let v = gamma_p(0.5, x * x);
+    if x < 0.0 { -v } else { v }
+}
+
+/// The complementary error function, `1 - erf(x)` without the cancellation:
+/// for large `x` it is the upper incomplete gamma directly, so a tail of
+/// 1e-20 is that and not 0.
+pub(crate) fn erfc(x: f64) -> f64 {
+    if x < 0.0 {
+        return 2.0 - erfc(-x);
+    }
+    let x2 = x * x;
+    if x2 < 1.5 {
+        1.0 - gamma_p(0.5, x2)
+    } else {
+        gamma_q_cf(0.5, x2)
+    }
 }
 
 /// The inverse standard normal CDF (Acklam's rational approximation), refined
@@ -1323,5 +1333,324 @@ pub(crate) fn rows_to_value(rows: Vec<Vec<Value>>) -> Value {
         rows: height,
         cols: width,
         cells: rows.into_iter().flatten().collect(),
+    }
+}
+
+// --- The 2010 statistics names (XL-FEAT-013) --------------------------------
+
+/// The binomial point probability, exact at the edges `p = 0` and `p = 1`
+/// where the log-space form would compute `0 · ln 0`.
+pub(crate) fn binomial_pmf(k: f64, n: f64, p: f64) -> f64 {
+    if p == 0.0 {
+        return if k == 0.0 { 1.0 } else { 0.0 };
+    }
+    if p == 1.0 {
+        return if k == n { 1.0 } else { 0.0 };
+    }
+    (ln_gamma(n + 1.0) - ln_gamma(k + 1.0) - ln_gamma(n - k + 1.0)
+        + k * p.ln()
+        + (n - k) * (1.0 - p).ln())
+    .exp()
+}
+
+/// `BINOM.DIST.RANGE(trials, p, s, [s2])` — the probability of between `s`
+/// and `s2` successes, inclusive (exactly `s` without `s2`).
+pub(crate) fn eval_binom_dist_range(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -> Value {
+    if args.len() < 3 || args.len() > 4 {
+        return Value::Error(ErrorValue::Value);
+    }
+    let mut read = |i: usize| ev.eval_expr(sheet, &args[i]).as_number();
+    let (n, p, s) = match (read(0), read(1), read(2)) {
+        (Ok(n), Ok(p), Ok(s)) => (n.trunc(), p, s.trunc()),
+        (Err(e), _, _) | (_, Err(e), _) | (_, _, Err(e)) => return Value::Error(e),
+    };
+    let s2 = match args.get(3) {
+        None | Some(Expr::Empty) => s,
+        Some(a) => match ev.eval_expr(sheet, a).as_number() {
+            Ok(v) => v.trunc(),
+            Err(e) => return Value::Error(e),
+        },
+    };
+    if n < 0.0 || !(0.0..=1.0).contains(&p) || s < 0.0 || s > n || s2 < s || s2 > n {
+        return Value::Error(ErrorValue::Num);
+    }
+    let total: f64 = (s as u64..=s2 as u64)
+        .map(|k| binomial_pmf(k as f64, n, p))
+        .sum();
+    Value::Number(total)
+}
+
+/// `HYPGEOM.DIST(sample_s, number_sample, population_s, number_pop,
+/// cumulative)` — `HYPGEOMDIST` with the cumulative form 2010 added.
+///
+/// Every argument truncates, and a success count the sample cannot hold —
+/// more than it drew, more than the population has, or fewer than the
+/// failures leave room for — is `#NUM!`.
+pub(crate) fn eval_hypgeom_dist(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -> Value {
+    let ([s, n, m, pop], cumulative) = match numbers_then_flag::<4>(ev, sheet, args) {
+        Ok(v) => v,
+        Err(e) => return Value::Error(e),
+    };
+    let (s, n, m, pop) = (s.trunc(), n.trunc(), m.trunc(), pop.trunc());
+    let lowest = (n - pop + m).max(0.0);
+    if pop <= 0.0 || n <= 0.0 || n > pop || m <= 0.0 || m > pop || s < lowest || s > n.min(m) {
+        return Value::Error(ErrorValue::Num);
+    }
+    let log_choose = |a: f64, b: f64| ln_gamma(a + 1.0) - ln_gamma(b + 1.0) - ln_gamma(a - b + 1.0);
+    let pmf = |k: f64| (log_choose(m, k) + log_choose(pop - m, n - k) - log_choose(pop, n)).exp();
+    Value::Number(if cumulative {
+        (lowest as u64..=s as u64).map(|k| pmf(k as f64)).sum()
+    } else {
+        pmf(s)
+    })
+}
+
+/// `NEGBINOM.DIST(number_f, number_s, probability_s, cumulative)` — the
+/// probability of `number_f` failures before the `number_s`-th success.
+pub(crate) fn eval_negbinom_dist(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -> Value {
+    let ([f, s, p], cumulative) = match numbers_then_flag::<3>(ev, sheet, args) {
+        Ok(v) => v,
+        Err(e) => return Value::Error(e),
+    };
+    let (f, s) = (f.trunc(), s.trunc());
+    if f < 0.0 || s < 1.0 || !(0.0..=1.0).contains(&p) {
+        return Value::Error(ErrorValue::Num);
+    }
+    if p == 0.0 {
+        return Value::Number(0.0);
+    }
+    if p == 1.0 {
+        return Value::Number(if cumulative || f == 0.0 { 1.0 } else { 0.0 });
+    }
+    Value::Number(if cumulative {
+        // P(F ≤ f) is the regularized incomplete beta I_p(s, f + 1).
+        beta_i(s, f + 1.0, p)
+    } else {
+        (ln_gamma(f + s) - ln_gamma(f + 1.0) - ln_gamma(s) + s * p.ln() + f * (1.0 - p).ln()).exp()
+    })
+}
+
+/// `PERCENTILE.EXC(array, k)` / `QUARTILE.EXC(array, quart)`.
+pub(crate) fn eval_percentile_exc(
+    ev: &mut Evaluator<'_>,
+    sheet: usize,
+    args: &[Expr],
+    quartile: bool,
+) -> Value {
+    if args.len() != 2 {
+        return Value::Error(ErrorValue::Value);
+    }
+    let mut ns = match flatten_numbers(ev, sheet, &args[..1]) {
+        Ok(ns) => ns,
+        Err(e) => return Value::Error(e),
+    };
+    let k = match ev.eval_expr(sheet, &args[1]).as_number() {
+        Ok(n) => n,
+        Err(e) => return Value::Error(e),
+    };
+    let k = if quartile { quartile_k(k) } else { Some(k) };
+    ns.sort_by(|a, b| a.partial_cmp(b).unwrap_or(Ordering::Equal));
+    match k.and_then(|k| percentile_exclusive(&ns, k)) {
+        Some(v) => Value::Number(v),
+        None => Value::Error(ErrorValue::Num),
+    }
+}
+
+/// Truncate `v` to `digits` decimal places, treating a value within a
+/// rounding error of the next step as that step — `0.381 × 1000` is
+/// 380.99999999999994 in floating point, and must not lose its last digit.
+pub(crate) fn truncate_digits(v: f64, digits: i32) -> f64 {
+    let factor = 10f64.powi(digits);
+    let scaled = v * factor;
+    let nearest = scaled.round();
+    let kept = if (scaled - nearest).abs() < 1e-9 * nearest.abs().max(1.0) {
+        nearest
+    } else {
+        scaled.floor()
+    };
+    kept / factor
+}
+
+/// `PERCENTRANK.EXC(array, x, [significance])` — the rank of `x` as a
+/// fraction of `n + 1`, interpolated between the values around it.
+///
+/// Truncated to `significance` decimal places (three by default, "0.xxx" in
+/// Microsoft's words) — not rounded: the documented example is 0.381 to 0.3
+/// at one digit.
+pub(crate) fn eval_percentrank_exc(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -> Value {
+    if args.len() < 2 || args.len() > 3 {
+        return Value::Error(ErrorValue::Value);
+    }
+    let mut ns = match flatten_numbers(ev, sheet, &args[..1]) {
+        Ok(ns) => ns,
+        Err(e) => return Value::Error(e),
+    };
+    let x = match ev.eval_expr(sheet, &args[1]).as_number() {
+        Ok(n) => n,
+        Err(e) => return Value::Error(e),
+    };
+    let digits = match args.get(2) {
+        None | Some(Expr::Empty) => 3.0,
+        Some(a) => match ev.eval_expr(sheet, a).as_number() {
+            Ok(n) => n.trunc(),
+            Err(e) => return Value::Error(e),
+        },
+    };
+    if ns.is_empty() || digits < 1.0 {
+        return Value::Error(ErrorValue::Num);
+    }
+    ns.sort_by(|a, b| a.partial_cmp(b).unwrap_or(Ordering::Equal));
+    if x < ns[0] || x > ns[ns.len() - 1] {
+        return Value::Error(ErrorValue::Na);
+    }
+    let below = ns.iter().filter(|n| **n < x).count();
+    // 1-based position: a value present takes the first of its equals; one
+    // between two values is interpolated from the one below.
+    let position = if ns.contains(&x) {
+        below as f64 + 1.0
+    } else {
+        let (lower, upper) = (ns[below - 1], ns[below]);
+        below as f64 + (x - lower) / (upper - lower)
+    };
+    let rank = position / (ns.len() as f64 + 1.0);
+    Value::Number(truncate_digits(rank, digits.min(15.0) as i32))
+}
+
+/// `RANK.AVG(number, ref, [order])` — as `RANK.EQ`, but tied values share the
+/// mean of the places they occupy rather than the best of them.
+pub(crate) fn eval_rank_avg(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -> Value {
+    if args.len() < 2 || args.len() > 3 {
+        return Value::Error(ErrorValue::Value);
+    }
+    let target = match ev.eval_expr(sheet, &args[0]).as_number() {
+        Ok(n) => n,
+        Err(e) => return Value::Error(e),
+    };
+    let ns = match flatten_numbers(ev, sheet, &args[1..2]) {
+        Ok(ns) => ns,
+        Err(e) => return Value::Error(e),
+    };
+    let ascending = match args.get(2) {
+        None | Some(Expr::Empty) => false,
+        Some(a) => match ev.eval_expr(sheet, a).as_number() {
+            Ok(n) => n != 0.0,
+            Err(e) => return Value::Error(e),
+        },
+    };
+    let ties = ns.iter().filter(|&&n| n == target).count();
+    if ties == 0 {
+        return Value::Error(ErrorValue::Na);
+    }
+    let ahead = if ascending {
+        ns.iter().filter(|&&n| n < target).count()
+    } else {
+        ns.iter().filter(|&&n| n > target).count()
+    };
+    // Places ahead+1 … ahead+ties, averaged.
+    Value::Number(ahead as f64 + (ties as f64 + 1.0) / 2.0)
+}
+
+/// `MODE.MULT(number1, …)` — every value that occurs most often, as a
+/// vertical array in the order each first appears.
+///
+/// `#N/A` when nothing repeats, as `MODE.SNGL`: a list of all-distinct values
+/// has no mode, not one mode per value.
+pub(crate) fn eval_mode_mult(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -> Value {
+    if args.is_empty() {
+        return Value::Error(ErrorValue::Value);
+    }
+    let ns = match flatten_numbers(ev, sheet, args) {
+        Ok(ns) => ns,
+        Err(e) => return Value::Error(e),
+    };
+    // First-appearance order, with counts.
+    let mut counts: Vec<(f64, usize)> = Vec::new();
+    for n in ns {
+        match counts.iter_mut().find(|(v, _)| *v == n) {
+            Some((_, c)) => *c += 1,
+            None => counts.push((n, 1)),
+        }
+    }
+    let best = counts.iter().map(|(_, c)| *c).max().unwrap_or(0);
+    if best < 2 {
+        return Value::Error(ErrorValue::Na);
+    }
+    let modes: Vec<Vec<Value>> = counts
+        .into_iter()
+        .filter(|(_, c)| *c == best)
+        .map(|(v, _)| vec![Value::Number(v)])
+        .collect();
+    rows_to_value(modes)
+}
+
+/// `SKEW.P(number1, …)` — the population skewness, `mean(((x - μ)/σ)³)`.
+///
+/// Microsoft: fewer than three points, or no spread, is `#DIV/0!`.
+pub(crate) fn eval_skew_p(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -> Value {
+    let ns = match flatten_numbers(ev, sheet, args) {
+        Ok(ns) => ns,
+        Err(e) => return Value::Error(e),
+    };
+    if ns.len() < 3 {
+        return Value::Error(ErrorValue::Div0);
+    }
+    let m = mean(&ns);
+    let sd = variance(&ns, false).map_or(0.0, f64::sqrt);
+    if sd == 0.0 {
+        return Value::Error(ErrorValue::Div0);
+    }
+    Value::Number(mean(
+        &ns.iter()
+            .map(|x| ((x - m) / sd).powi(3))
+            .collect::<Vec<_>>(),
+    ))
+}
+
+/// `CONFIDENCE.T(alpha, standard_dev, size)` — the half-width of a
+/// confidence interval from Student's t rather than the normal.
+pub(crate) fn eval_confidence_t(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -> Value {
+    let Some(v) = three_numbers(ev, sheet, args) else {
+        return Value::Error(ErrorValue::Value);
+    };
+    let [alpha, sd, size] = match v {
+        Ok(v) => v,
+        Err(e) => return Value::Error(e),
+    };
+    let size = size.trunc();
+    if alpha <= 0.0 || alpha >= 1.0 || sd <= 0.0 || size < 1.0 {
+        return Value::Error(ErrorValue::Num);
+    }
+    // One observation leaves no degrees of freedom.
+    if size == 1.0 {
+        return Value::Error(ErrorValue::Div0);
+    }
+    match t_quantile(1.0 - alpha / 2.0, size - 1.0) {
+        Some(t) => Value::Number(t * sd / size.sqrt()),
+        None => Value::Error(ErrorValue::Num),
+    }
+}
+
+/// `GAMMA(x)`.
+///
+/// An integer argument is the factorial, multiplied out so the answer is
+/// exact where it can be; elsewhere `exp(ln Γ)`, and Euler's reflection below
+/// zero. Zero and the negative integers are poles (`#NUM!`), as is anything
+/// past 171.62, where Γ leaves the range of a double.
+pub(crate) fn gamma_value(x: f64) -> Value {
+    if x <= 0.0 && x == x.trunc() {
+        return Value::Error(ErrorValue::Num);
+    }
+    let g = if x > 0.0 && x == x.trunc() && x <= 172.0 {
+        (2..x as u64).map(|k| k as f64).product()
+    } else if x > 0.0 {
+        ln_gamma(x).exp()
+    } else {
+        let pi = std::f64::consts::PI;
+        pi / ((pi * x).sin() * ln_gamma(1.0 - x).exp())
+    };
+    if g.is_finite() {
+        Value::Number(g)
+    } else {
+        Value::Error(ErrorValue::Num)
     }
 }

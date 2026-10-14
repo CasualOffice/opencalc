@@ -146,6 +146,7 @@ the other way around. This index is the map.
 | 95 | [The Excel shell](95-EXCEL-SHELL-TARGET.md) | Owner-approved target: Excel's shell with our identity and lowest cognitive load; prototype in `prototypes/excel-shell-2026/`; rows `UX-SHELL-01..18` |
 | 96 | [Excel fit-gap](96-EXCEL-FIT-GAP.md) | Features and UX against Excel, prioritised, every row in the tracker as `XL-FEAT-*` / `XL-UX-*` |
 | 97 | [Agent access](97-AGENT-ACCESS.md) | Owner-accepted design: one set of tools over the SDK, exposed as an MCP server, a CLI and a live-session participant; rows `AGENT-01..04` (`XL-FEAT-122`) |
+| 99 | [Macros and scripts](99-MACROS-AND-SCRIPTS.md) | Proposed: sandboxed JS/TS scripts over one workbook API (shared with docs/97), recorder, Macros dialog, Automate tab; VBA kept, viewable, not executed; rows `MACRO-01..05` (`XL-FEAT-038`) |
 
 ### Measured gap trackers (50–53, 73)
 

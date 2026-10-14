@@ -1792,6 +1792,7 @@ fn set_defined_names_is_self_inverse() {
         sheet: None,
         formula: parse(f).unwrap(),
         comment: None,
+        attributes: Default::default(),
     };
 
     // Define "Total" over A1:A3.
@@ -1818,6 +1819,7 @@ fn defined_names_undo_redo_through_history() {
         sheet: None,
         formula: parse(f).unwrap(),
         comment: None,
+        attributes: Default::default(),
     };
 
     history
@@ -2529,6 +2531,158 @@ fn a_new_conditional_format_variant_is_a_protocol_change() {
     );
 }
 
+/// **A defined name carrying anything new is a protocol change** (`COL-65`).
+///
+/// `DefinedName` is `deny_unknown_fields`, and it should stay that way: an old
+/// peer that *skipped* a key it did not know would hold the name without it and
+/// send it back whole on the next `SetDefinedNames` — a whole-list replace — so
+/// the comment, or the `hidden` flag, would be erased for everyone without a
+/// word. That is `CHT-07`'s quiet break. Refusing the field is the loud one,
+/// and loud is better — but loud **mid-session** is still a failure: the old
+/// peer's whole batch fails to parse on the first edit to a commented name.
+///
+/// So the fields an old peer cannot read must move `PROTOCOL_VERSION`, and the
+/// mismatch is refused at the handshake instead. This pins the key set a
+/// defined name can put on the wire against the version that introduced it;
+/// adding a key fails here, and the message is the instruction.
+#[test]
+fn a_new_defined_name_field_is_a_protocol_change() {
+    use casual_calc_model::DefinedName;
+
+    /// `DefinedName` as protocol 8 had it — the shape an old peer parses.
+    #[derive(Debug, serde::Deserialize)]
+    #[serde(rename_all = "camelCase", deny_unknown_fields)]
+    #[allow(dead_code)]
+    struct AtProtocol8 {
+        name: String,
+        #[serde(default)]
+        sheet: Option<casual_calc_model::SheetId>,
+        formula: casual_calc_formula::Expr,
+    }
+
+    let wb = workbook();
+    let commented = DefinedName {
+        name: "Rate".to_owned(),
+        sheet: Some(wb.sheets[0].id),
+        formula: parse("S!$A$1").unwrap(),
+        comment: Some("VAT".to_owned()),
+        attributes: Default::default(),
+    };
+    let json = serde_json::to_string(&commented).expect("serialises");
+
+    // Demonstrated rather than assumed: the old shape refuses the message.
+    let refused = serde_json::from_str::<AtProtocol8>(&json)
+        .expect_err("a protocol-8 peer reads a commented name — then the version need not move");
+    assert!(
+        refused.to_string().contains("unknown field `comment`"),
+        "{refused}"
+    );
+
+    // The key set a defined name can put on the wire at protocol 9, built from
+    // a value with every field set. A key added later fails here — and the
+    // version has to move again, for the same reason it moved this time.
+    let full = DefinedName {
+        attributes: casual_calc_model::NameAttributes {
+            hidden: true,
+            function: true,
+            vb_procedure: true,
+            xlm: true,
+            function_group_id: Some(1),
+            shortcut_key: Some("K".to_owned()),
+            publish_to_server: true,
+            workbook_parameter: true,
+            custom_menu: Some("m".to_owned()),
+            description: Some("d".to_owned()),
+            help: Some("h".to_owned()),
+            status_bar: Some("s".to_owned()),
+        },
+        ..commented
+    };
+    let value = serde_json::to_value(&full).expect("serialises");
+    let mut keys: Vec<String> = value.as_object().unwrap().keys().cloned().collect();
+    keys.extend(
+        value["attributes"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(|k| format!("attributes.{k}")),
+    );
+    keys.sort();
+    let at_9 = [
+        "attributes",
+        "attributes.customMenu",
+        "attributes.description",
+        "attributes.function",
+        "attributes.functionGroupId",
+        "attributes.help",
+        "attributes.hidden",
+        "attributes.publishToServer",
+        "attributes.shortcutKey",
+        "attributes.statusBar",
+        "attributes.vbProcedure",
+        "attributes.workbookParameter",
+        "attributes.xlm",
+        "comment",
+        "formula",
+        "name",
+        "sheet",
+    ];
+    assert_eq!(
+        keys,
+        at_9,
+        "the keys a DefinedName can carry have changed. It is deny_unknown_fields, \
+         so an older peer refuses the whole SetDefinedNames batch mid-session: \
+         move PROTOCOL_VERSION (currently {}) and update this list.",
+        crate::protocol::PROTOCOL_VERSION,
+    );
+
+    // A runtime assertion on purpose: a `const` one would fail the *build* of
+    // every test in the crate, where this should fail as one named test whose
+    // message says what to do.
+    #[allow(clippy::assertions_on_constants)]
+    let moved = crate::protocol::PROTOCOL_VERSION > 8;
+    assert!(
+        moved,
+        "a defined name can now carry a key a protocol-8 peer refuses — the \
+         whole batch fails to parse mid-session. Move PROTOCOL_VERSION \
+         (currently {}) so the mismatch is refused at the handshake.",
+        crate::protocol::PROTOCOL_VERSION,
+    );
+}
+
+/// A commented defined name crosses the collaboration wire intact (`COL-65`):
+/// `SetDefinedNames` → `WireOperation` → JSON → `WireOperation` → applied on a
+/// second replica, comment and all.
+#[test]
+fn a_commented_defined_name_crosses_the_wire_and_lands_whole() {
+    use crate::wire::WireOperation;
+    use casual_calc_model::DefinedName;
+
+    let sender = workbook();
+    let names = vec![DefinedName {
+        name: "Rate".to_owned(),
+        sheet: Some(sender.sheets[0].id),
+        formula: parse("S!$A$1").unwrap(),
+        comment: Some("VAT \"standard\" & <reduced>".to_owned()),
+        // `XL-FEAT-124`'s attributes ride the same bump and the same path.
+        attributes: casual_calc_model::NameAttributes {
+            hidden: true,
+            function: true,
+            function_group_id: Some(14),
+            shortcut_key: Some("K".to_owned()),
+            ..Default::default()
+        },
+    }];
+    let wire = WireOperation::of(Operation::SetDefinedNames(names.clone()), &sender);
+    let json = serde_json::to_string(&wire).expect("serialises");
+    let back: WireOperation = serde_json::from_str(&json).expect("reads back");
+
+    let mut receiver = workbook();
+    let op = back.localise(&mut receiver);
+    apply(&mut receiver, op).expect("applies");
+    assert_eq!(receiver.defined_names, names);
+}
+
 // --- Defined names move with what they point at (FID-24) ---------------------
 
 mod defined_names_shift {
@@ -2543,6 +2697,7 @@ mod defined_names_shift {
             sheet: scoped.then_some(sheet),
             formula: parse(refers_to).expect("parses"),
             comment: None,
+            attributes: Default::default(),
         });
         wb
     }
@@ -3649,6 +3804,7 @@ fn a_defined_name_follows_a_moved_column() {
         sheet: None,
         formula: parse("S!$B$1").unwrap(),
         comment: None,
+        attributes: Default::default(),
     });
     apply(
         &mut wb,
@@ -3731,6 +3887,7 @@ fn moving_columns_undoes_exactly() {
         sheet: None,
         formula: parse("S!$B$1:$C$1").unwrap(),
         comment: None,
+        attributes: Default::default(),
     });
     let before = wb.clone();
 
@@ -3949,6 +4106,7 @@ fn moving_a_range_undoes_exactly() {
         sheet: None,
         formula: parse("S!$A$1").unwrap(),
         comment: None,
+        attributes: Default::default(),
     });
     let before = wb.clone();
 

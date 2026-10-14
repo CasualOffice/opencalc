@@ -1719,7 +1719,7 @@ pub fn import_package_cancellable(
     workbook.retained_refs = parse_retained_refs(&workbook_xml)?;
     let names = parse_defined_names(&workbook_xml)?;
     budget.defined_names(names.len())?;
-    for (name, local_sheet, refers_to, comment) in names {
+    for (name, local_sheet, refers_to, comment, attributes) in names {
         // A target this parser cannot read is kept verbatim rather than
         // dropped. Discarding it lost the name from the file entirely, and the
         // commonest casualty was `Print_Titles`, whose value is a whole-row
@@ -1754,6 +1754,7 @@ pub fn import_package_cancellable(
             sheet,
             formula,
             comment,
+            attributes,
         });
         report.record("definedName", outcome.0, outcome.1);
     }

@@ -579,7 +579,10 @@ fn collect_precedents(
             // anyway, so a dependency-driven recalculation would never reach
             // it — `=TODAY()` would keep yesterday's date until something
             // unrelated happened to touch it. Same flag, opposite reason.
-            if matches!(name.as_str(), "TODAY" | "NOW" | "RAND" | "RANDBETWEEN") {
+            if matches!(
+                name.as_str(),
+                "TODAY" | "NOW" | "RAND" | "RANDBETWEEN" | "RANDARRAY"
+            ) {
                 *uses_name = true;
             }
             if matches!(name.as_str(), "INDIRECT" | "OFFSET") {

@@ -726,3 +726,5 @@ mod conditional_tests;
 mod pivot_tests;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod xl_functions_tests;

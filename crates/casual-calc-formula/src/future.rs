@@ -60,8 +60,17 @@ const XLWS: &str = "_XLWS.";
 /// rather than against a copy of this list, so a dotted function added there
 /// and forgotten here fails a test instead of a user's file.
 pub const FUTURE_FUNCTIONS: &[&str] = &[
+    "ACOT",
+    "ACOTH",
+    "AGGREGATE",
+    "ARABIC",
+    "ARRAYTOTEXT",
+    "BASE",
+    "BETA.DIST",
     "BETA.INV",
     "BINOM.DIST",
+    "BINOM.DIST.RANGE",
+    "BINOM.INV",
     "BITAND",
     "BITLSHIFT",
     "BITOR",
@@ -69,29 +78,59 @@ pub const FUTURE_FUNCTIONS: &[&str] = &[
     "BITXOR",
     "BYCOL",
     "BYROW",
+    "CEILING.MATH",
+    "CEILING.PRECISE",
+    "CHISQ.DIST",
     "CHISQ.DIST.RT",
+    "CHISQ.INV",
     "CHISQ.INV.RT",
     "CHISQ.TEST",
+    "CHOOSECOLS",
+    "CHOOSEROWS",
     "COMBINA",
     "CONCAT",
     "CONFIDENCE.NORM",
+    "CONFIDENCE.T",
     "COT",
     "COTH",
     "COVARIANCE.P",
+    "COVARIANCE.S",
     "CSC",
     "CSCH",
     "DAYS",
+    "DECIMAL",
+    "DROP",
     "ECMA.CEILING",
+    "ENCODEURL",
+    "ERF.PRECISE",
+    "ERFC.PRECISE",
+    "EXPAND",
     "EXPON.DIST",
+    "F.DIST",
     "F.DIST.RT",
+    "F.INV",
     "F.INV.RT",
     "F.TEST",
     "FILTER",
+    "FLOOR.MATH",
+    "FLOOR.PRECISE",
+    "FORECAST.LINEAR",
+    "FORMULATEXT",
+    "GAMMA",
     "GAMMA.DIST",
     "GAMMA.INV",
+    "GAMMALN.PRECISE",
+    "GAUSS",
+    "HSTACK",
+    "HYPGEOM.DIST",
     "IFNA",
     "IFS",
     "IMCOSH",
+    "IMCOT",
+    "IMCSC",
+    "IMCSCH",
+    "IMSEC",
+    "IMSECH",
     "IMSINH",
     "IMTAN",
     "ISFORMULA",
@@ -106,7 +145,10 @@ pub const FUTURE_FUNCTIONS: &[&str] = &[
     "MAP",
     "MAXIFS",
     "MINIFS",
+    "MODE.MULT",
     "MODE.SNGL",
+    "MUNIT",
+    "NEGBINOM.DIST",
     "NETWORKDAYS.INTL",
     "NORM.DIST",
     "NORM.INV",
@@ -114,11 +156,17 @@ pub const FUTURE_FUNCTIONS: &[&str] = &[
     "NORM.S.INV",
     "NUMBERVALUE",
     "PDURATION",
+    "PERCENTILE.EXC",
     "PERCENTILE.INC",
+    "PERCENTRANK.EXC",
     "PERCENTRANK.INC",
     "PERMUTATIONA",
+    "PHI",
     "POISSON.DIST",
+    "QUARTILE.EXC",
     "QUARTILE.INC",
+    "RANDARRAY",
+    "RANK.AVG",
     "RANK.EQ",
     "REDUCE",
     "RRI",
@@ -128,23 +176,40 @@ pub const FUTURE_FUNCTIONS: &[&str] = &[
     "SEQUENCE",
     "SHEET",
     "SHEETS",
+    "SKEW.P",
     "SORT",
     "SORTBY",
     "STDEV.P",
     "STDEV.S",
     "SWITCH",
+    "T.DIST",
+    "T.DIST.2T",
+    "T.DIST.RT",
+    "T.INV",
     "T.INV.2T",
     "T.TEST",
+    "TAKE",
+    "TEXTAFTER",
+    "TEXTBEFORE",
     "TEXTJOIN",
+    "TEXTSPLIT",
+    "TOCOL",
+    "TOROW",
+    "TRIMRANGE",
     "UNICHAR",
     "UNICODE",
     "UNIQUE",
+    "VALUETOTEXT",
     "VAR.P",
     "VAR.S",
+    "VSTACK",
     "WEIBULL.DIST",
     "WORKDAY.INTL",
+    "WRAPCOLS",
+    "WRAPROWS",
     "XLOOKUP",
     "XMATCH",
+    "XOR",
     "Z.TEST",
 ];
 
@@ -511,11 +576,50 @@ mod tests {
             stripped("_xlfn._xlws.NOTAREALFUNCTION(1)"),
             "_xlfn._xlws.NOTAREALFUNCTION(1)"
         );
-        // And writing leaves it exactly as read.
-        let mut expr = parse("_xlfn.CEILING.MATH(4.2)").unwrap();
+        // And writing leaves it exactly as read. (`CEILING.MATH` was the
+        // example until XL-FEAT-012 implemented it; `FORECAST.ETS` is not.)
+        let mut expr = parse("_xlfn.FORECAST.ETS(4.2)").unwrap();
         strip_future_prefixes(&mut expr);
         qualify_future_functions(&mut expr);
-        assert_eq!(expr.to_string(), "_xlfn.CEILING.MATH(4.2)");
+        assert_eq!(expr.to_string(), "_xlfn.FORECAST.ETS(4.2)");
+    }
+
+    #[test]
+    fn the_functions_xl_feat_012_added_are_written_with_the_prefix() {
+        // Each of these is listed as `_xlfn.` in [MS-XLSX] 2.2.2 "Functions"
+        // (or, for the ones that postdate that list, is written so by Excel).
+        // Undotted names are the dangerous ones — nothing in the catalog test
+        // can tell `XOR` or `GAMMA` needs the prefix.
+        for name in [
+            "XOR",
+            "AGGREGATE",
+            "FORMULATEXT",
+            "CEILING.MATH",
+            "GAMMA",
+            "GAUSS",
+            "PHI",
+            "T.DIST",
+            "ACOT",
+            "ARABIC",
+            "BASE",
+            "DECIMAL",
+            "MUNIT",
+            "IMCOT",
+            "IMSECH",
+            "ENCODEURL",
+            "VSTACK",
+            "TAKE",
+            "TEXTSPLIT",
+            "RANDARRAY",
+            "ARRAYTOTEXT",
+            "TRIMRANGE",
+        ] {
+            let mut expr = parse(&format!("{name}(1)")).unwrap();
+            assert!(qualify_future_functions(&mut expr), "{name} written bare");
+            assert_eq!(expr.to_string(), format!("_XLFN.{name}(1)"));
+            assert!(strip_future_prefixes(&mut expr));
+            assert_eq!(expr.to_string(), format!("{name}(1)"));
+        }
     }
 
     #[test]

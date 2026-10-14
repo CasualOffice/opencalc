@@ -595,3 +595,110 @@ pub(crate) fn eval_cumulative(
     }
     Value::Number(total)
 }
+
+/// `CEILING.MATH` / `FLOOR.MATH` (with `mode`) and `CEILING.PRECISE` /
+/// `FLOOR.PRECISE` (without): round to a multiple of `|significance|`.
+///
+/// Unlike `CEILING`/`FLOOR` none of them refuses a mismatched sign — the
+/// significance's sign is simply ignored — and a zero significance is 0. They
+/// differ only on a **negative** number: the plain direction is toward +∞ for
+/// the ceiling and −∞ for the floor, and a non-zero `mode` (the `.MATH`
+/// functions only) flips a negative to round away from zero for the ceiling
+/// and toward it for the floor.
+pub(crate) fn eval_round_to_multiple(
+    ev: &mut Evaluator<'_>,
+    sheet: usize,
+    args: &[Expr],
+    up: bool,
+    has_mode: bool,
+) -> Value {
+    let max = if has_mode { 3 } else { 2 };
+    if args.is_empty() || args.len() > max {
+        return Value::Error(ErrorValue::Value);
+    }
+    let mut read = |i: usize, default: f64| -> Result<f64, ErrorValue> {
+        match args.get(i) {
+            None | Some(Expr::Empty) => Ok(default),
+            Some(a) => ev.eval_expr(sheet, a).as_number(),
+        }
+    };
+    let (n, step, mode) = match (read(0, 0.0), read(1, 1.0), read(2, 0.0)) {
+        (Ok(n), Ok(s), Ok(m)) => (n, s.abs(), m),
+        (Err(e), _, _) | (_, Err(e), _) | (_, _, Err(e)) => return Value::Error(e),
+    };
+    if step == 0.0 || n == 0.0 {
+        return Value::Number(0.0);
+    }
+    // A negative number with a non-zero mode goes the other way: the ceiling
+    // away from zero, the floor toward it.
+    let up = if n < 0.0 && mode != 0.0 { !up } else { up };
+    let q = n / step;
+    // A quotient within a rounding error of an integer *is* that integer:
+    // `CEILING.MATH(0.3, 0.1)` must not become 0.4 because 0.3/0.1 is
+    // 2.9999999999999996.
+    let nearest = q.round();
+    let q = if (q - nearest).abs() < 1e-12 * nearest.abs().max(1.0) {
+        nearest
+    } else if up {
+        q.ceil()
+    } else {
+        q.floor()
+    };
+    finite_or(q * step, ErrorValue::Num)
+}
+
+/// `ARABIC(text)` — a Roman numeral as a number; the inverse of `ROMAN`.
+///
+/// Microsoft's rules, which are looser than `ROMAN` writes: case is ignored,
+/// leading and trailing spaces are ignored, a leading minus makes it negative,
+/// `""` is 0, and the reading is subtractive — a numeral smaller than the one
+/// after it is subtracted — so the non-standard `IIII` (4) and `IC` (99) read
+/// as they look. Anything else, a number included, is `#VALUE!`, as is text
+/// past 255 characters.
+pub(crate) fn eval_arabic(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -> Value {
+    let [arg] = args else {
+        return Value::Error(ErrorValue::Value);
+    };
+    let text = match ev.eval_expr(sheet, arg) {
+        Value::Text(t) => t,
+        Value::Empty => String::new(),
+        Value::Error(e) => return Value::Error(e),
+        // A number or a logical is not a numeral, even one that would print
+        // as digits.
+        _ => return Value::Error(ErrorValue::Value),
+    };
+    let trimmed = text.trim_matches(' ');
+    if trimmed.chars().count() > 255 {
+        return Value::Error(ErrorValue::Value);
+    }
+    let (negative, body) = match trimmed.strip_prefix('-') {
+        Some(rest) => (true, rest),
+        None => (false, trimmed),
+    };
+    let mut values = Vec::with_capacity(body.len());
+    for c in body.chars() {
+        let v = match c.to_ascii_uppercase() {
+            'I' => 1.0,
+            'V' => 5.0,
+            'X' => 10.0,
+            'L' => 50.0,
+            'C' => 100.0,
+            'D' => 500.0,
+            'M' => 1000.0,
+            _ => return Value::Error(ErrorValue::Value),
+        };
+        values.push(v);
+    }
+    let total: f64 = values
+        .iter()
+        .enumerate()
+        .map(|(i, v)| {
+            if values.get(i + 1).is_some_and(|next| next > v) {
+                -v
+            } else {
+                *v
+            }
+        })
+        .sum();
+    Value::Number(if negative { -total } else { total })
+}

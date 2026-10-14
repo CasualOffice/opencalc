@@ -1471,11 +1471,18 @@ pub(crate) fn plan_set_name(
     if clash {
         return Err(DUPLICATE_NAME);
     }
+    // An edit keeps what the dialog does not show — `hidden`, a macro's
+    // `function` and the rest — rather than resetting it (`XL-FEAT-124`).
+    let attributes = editing
+        .and_then(|(old, s)| wb.defined_names.iter().find(|d| same(d, old, s)))
+        .map(|d| d.attributes.clone())
+        .unwrap_or_default();
     let entry = DefinedName {
         name: name.to_owned(),
         sheet: scope,
         formula,
         comment: comment.filter(|c| !c.trim().is_empty()),
+        attributes,
     };
     let mut names = wb.defined_names.clone();
     let mut rewrites = Vec::new();
@@ -1590,17 +1597,20 @@ pub fn session_define_name(name: &str, refers_to: &str) -> Result<(), JsError> {
         let session = guard.as_mut().ok_or_else(|| JsError::new("no session"))?;
         let mut names = session.workbook().defined_names.clone();
         let mine = |d: &DefinedName| d.sheet.is_none() && d.name.eq_ignore_ascii_case(name);
-        // Redefining a name keeps its comment; only the target changes.
-        let comment = names
+        // Redefining a name keeps its comment and attributes; only the target
+        // changes.
+        let (comment, attributes) = names
             .iter()
             .find(|d| mine(d))
-            .and_then(|d| d.comment.clone());
+            .map(|d| (d.comment.clone(), d.attributes.clone()))
+            .unwrap_or_default();
         names.retain(|d| !mine(d));
         names.push(DefinedName {
             name: name.to_owned(),
             sheet: None,
             formula: expr,
             comment,
+            attributes,
         });
         // Undoable, dirties the doc, and recalculates (a new/changed name can
         // resolve previously-#NAME? formulas or change what they resolve to).
@@ -1638,9 +1648,13 @@ fn delete_names(doomed: impl Fn(&DefinedName) -> bool) -> Result<(), JsError> {
     })
 }
 
-/// All defined names as JSON `[{name, refersTo, sheet, scope, comment}, …]`:
+/// All defined names as JSON `[{name, refersTo, sheet, scope, comment, hidden}, …]`:
 /// `sheet` is the scope's sheet index (`-1` for the workbook) and `scope` what
 /// Excel's Scope column shows — the sheet's name, or `Workbook`.
+///
+/// Hidden names are reported, not left out, and marked `hidden` (`XL-FEAT-124`):
+/// they are still defined and still resolve, so a caller resolving a typed name
+/// needs them. Excel's lists — Name Manager, the name box, Go To — filter them.
 #[wasm_bindgen]
 pub fn session_names() -> String {
     with_session(|s| {
@@ -1654,12 +1668,13 @@ pub fn session_names() -> String {
                     .and_then(|id| wb.sheets.iter().position(|sh| sh.id == id));
                 let scope = at.map_or("Workbook", |i| wb.sheets[i].name.as_str());
                 format!(
-                    "{{\"name\":{},\"refersTo\":{},\"sheet\":{},\"scope\":{},\"comment\":{}}}",
+                    "{{\"name\":{},\"refersTo\":{},\"sheet\":{},\"scope\":{},\"comment\":{},\"hidden\":{}}}",
                     json_string(&d.name),
                     json_string(&d.formula.to_string()),
                     at.map_or(-1, |i| i as i64),
                     json_string(scope),
                     json_string(d.comment.as_deref().unwrap_or("")),
+                    d.hidden(),
                 )
             })
             .collect();
@@ -2777,6 +2792,45 @@ mod defined_name_tests {
 
         session_delete_name_in("rate", 1).unwrap();
         assert_eq!(session_names(), "[]");
+    }
+
+    /// `XL-FEAT-124`: a hidden name is reported as hidden, so the editor's
+    /// lists can leave it out, and editing or redefining a name does not
+    /// quietly unhide it or strip its macro attributes.
+    #[test]
+    fn a_hidden_name_is_reported_hidden_and_stays_hidden_through_an_edit() {
+        crate::session_new();
+        crate::session_set_cell(0, 0, 0, "4").unwrap();
+        session_set_name("", -1, "Plumbing", -1, "Sheet1!$A$1", "").unwrap();
+        session_set_name("", -1, "Shown", -1, "Sheet1!$A$1", "").unwrap();
+        SESSION.with(|cell| {
+            let mut guard = cell.borrow_mut();
+            let session = guard.as_mut().unwrap();
+            let mut names = session.workbook().defined_names.clone();
+            names[0].attributes.hidden = true;
+            names[0].attributes.function = true;
+            session.edit(EditOperation::SetDefinedNames(names)).unwrap();
+        });
+        let listed: Vec<serde_json::Value> = serde_json::from_str(&session_names()).unwrap();
+        let hidden = |n: &str| {
+            listed
+                .iter()
+                .find(|v| v["name"] == n)
+                .map(|v| v["hidden"].clone())
+        };
+        assert_eq!(hidden("Plumbing"), Some(serde_json::Value::Bool(true)));
+        assert_eq!(hidden("Shown"), Some(serde_json::Value::Bool(false)));
+
+        // Edit Name and the name box's redefine both keep the attributes.
+        session_set_name("Plumbing", -1, "Plumbing", -1, "Sheet1!$A$2", "note").unwrap();
+        session_define_name("Plumbing", "Sheet1!$A$3").unwrap();
+        with_session(|s| {
+            let d = &s.workbook().defined_names;
+            let p = d.iter().find(|d| d.name == "Plumbing").unwrap();
+            assert!(p.attributes.hidden && p.attributes.function, "{p:?}");
+            assert_eq!(p.comment.as_deref(), Some("note"));
+        })
+        .unwrap();
     }
 
     #[test]

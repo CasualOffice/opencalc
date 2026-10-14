@@ -3109,6 +3109,7 @@ fn every_dispatched_function_is_in_the_catalog() {
     const SOURCES: &[&str] = &[
         include_str!("functions/mod.rs"),
         include_str!("functions/aggregate.rs"),
+        include_str!("functions/arrays.rs"),
         include_str!("functions/datetime.rs"),
         include_str!("functions/engineering.rs"),
         include_str!("functions/financial.rs"),
@@ -3939,6 +3940,7 @@ fn lambda_applies_inline_and_by_name() {
             sheet: None,
             formula: parse(text).unwrap(),
             comment: None,
+            attributes: Default::default(),
         });
     }
     recalculate(&mut wb);
@@ -3969,6 +3971,7 @@ fn runaway_recursion_is_an_error_not_a_crash() {
         sheet: None,
         formula: parse("LAMBDA(n,FOREVER(n+1))").unwrap(),
         comment: None,
+        attributes: Default::default(),
     });
     recalculate(&mut wb);
     assert_eq!(
@@ -3991,6 +3994,7 @@ fn a_lambda_cannot_take_over_a_builtin_name() {
         sheet: None,
         formula: parse("LAMBDA(x,999)").unwrap(),
         comment: None,
+        attributes: Default::default(),
     });
     recalculate(&mut wb);
     assert_eq!(value_at(&wb, 0, 2), CellValue::Number(5.0));
@@ -5005,6 +5009,7 @@ fn a_sheet_scoped_name_wins_on_its_sheet_and_is_invisible_elsewhere() {
         sheet,
         formula: parse(text).unwrap(),
         comment: None,
+        attributes: Default::default(),
     };
     // The local one first, so a lookup that ignores scope finds it everywhere.
     wb.defined_names.push(name("Rate", Some(s2_id), "5"));
