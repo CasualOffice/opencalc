@@ -27,10 +27,11 @@
 //! brackets exactly when leaving them off would let the parser re-associate it:
 //!
 //! - a **left** child, when it binds no tighter on its right than its parent
-//!   does on its left — which keeps `(2^3)^2` bracketed, since `^` is
-//!   right-associative and `2^3^2` would come back as `2^(3^2)`;
+//!   does on its left;
 //! - a **right** child, when it binds looser on its left than its parent does
-//!   on its right — which keeps `1-(2-3)` bracketed and lets `1+2*3` go bare.
+//!   on its right — which keeps `1-(2-3)` and `2^(3^2)` bracketed (every
+//!   operator is left-associative, `^` included, as in Excel: XL-FEAT-135) and
+//!   lets `1+2*3` go bare.
 //!
 //! Prefix `-` and `+` bind tighter than every binary operator (so `-2^2` is
 //! `(-2)^2`, as in Excel), and postfix `%` binds tighter still.
@@ -63,8 +64,8 @@ fn binary_bp(op: BinaryOp) -> (u8, u8) {
         BinaryOp::Concat => (10, 11),
         BinaryOp::Add | BinaryOp::Subtract => (20, 21),
         BinaryOp::Multiply | BinaryOp::Divide => (30, 31),
-        // Equal powers, which is what makes it right-associative.
-        BinaryOp::Power => (40, 40),
+        // Left-associative like every other operator, as Excel is (XL-FEAT-135).
+        BinaryOp::Power => (40, 41),
     }
 }
 

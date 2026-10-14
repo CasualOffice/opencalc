@@ -92,7 +92,8 @@ struct Parser {
 const PREFIX_BP: u8 = 50;
 
 fn binary_op(token: &Token) -> Option<(BinaryOp, u8, u8)> {
-    // (op, left binding power, recurse power). Right-assoc `^` recurses at its own bp.
+    // (op, left binding power, recurse power). Every operator is left-associative,
+    // `^` included: Excel reads `2^3^2` as `(2^3)^2` = 64 (XL-FEAT-135).
     Some(match token {
         Token::Eq => (BinaryOp::Equal, 5, 6),
         Token::Ne => (BinaryOp::NotEqual, 5, 6),
@@ -105,7 +106,7 @@ fn binary_op(token: &Token) -> Option<(BinaryOp, u8, u8)> {
         Token::Minus => (BinaryOp::Subtract, 20, 21),
         Token::Star => (BinaryOp::Multiply, 30, 31),
         Token::Slash => (BinaryOp::Divide, 30, 31),
-        Token::Caret => (BinaryOp::Power, 40, 40),
+        Token::Caret => (BinaryOp::Power, 40, 41),
         _ => return None,
     })
 }

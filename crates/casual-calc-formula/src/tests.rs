@@ -51,18 +51,18 @@ fn respects_precedence() {
         }
     ));
 
-    // 2 ^ 3 ^ 2 is right-associative -> 2 ^ (3 ^ 2)
+    // 2 ^ 3 ^ 2 is left-associative, as in Excel -> (2 ^ 3) ^ 2 (XL-FEAT-135)
     let expr = parse("2^3^2").unwrap();
     let Expr::Binary {
         op: BinaryOp::Power,
-        right,
+        left,
         ..
     } = expr
     else {
         panic!("expected power at the root");
     };
     assert!(matches!(
-        *right,
+        *left,
         Expr::Binary {
             op: BinaryOp::Power,
             ..
@@ -284,11 +284,11 @@ fn prints_what_was_typed() {
         "(1+2)*3",
         "8/(4/2)",
         "1-(2-3)",
-        "(2^3)^2",
+        "2^(3^2)",
         "-(2^2)",
         "(A1+B1)/(C1-D1)",
         "(1+2)%",
-        // Right-associative `^` needs none.
+        // Left-associative `^`, as in Excel, needs none (XL-FEAT-135).
         "2^3^2",
         // Nothing to bracket at all.
         "42",
@@ -321,7 +321,7 @@ fn redundant_brackets_are_not_preserved() {
         ("1+(2*3)", "1+2*3"),
         ("((A1))", "A1"),
         ("(SUM(A1:A3))", "SUM(A1:A3)"),
-        ("2^(3^2)", "2^3^2"),
+        ("(2^3)^2", "2^3^2"),
         ("(1-2)-3", "1-2-3"),
     ] {
         assert_eq!(parse(typed).unwrap().to_string(), shown);
@@ -528,4 +528,20 @@ fn an_ordinary_sheet_name_is_still_written_without_quotes() {
     assert_eq!(bare("Data2024"), "Data2024!A1");
     assert_eq!(bare("2024"), "'2024'!A1");
     assert_eq!(bare("A1"), "'A1'!A1");
+}
+
+/// **`^` is left-associative, as in Excel** (XL-FEAT-135): `2^3^2` is
+/// `(2^3)^2` = 64, not `2^(3^2)` = 512. The parser and the printer share the
+/// rule, so the explicit right-nested form keeps its brackets and the
+/// left-nested one prints bare.
+#[test]
+fn power_is_left_associative_as_in_excel() {
+    let e = crate::parse("2^3^2").unwrap();
+    assert_eq!(
+        e,
+        crate::parse("(2^3)^2").unwrap(),
+        "2^3^2 must parse as (2^3)^2"
+    );
+    assert_eq!(crate::parse("(2^3)^2").unwrap().to_string(), "2^3^2");
+    assert_eq!(crate::parse("2^(3^2)").unwrap().to_string(), "2^(3^2)");
 }

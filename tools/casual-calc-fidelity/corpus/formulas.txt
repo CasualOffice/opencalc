@@ -248,8 +248,8 @@ COUNT(H1:H5)
 LET(x,5,x*2)
 LET(x,5,y,x+1,x*y)
 LAMBDA(x,x+1)(4)  @differs: LibreOffice 26.2 cannot call a LAMBDA literal inline (Err:509)
-SUM(MAP(C1:C3,LAMBDA(v,v*2)))
-REDUCE(0,C1:C5,LAMBDA(a,b,a+b))
+SUM(MAP(C1:C3,LAMBDA(v,v*2)))  @differs: LibreOffice 26.2 does not implement MAP (#NAME?)
+REDUCE(0,C1:C5,LAMBDA(a,b,a+b))  @differs: LibreOffice 26.2 does not implement REDUCE (#NAME?)
 
 # --- XL-FEAT-012/013 group 1: XOR, AGGREGATE, .MATH/.PRECISE, FORMULATEXT ----
 XOR(TRUE,TRUE)
@@ -350,9 +350,9 @@ BINOM.INV(6,0.5,0.75)
 BINOM.INV(10,0.3,0)
 BINOM.INV(10,0.3,1)
 BINOM.INV(10,1.3,0.5)
-BINOM.DIST.RANGE(60,0.75,45,50)
-BINOM.DIST.RANGE(60,0.75,48)
-BINOM.DIST.RANGE(60,0.75,50,45)
+BINOM.DIST.RANGE(60,0.75,45,50)  @differs: LibreOffice 26.2 does not implement BINOM.DIST.RANGE (#NAME?)
+BINOM.DIST.RANGE(60,0.75,48)  @differs: LibreOffice 26.2 does not implement BINOM.DIST.RANGE (#NAME?)
+BINOM.DIST.RANGE(60,0.75,50,45)  @differs: LibreOffice 26.2 does not implement BINOM.DIST.RANGE (#NAME?)
 HYPGEOM.DIST(1,4,8,20,TRUE)
 HYPGEOM.DIST(1,4,8,20,FALSE)
 HYPGEOM.DIST(5,4,8,20,FALSE)
@@ -369,10 +369,10 @@ QUARTILE.EXC(C1:C10,2.7)
 QUARTILE.EXC(C1:C10,0)
 PERCENTRANK.EXC(C1:C10,7)
 PERCENTRANK.EXC(C1:C10,7,5)
-PERCENTRANK.EXC(C1:C10,5.43)
-PERCENTRANK.EXC(C1:C10,5.43,1)
-PERCENTRANK.EXC(C1:C10,1)
-PERCENTRANK.EXC(C1:C10,7,0)
+PERCENTRANK.EXC(C1:C10,5.43)  @differs: Excel truncates to `significance` digits (Microsoft's PERCENTRANK.EXC remarks); LibreOffice rounds or keeps more
+PERCENTRANK.EXC(C1:C10,5.43,1)  @differs: Excel truncates to `significance` digits (Microsoft's PERCENTRANK.EXC remarks); LibreOffice rounds or keeps more
+PERCENTRANK.EXC(C1:C10,1)  @differs: Excel truncates to `significance` digits (Microsoft's PERCENTRANK.EXC remarks); LibreOffice rounds or keeps more
+PERCENTRANK.EXC(C1:C10,7,0)  @differs: Excel truncates to `significance` digits (Microsoft's PERCENTRANK.EXC remarks); LibreOffice rounds or keeps more
 RANK.AVG(5,C1:C10)
 RANK.AVG(3,C1:C10,1)
 RANK.AVG(-0.25,G1:G5)
@@ -433,8 +433,8 @@ ARABIC("IIII")
 ARABIC("IC")
 ARABIC("ABC")
 ARABIC(5)
-ARABIC("-MMXI")
-ARABIC("  XV  ")
+ARABIC("-MMXI")  @differs: Excel accepts a leading minus and surrounding spaces (Microsoft's ARABIC remarks); LibreOffice refuses
+ARABIC("  XV  ")  @differs: Excel accepts a leading minus and surrounding spaces (Microsoft's ARABIC remarks); LibreOffice refuses
 BASE(7,2)
 BASE(100,16)
 BASE(15,2,10)
@@ -554,10 +554,10 @@ TEXTAFTER("alpha-beta","a",2)  @since-lo: 24.8
 TEXTAFTER("abc","")  @since-lo: 24.8  @differs: Microsoft: an empty delimiter matches at once, so TEXTAFTER forwards is the whole text; LibreOffice answers #N/A
 ARRAYTOTEXT(C1:D2,1)  @differs: LibreOffice 26.2 does not implement ARRAYTOTEXT (#NAME?); Excel gives {1,10;2,20}
 VALUETOTEXT("abc",1)  @differs: LibreOffice 26.2 does not implement VALUETOTEXT (#NAME?)
-ROWS(TRIMRANGE(C1:D20))
-COLUMNS(TRIMRANGE(A1:E20))
-COLUMNS(TRIMRANGE(A1:E20,3,2))
-SUM(TRIMRANGE(C1:C1000))
+ROWS(TRIMRANGE(C1:D20))  @differs: LibreOffice 26.2 does not implement TRIMRANGE (#NAME?)
+COLUMNS(TRIMRANGE(A1:E20))  @differs: LibreOffice 26.2 does not implement TRIMRANGE (#NAME?)
+COLUMNS(TRIMRANGE(A1:E20,3,2))  @differs: LibreOffice 26.2 does not implement TRIMRANGE (#NAME?)
+SUM(TRIMRANGE(C1:C1000))  @differs: LibreOffice 26.2 does not implement TRIMRANGE (#NAME?)
 
 # XL-FEAT-129: FILTER and SORT (written _xlfn._xlws.*) and the four 2010
 # functions Excel writes bare. These lines check the values only: LibreOffice
