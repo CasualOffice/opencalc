@@ -93,7 +93,50 @@ struct Entry {
     formula: String,
     /// Why this one is expected to disagree, if it is.
     differs: Option<String>,
+    /// The first LibreOffice release that has the function (`@since-lo:`).
+    since: Option<(u32, u32)>,
     line: usize,
+}
+
+/// One corpus line: `<formula> [@since-lo: X.Y] [@differs: <reason>]`.
+fn parse_line(line: &str, number: usize) -> Entry {
+    let (head, differs) = match line.split_once("@differs:") {
+        Some((f, why)) => (f, Some(why.trim().to_owned())),
+        None => (line, None),
+    };
+    let (formula, since) = match head.split_once("@since-lo:") {
+        Some((f, v)) => (f, parse_major_minor(v.trim())),
+        None => (head, None),
+    };
+    Entry {
+        formula: formula.trim().to_owned(),
+        differs,
+        since,
+        line: number,
+    }
+}
+
+fn parse_major_minor(v: &str) -> Option<(u32, u32)> {
+    let mut parts = v.split('.');
+    let major = parts.next()?.trim().parse().ok()?;
+    let minor = parts.next()?.trim().parse().ok()?;
+    Some((major, minor))
+}
+
+/// `"LibreOffice 24.2.7.2 420(Build:2)"` → `(24, 2)`.
+fn lo_version(oracle: &str) -> Option<(u32, u32)> {
+    let rest = oracle.strip_prefix("LibreOffice ")?;
+    parse_major_minor(rest.split_whitespace().next()?)
+}
+
+/// Whether this oracle is **known** to be older than the release that added
+/// the function the line needs. An oracle whose version cannot be read is
+/// not assumed old: the line is compared, and a wrong marker fails loudly.
+fn oracle_predates(since: Option<(u32, u32)>, oracle: &str) -> bool {
+    match (since, lo_version(oracle)) {
+        (Some(need), Some(have)) => have < need,
+        _ => false,
+    }
 }
 
 /// What the two implementations said about one formula.
@@ -132,6 +175,11 @@ struct Report {
     /// part worth knowing: a value where the oracle errors, or the reverse, is
     /// a real finding and still lands in `unexpected`.
     error_class_only: Vec<Comparison>,
+    /// Lines for a function this oracle's release does not have
+    /// (`@since-lo:`). Neither agreement nor failure: reported and counted,
+    /// and compared again by any oracle new enough to answer them.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    oracle_too_old: Vec<Comparison>,
 }
 
 impl Report {
@@ -169,15 +217,24 @@ impl Report {
                 c.formula, c.ours, c.oracle
             );
         }
+        for c in &self.oracle_too_old {
+            println!(
+                "  skipped: {} ({}; this oracle is {})",
+                c.formula,
+                c.expected_to_differ.as_deref().unwrap_or(""),
+                self.oracle
+            );
+        }
 
         let failed = !self.unexpected.is_empty() || !self.stale_markers.is_empty();
         println!(
-            "{}: {} unexpected, {} known, {} error-class, {} stale marker(s)",
+            "{}: {} unexpected, {} known, {} error-class, {} stale marker(s), {} skipped (oracle too old)",
             if failed { "FAIL" } else { "ok" },
             self.unexpected.len(),
             self.known.len(),
             self.error_class_only.len(),
-            self.stale_markers.len()
+            self.stale_markers.len(),
+            self.oracle_too_old.len()
         );
         failed
     }
@@ -261,6 +318,7 @@ fn validate_package(args: &[String]) -> Result<Report, String> {
         known: Vec::new(),
         stale_markers: Vec::new(),
         error_class_only: Vec::new(),
+        oracle_too_old: Vec::new(),
     };
 
     for (property, mine, theirs) in survey(session.workbook(), theirs.workbook()) {
@@ -600,6 +658,7 @@ fn run(args: &[String]) -> Result<Report, String> {
         known: Vec::new(),
         stale_markers: Vec::new(),
         error_class_only: Vec::new(),
+        oracle_too_old: Vec::new(),
     };
 
     for (row, entry) in entries.iter().enumerate() {
@@ -615,6 +674,18 @@ fn run(args: &[String]) -> Result<Report, String> {
             .cloned()
             .unwrap_or_default();
         let agreed = agrees(&ours, &theirs);
+
+        if oracle_predates(entry.since, &report.oracle) {
+            let (major, minor) = entry.since.unwrap_or_default();
+            report.oracle_too_old.push(Comparison {
+                formula: entry.formula.clone(),
+                ours,
+                oracle: theirs,
+                agreed,
+                expected_to_differ: Some(format!("needs LibreOffice {major}.{minor}")),
+            });
+            continue;
+        }
 
         let comparison = Comparison {
             formula: entry.formula.clone(),
@@ -649,15 +720,7 @@ fn read_corpus(path: &Path) -> Result<Vec<Entry>, String> {
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
-        let (formula, differs) = match line.split_once("@differs:") {
-            Some((f, why)) => (f.trim(), Some(why.trim().to_owned())),
-            None => (line, None),
-        };
-        out.push(Entry {
-            formula: formula.to_owned(),
-            differs,
-            line: i + 1,
-        });
+        out.push(parse_line(line, i + 1));
     }
     Ok(out)
 }
@@ -951,6 +1014,7 @@ fn ods_corpus(args: &[String]) -> Result<Report, String> {
         known: Vec::new(),
         stale_markers: Vec::new(),
         error_class_only: Vec::new(),
+        oracle_too_old: Vec::new(),
     };
 
     for (i, document) in documents.iter().enumerate() {
@@ -1216,6 +1280,47 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_line_carries_its_minimum_libreoffice_and_its_reason() {
+        let e = parse_line(r#"TEXTSPLIT("a,b",",")  @since-lo: 24.8  @differs: why"#, 7);
+        assert_eq!(e.formula, r#"TEXTSPLIT("a,b",",")"#);
+        assert_eq!(e.since, Some((24, 8)));
+        assert_eq!(e.differs.as_deref(), Some("why"));
+        let plain = parse_line("SUM(C1:C3)", 8);
+        assert_eq!(
+            (plain.formula.as_str(), plain.since, plain.differs),
+            ("SUM(C1:C3)", None, None)
+        );
+        let gated = parse_line("EXPAND(C1:D2,3,3) @since-lo: 25.2", 9);
+        assert_eq!(
+            (gated.formula.as_str(), gated.since),
+            ("EXPAND(C1:D2,3,3)", Some((25, 2)))
+        );
+    }
+
+    #[test]
+    fn the_oracle_version_is_read_from_its_banner() {
+        assert_eq!(
+            lo_version("LibreOffice 24.2.7.2 420(Build:2)"),
+            Some((24, 2))
+        );
+        assert_eq!(lo_version("LibreOffice 26.2.4.2 something"), Some((26, 2)));
+        assert_eq!(lo_version("not an oracle"), None);
+    }
+
+    /// An older oracle skips a line it cannot answer; a new-enough one — and
+    /// one whose version cannot be read — compares it, so a wrong marker fails
+    /// loudly instead of hiding a function forever.
+    #[test]
+    fn only_a_known_older_oracle_skips_a_gated_line() {
+        let ci = "LibreOffice 24.2.7.2 420(Build:2)";
+        assert!(oracle_predates(Some((24, 8)), ci));
+        assert!(!oracle_predates(Some((24, 2)), ci));
+        assert!(!oracle_predates(Some((24, 8)), "LibreOffice 26.2.4.2"));
+        assert!(!oracle_predates(None, ci));
+        assert!(!oracle_predates(Some((24, 8)), "garbled"));
+    }
+
+    #[test]
     fn numbers_agree_within_the_oracles_printed_precision() {
         // LibreOffice writes about fourteen significant digits, so our full
         // double and its printed form must still count as agreeing.
@@ -1375,6 +1480,7 @@ mod tests {
             known: Vec::new(),
             stale_markers: Vec::new(),
             error_class_only: Vec::new(),
+            oracle_too_old: Vec::new(),
         };
         let ours: BTreeMap<(u32, u32), String> = [
             ((0, 0), "same".to_owned()),
@@ -1435,6 +1541,7 @@ mod tests {
             known: Vec::new(),
             stale_markers: Vec::new(),
             error_class_only: Vec::new(),
+            oracle_too_old: Vec::new(),
         };
         let ours: BTreeMap<(u32, u32), String> =
             [((0, 5), "far right".to_owned())].into_iter().collect();
