@@ -831,6 +831,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      # Before the builds, not with the stack: the cleanup steps run
+      # `docker compose` too, and without a `.env` they failed on the missing
+      # secret — which buried a failed build's real error under that one.
+      - name: Write the CI .env
+        run: |
+          cp .env.example .env
+          sed -i 's/^OPENCALC_SHARED_SECRET=.*/OPENCALC_SHARED_SECRET=ci-not-a-real-secret/' .env
       - name: Build every image
         run: |
           docker build -f server/casual-calc-host/Dockerfile -t opencalc-host .
@@ -839,8 +846,6 @@ jobs:
       - name: The standalone stack answers on one origin
         run: |
           set -euo pipefail
-          cp .env.example .env
-          sed -i 's/^OPENCALC_SHARED_SECRET=.*/OPENCALC_SHARED_SECRET=ci-not-a-real-secret/' .env
           docker compose up -d --no-build
           # Wait for the proxy rather than a fixed sleep: the collab server
           # waits on the host's healthcheck, so readiness is a chain.
