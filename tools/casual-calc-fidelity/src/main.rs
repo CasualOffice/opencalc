@@ -449,6 +449,7 @@ fn feature_workbook() -> Workbook {
         sheet: None,
         formula: parse("Data!A2:A6").unwrap(),
         comment: None,
+        attributes: Default::default(),
     });
     wb
 }
