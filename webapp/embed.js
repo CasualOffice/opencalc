@@ -135,6 +135,8 @@ const cssVar = (name) => "--oc-" + name.replace(/[A-Z]/g, (c) => "-" + c.toLower
 
 /// How many elements have mounted, so each gets a distinct module instance.
 let instances = 0;
+/// The element that owns the page's one editor core (see `#mount`).
+let liveSheet = null;
 
 /// The editor's stylesheets, in the order `editor.html` links them: the editor,
 /// then the shell's tokens, then the shell (the ribbon, the title bar, the File
@@ -253,6 +255,29 @@ class OpenCalcSheet extends HTMLElement {
     // it: mounting three left all three stuck at "loading engine…". Varying the
     // URL is what gives each its own module scope, and `start(key)` does the
     // same for the wasm glue underneath so each element gets its own workbook.
+    // **One live sheet per page, until UX-SHELL-24.** Every element shares one
+    // editor core (since MNT-005 the `i=` key above no longer reaches the
+    // modules `editor.js` re-exports), so a second element used to rebind it
+    // silently: the first element's handle then read — and its save() would
+    // have written — the second's workbook. Data loss with no signal. Refuse
+    // instead, by name and on screen (docs/100 step 1). A sheet whose element
+    // has left the page releases the slot.
+    if (liveSheet && liveSheet !== this && liveSheet.isConnected) {
+      const why = new Error(
+        "Only one OpenCalc sheet per page is supported in this version; " +
+        "remove the other <opencalc-sheet> first (UX-SHELL-24)",
+      );
+      why.name = "OpenCalcEmbedLimitError";
+      shell.textContent = "";
+      const note = document.createElement("p");
+      note.setAttribute("role", "alert");
+      note.style.cssText = "margin:16px;font:14px/1.4 system-ui,sans-serif;color:var(--oc-muted-text-color,#555)";
+      note.textContent = "Only one OpenCalc sheet per page is supported in this version.";
+      shell.appendChild(note);
+      this.dispatchEvent(new CustomEvent("error", { detail: why }));
+      throw why;
+    }
+    liveSheet = this;
     const key = String(++instances);
     const editor = await import(
       /* @vite-ignore */ new URL(`editor.js?v=${BUILD}&i=${key}`, base).href
