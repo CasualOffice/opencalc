@@ -379,6 +379,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "casual-calc-mcp"
+version = "0.0.0"
+dependencies = [
+ "casual-calc-model",
+ "casual-calc-sdk",
+ "serde_json",
+]
+
+[[package]]
 name = "casual-calc-model"
 version = "0.0.0"
 dependencies = [
