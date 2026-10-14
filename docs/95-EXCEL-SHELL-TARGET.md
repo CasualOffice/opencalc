@@ -37,8 +37,10 @@ This overrides three earlier decisions:
 ## Rules that decide every screen
 
 1. **Icons, not text.** No text glyph stands in for an icon (A▲, .0→, bare $).
-   Every icon has a tooltip with name and shortcut. Group captions and button
-   labels are a setting, off by default.
+   Every icon has a tooltip with name and shortcut. **Group names are shown**
+   (with their dialog launchers, and on a folded group); **button labels are
+   not** — owner, 2026-10-14: *"we can have group name.. but naming each icon
+   that i disagreed on"*. Both stay switchable under File › Options.
 2. **Excel's proportions.** Small controls 24px tall with 16px icons; large
    buttons 24px icons in a 72px column; three small rows per column.
 3. **One place per command**, plus the right-click menu and search.
@@ -46,6 +48,10 @@ This overrides three earlier decisions:
 5. **One mode, always shown; Escape always returns to Ready on the grid.**
 6. **Defaults need no decision** — a new workbook is blank.
 7. **Nothing that is for us** — no version strings or debug text.
+8. **A dialog's messages about its own input are inline.** Shown beside the
+   input, with the dialog kept open and the text intact — never a message box
+   over a dialog (decided 2026-10-14, XL-UX-147; a deliberate divergence from
+   Excel for one fewer click and no lost place).
 
 ## Build status (2026-10-14)
 

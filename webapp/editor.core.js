@@ -7388,10 +7388,12 @@ export function openColumnPickList() {
   // Under the active cell, the way the validation dropdown places itself. The
   // active cell is on screen (every `select` calls `ensureVisible`), but the
   // geometry lookups still answer `undefined` off-screen, so both are guarded.
+  // Grid geometry is in unzoomed canvas units; the screen is zoomed (XL-UX-148).
   const rect = canvas.getBoundingClientRect();
+  const z = state.zoom || 1;
   const x = colXAt(col) ?? 0;
   const y = rowYAt(state.sel.row) ?? 0;
-  positionMenu(menu, rect.left + x, rect.top + y + (rowHAt(state.sel.row) ?? 0));
+  positionMenu(menu, rect.left + x * z, rect.top + (y + (rowHAt(state.sel.row) ?? 0)) * z);
 }
 
 /// One sheet to a PDF file (`IO-14`).
