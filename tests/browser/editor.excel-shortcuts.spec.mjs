@@ -178,11 +178,14 @@ test("Ctrl+H opens replace and puts the caret in the replacement field", async (
   // reached none of it. Find had Ctrl+F; replace had the same bar and no key.
   await page.keyboard.press("Control+h");
 
-  await expect(page.locator("#find-bar")).toBeVisible();
-  // Not merely open: Excel's Ctrl+H lands the caret in "Replace with", which is
+  // The Find and Replace dialog on its Replace tab (XL-UX-024/025 retired the
+  // floating bar this used to find as `#find-bar`).
+  await expect(page.locator("#oc-modal-title")).toHaveText("Find and Replace");
+  await expect(page.getByRole("tab", { name: "Replace", exact: true })).toHaveAttribute("aria-selected", "true");
+  // Not merely open: Ctrl+H lands the caret in "Replace with", which is
   // the difference between the shortcut working and the user retyping a search
   // term into the wrong box.
-  await expect(page.locator("#replace-input")).toBeFocused();
+  await expect(page.locator("#oc-fr-with")).toBeFocused();
 });
 
 test("Ctrl+Enter puts the entry in every selected cell", async ({ page }) => {

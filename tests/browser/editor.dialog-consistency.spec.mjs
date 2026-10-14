@@ -18,6 +18,8 @@ const DIALOGS = [
   "format.format-cells", "formulas.insert-function", "file.properties", "data.sort-range.custom-sort",
   "insert.table", "format.row-height", "insert.hyperlink", "data.text-to-columns",
   "data.remove-duplicates", "help.about-opencalc", "edit.go-to", "edit.go-to-special", "tools.name-manager", "formulas.define-name", "format.protection.protect-this-sheet",
+  // Find and Replace (XL-UX-024/025): modeless, but the same frame.
+  "edit.find-replace", "edit.replace",
 ];
 const PANELS = ["data.data-validation", "file.page-setup", "insert.note", "file.version-history", "insert.pivottable"];
 

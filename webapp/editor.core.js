@@ -98,16 +98,12 @@ import {
   colFromName,
   colName,
   findStep,
-  gotoMatch,
   gotoName,
   navTarget,
   openFind,
   openReplace,
   parseA1Cell,
   parseNameRange,
-  replaceAll,
-  replaceOne,
-  runFind,
 } from "./editor.find.js";
 import {
   adjustDecimals,
@@ -517,16 +513,12 @@ export {
   colFromName,
   colName,
   findStep,
-  gotoMatch,
   gotoName,
   navTarget,
   openFind,
   openReplace,
   parseA1Cell,
   parseNameRange,
-  replaceAll,
-  replaceOne,
-  runFind,
 } from "./editor.find.js";
 export {
   adjustDecimals,
@@ -3160,7 +3152,7 @@ export function draw() {
   // Find highlights: every match on this sheet gets a soft tint, so "3 of 47"
   // is answerable by looking at the sheet rather than by stepping through it.
   // The current match keeps the ordinary selection, which stays distinct.
-  if (findState.matches.length && !findBar.hidden) {
+  if (findState.matches.length && findState.open) {
     ctx.fillStyle = colors.findHit;
     for (const m of findState.matches) {
       if (m.s !== undefined && m.s !== state.sheet) continue;
@@ -5874,16 +5866,9 @@ function buildBorderMenu() {
 // "Clear formats": drop styling, keep values + formulas.
 // "Clear all": also drop styles.
 // --- Find & replace -------------------------------------------------------
-export let findBar;
-export let findInput;
-export let replaceInput;
-export let findCount;
-export let findCase;
-export let findWhole;
-export let findValues;
-export let findAllSheets;
-export let findWildcards;
-export const findState = { matches: [], idx: -1 };
+// The Find and Replace dialog's last search, for the grid's match tint. `open`
+// is whether the dialog is up; the tint shows only then.
+export const findState = { matches: [], idx: -1, open: false };
 
 // Replace only the current match, then re-search and jump to the next one.
 
@@ -9002,6 +8987,11 @@ function wireEvents() {
         else goToDialog();
         e.preventDefault();
         break;
+      // Shift+F4 repeats the last Find (Excel's Find Next), Ctrl+Shift+F4
+      // searches backwards — with the dialog closed, as in Excel.
+      case "F4":
+        if (e.shiftKey && !e.altKey) { findStep(e.ctrlKey || e.metaKey ? -1 : 1); e.preventDefault(); }
+        break;
       // Shift+F3 is Insert Function (XL-UX-026); Ctrl+F3 is above.
       case "F3":
         if (e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey) { insertFunctionDialog(); e.preventDefault(); }
@@ -9143,22 +9133,6 @@ function wireEvents() {
     if (e.key === "Enter") { gotoName(cellRef.value); canvas.focus(); updateNameBox(); e.preventDefault(); }
     else if (e.key === "Escape") { canvas.focus(); updateNameBox(); e.preventDefault(); }
   });
-
-  // Find & replace bar.
-  findInput.addEventListener("input", runFind);
-  findInput.addEventListener("keydown", (e) => {
-    if (e.key === "Enter") { findStep(e.shiftKey ? -1 : 1); e.preventDefault(); }
-    else if (e.key === "Escape") { closeFind(); e.preventDefault(); }
-  });
-  replaceInput.addEventListener("keydown", (e) => { if (e.key === "Escape") closeFind(); });
-  for (const box of [findCase, findWhole, findValues, findAllSheets, findWildcards]) {
-    box.addEventListener("change", runFind);
-  }
-  byId("find-next").addEventListener("click", () => findStep(1));
-  byId("find-prev").addEventListener("click", () => findStep(-1));
-  byId("replace-one").addEventListener("click", replaceOne);
-  byId("replace-all").addEventListener("click", replaceAll);
-  byId("find-close").addEventListener("click", closeFind);
 
   // The control behind `toolbar.delete-sheet` (see `editor.html`). Wired
   // through `byId`, which resolves against **this mount's root**, so an
@@ -10829,15 +10803,6 @@ function bindElements() {
   cellRef = byId("cell-ref");
   commentTip = byId("comment-tip");
   status = byId("tb-status");
-  findBar = byId("find-bar");
-  findInput = byId("find-input");
-  replaceInput = byId("replace-input");
-  findCount = byId("find-count");
-  findCase = byId("find-case");
-  findWhole = byId("find-whole");
-  findValues = byId("find-values");
-  findAllSheets = byId("find-all-sheets");
-  findWildcards = byId("find-wildcards");
   liveEl = byId("grid-live");
   modeEl = byId("cell-mode");
   a11yEl = byId("grid-a11y");

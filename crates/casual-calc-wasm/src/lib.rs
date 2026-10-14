@@ -48,6 +48,7 @@ mod cells;
 mod clipboard;
 mod collab;
 mod data;
+mod find;
 mod formula;
 mod history;
 mod io;
@@ -65,6 +66,7 @@ pub use cells::*;
 pub use clipboard::*;
 pub use collab::*;
 pub use data::*;
+pub use find::*;
 pub use formula::*;
 pub use history::*;
 pub use io::*;
@@ -318,7 +320,15 @@ pub(crate) fn json_string(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{ci_replace, html_cell_css, push_html_escaped};
+    use super::{html_cell_css, push_html_escaped};
+
+    /// The case-insensitive literal replace the Find and Replace dialog runs,
+    /// kept under its old name so the cases below still read as they did.
+    fn ci_replace(haystack: &str, needle: &str, repl: &str) -> String {
+        crate::find::Pattern::new(needle, false, false)
+            .replace(haystack, repl, false)
+            .unwrap_or_else(|| haystack.to_owned())
+    }
     use casual_calc_model::{HAlign, Style};
 
     #[test]
