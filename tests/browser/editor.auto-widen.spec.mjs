@@ -50,7 +50,7 @@ test("Ctrl+; widens a default-width column instead of showing #####, and one und
   const before = await colW(page, 1);
   await select(page, 1, 1);
   await page.keyboard.press("Control+Semicolon");
-  await expect.poll(() => input(page, 1, 1)).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+  await expect.poll(() => input(page, 1, 1)).toMatch(/^\d{1,2}\/\d{1,2}\/\d{4}$/);
 
   const s = await shown(page, 1, 1);
   expect(s.n, `the date is a number: ${JSON.stringify(s)}`).toBe(true);
@@ -63,7 +63,7 @@ test("Ctrl+; widens a default-width column instead of showing #####, and one und
   expect(await colW(page, 1), "the same undo put the width back").toBe(before);
   // And redo brings both back together.
   await page.keyboard.press("Control+y");
-  await expect.poll(() => input(page, 1, 1)).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+  await expect.poll(() => input(page, 1, 1)).toMatch(/^\d{1,2}\/\d{1,2}\/\d{4}$/);
   expect(await colW(page, 1)).toBeGreaterThan(before);
 });
 
@@ -121,7 +121,7 @@ test("a column the user sized is never widened — it shows ##### as Excel does"
   const before = await colW(page, 3);
   await select(page, 1, 3);
   await page.keyboard.press("Control+Semicolon");
-  await expect.poll(() => input(page, 1, 3)).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+  await expect.poll(() => input(page, 1, 3)).toMatch(/^\d{1,2}\/\d{1,2}\/\d{4}$/);
   expect(await colW(page, 3), "a user-set width was changed").toBe(before);
   expect((await shown(page, 1, 3)).hashes, "the date should not fit in 40px").toBe(true);
 });
