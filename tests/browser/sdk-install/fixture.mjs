@@ -19,7 +19,6 @@
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import http from "node:http";
-import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -35,7 +34,13 @@ process.stdout.write(run(process.execPath, [path.join(ROOT, "sdk", "build-packag
 
 // 2. Pack, exactly as `release-sdk.yml` does: `npm pack` applies `files` and
 //    `.npmignore`, which is part of what decides what a user receives.
-const work = fs.mkdtempSync(path.join(os.tmpdir(), "opencalc-sdk-install-"));
+//    One fixed directory, wiped at the start of each run rather than at the
+//    end: Playwright stops this server with SIGKILL, so an exit handler never
+//    runs, and a temp directory per run left 20 MB behind every time. Under
+//    `test-results/`, it is gitignored and in CI's failure upload.
+const work = path.join(ROOT, "tests", "browser", "test-results", "sdk-install-fixture");
+fs.rmSync(work, { recursive: true, force: true });
+fs.mkdirSync(work, { recursive: true });
 const tarballs = path.join(work, "tarballs");
 fs.mkdirSync(tarballs);
 const packed = run("npm", ["pack", "--silent", "--pack-destination", tarballs],
@@ -112,13 +117,6 @@ const server = http.createServer((req, res) => {
     res.writeHead(404, { "content-type": "text/plain" }).end(`not in the installed package: ${url.pathname}`);
   }
 });
-
-const cleanup = () => {
-  fs.rmSync(work, { recursive: true, force: true });
-  process.exit(0);
-};
-process.on("SIGTERM", cleanup);
-process.on("SIGINT", cleanup);
 
 server.listen(PORT, "127.0.0.1", () => {
   process.stdout.write(`sdk-install: serving ${app} on http://127.0.0.1:${PORT}/\n`);
