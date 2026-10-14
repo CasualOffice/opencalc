@@ -1,0 +1,14 @@
+# Network settings for every cargo invocation in this repository — CI jobs,
+# `cargo install` run from the checkout, and the Docker builds (they copy the
+# whole context, `.cargo/` included).
+#
+# crates.io downloads over HTTP/2 from GitHub's runners failed intermittently
+# with "[16] Error in the HTTP2 framing layer" and "Send failure: Broken pipe",
+# which turned main's CI red three times in one day for no change of ours.
+# Cargo's own default is 3 retries over one multiplexed connection; one stream
+# error then fails the whole batch.
+[net]
+retry = 10
+
+[http]
+multiplexing = false
