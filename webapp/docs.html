@@ -5,95 +5,102 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>OpenCalc SDK — integration guide</title>
     <meta name="description" content="Embed a real spreadsheet in your React, Vue or plain-HTML application. Installation, configuration, theming, events and the read-only modes." />
-    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%232f6df6'/%3E%3Cg fill='none' stroke='%23fff' stroke-width='2.4'%3E%3Crect x='7' y='7' width='18' height='18' rx='2'/%3E%3Cpath d='M7 13h18M13 7v18'/%3E%3C/g%3E%3C/svg%3E" />
-    <link rel="stylesheet" href="./style.css?v=6" />
-    <style>
-      .doc { display: grid; grid-template-columns: 232px minmax(0, 1fr); gap: 48px; align-items: start; padding: 40px 0 80px; }
-      @media (max-width: 940px) { .doc { grid-template-columns: 1fr; gap: 20px; } .toc { position: static !important; } }
-      .toc { position: sticky; top: 84px; font-size: 14px; }
-      .toc h4 { font-size: 11px; letter-spacing: .1em; text-transform: uppercase; color: var(--faint); margin: 20px 0 8px; }
-      .toc h4:first-child { margin-top: 0; }
-      .toc a { display: block; padding: 4px 0; color: var(--muted); text-decoration: none; }
-      .toc a:hover { color: var(--fg); }
-      .body h2 { font-size: 26px; letter-spacing: -.01em; margin: 44px 0 10px; scroll-margin-top: 84px; }
-      .body h2:first-child { margin-top: 0; }
-      .body h3 { font-size: 17px; margin: 28px 0 8px; scroll-margin-top: 84px; }
-      .body p, .body li { color: var(--muted); line-height: 1.7; }
-      .body li { margin: 4px 0; }
-      .body b, .body strong { color: var(--fg); }
-      .body table { width: 100%; border-collapse: collapse; margin: 16px 0; font-size: 14.5px; }
-      .body th { text-align: left; font-size: 11px; letter-spacing: .08em; text-transform: uppercase; color: var(--faint); border-bottom: 1px solid var(--border); padding: 8px 10px 8px 0; }
-      .body td { border-bottom: 1px solid var(--line); padding: 10px 10px 10px 0; color: var(--muted); vertical-align: top; }
-      .body td code, .body p code, .body li code { font-size: 13px; background: var(--code-bg); border-radius: 5px; padding: 1px 5px; color: var(--code-fg); }
-      pre { background: #0f1216; color: #d7dee9; border-radius: 12px; padding: 16px 18px; overflow: auto; font: 400 13px/1.65 ui-monospace, Menlo, Consolas, monospace; margin: 14px 0; }
-      pre .c { color: #6b7686; } pre .s { color: #c3e88d; } pre .k { color: #c792ea; } pre .f { color: #82aaff; } pre .n { color: #f78c6c; }
-      .callout { border-left: 3px solid var(--accent, #0e7a55); background: var(--note-bg); border-radius: 0 10px 10px 0; padding: 14px 16px; margin: 18px 0; }
-      .callout.warn { border-left-color: #d97706; background: var(--note-warn-bg); }
-      .callout p { color: var(--muted); }
-      .lede { font-size: 18px; line-height: 1.6; color: var(--muted); }
-      .numlist { list-style: none; counter-reset: n; padding: 0; margin: 22px 0 0; }
-      .numlist > li { position: relative; counter-increment: n; padding: 0 0 22px 44px; margin: 0; border-left: 1px solid var(--border); }
-      .numlist > li:last-child { border-left-color: transparent; padding-bottom: 0; }
-      .numlist > li::before {
-        content: counter(n); position: absolute; left: -13px; top: 0;
-        display: inline-flex; align-items: center; justify-content: center;
-        width: 26px; height: 26px; border-radius: 8px; background: var(--accent); color: #fff;
-        font-family: var(--mono); font-size: 13px; font-weight: 600;
-      }
-      .numlist h3 { margin: 1px 0 6px; font-size: 16.5px; color: var(--fg); }
-      .numlist pre { margin: 10px 0 0; }
-    </style>
+    <meta name="theme-color" content="#0e7a55" />
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230e7a55'/%3E%3Cg fill='none' stroke='%23fff' stroke-width='2.4'%3E%3Crect x='7' y='7' width='18' height='18' rx='2'/%3E%3Cpath d='M7 13h18M13 7v18'/%3E%3C/g%3E%3C/svg%3E" />
+    <link rel="preload" href="./fonts/inter-latin-400-700.woff2" as="font" type="font/woff2" crossorigin />
+    <link rel="stylesheet" href="./style.css?v=7" />
+    <script type="module" src="./site.js"></script>
   </head>
   <body>
-    <header class="nav">
-      <div class="wrap nav-inner">
+    <a class="skip" href="#main">Skip to content</a>
+
+    <header class="site-header">
+      <div class="wrap">
         <a class="brand" href="./index.html" aria-label="OpenCalc home">
-          <span class="logo" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18M9 3v18"/></svg></span>
+          <svg class="mark" viewBox="0 0 32 32" aria-hidden="true" focusable="false"><rect class="m-bg" width="32" height="32" rx="7"/><rect class="m-ln" x="7.5" y="7.5" width="17" height="17" rx="2"/><path class="m-ln" d="M7.5 13.5h17M13.5 7.5v17"/></svg>
           OpenCalc
         </a>
         <nav class="nav-links">
-          <a href="./index.html#product">Product</a>
-          <a href="./index.html#today">What works</a>
-          <a href="./index.html#embed">Embed</a>
-          <a href="./docs.html">SDK docs</a>
+          <a href="./index.html#product">Features</a>
+          <a href="./docs.html" aria-current="page">Docs</a>
+          <a href="./embed.html">Embed demo</a>
           <a href="./deploy.html">Self-host</a>
-          <a href="./embed.html">Live demo</a>
+          <a href="./download.html">Download</a>
           <a href="https://github.com/CasualOffice/opencalc">GitHub</a>
-          <a class="btn btn-ink btn-sm" href="./editor.html">Open the editor</a>
         </nav>
+        <div class="header-actions">
+          <a class="btn btn-primary btn-sm" href="./editor.html"><span class="btn-cta-label">Open the editor</span><span class="sr-only"> (OpenCalc in your browser)</span><svg viewBox="0 0 20 20" aria-hidden="true" focusable="false"><path fill="currentColor" d="M11.3 4.3a1 1 0 0 1 1.4 0l5 5a1 1 0 0 1 0 1.4l-5 5a1 1 0 0 1-1.4-1.4L14.6 11H3a1 1 0 1 1 0-2h11.6l-3.3-3.3a1 1 0 0 1 0-1.4Z"/></svg></a>
+          <details class="menu">
+            <summary aria-label="Menu"><svg viewBox="0 0 20 20" aria-hidden="true" focusable="false"><path fill="currentColor" d="M3 5.5a.75.75 0 0 1 .75-.75h12.5a.75.75 0 0 1 0 1.5H3.75A.75.75 0 0 1 3 5.5Zm0 4.5a.75.75 0 0 1 .75-.75h12.5a.75.75 0 0 1 0 1.5H3.75A.75.75 0 0 1 3 10Zm.75 3.75a.75.75 0 0 0 0 1.5h12.5a.75.75 0 0 0 0-1.5H3.75Z"/></svg></summary>
+            <nav class="menu-panel" aria-label="Main (mobile)">
+              <a href="./index.html#product">Features</a>
+              <a href="./docs.html" aria-current="page">Docs</a>
+              <a href="./embed.html">Embed demo</a>
+              <a href="./deploy.html">Self-host</a>
+              <a href="./download.html">Download</a>
+              <a href="https://github.com/CasualOffice/opencalc">GitHub</a>
+              <a href="./editor.html">Open the editor</a>
+            </nav>
+          </details>
+        </div>
       </div>
     </header>
 
+    <main id="main">
+      <header class="page-head">
+        <div class="wrap">
+          <div class="head-copy">
+            <p class="eyebrow">SDK · <code>@opencalc/sheet</code></p>
+            <h1>Put a real spreadsheet in your application.</h1>
+            <p class="lede">Install, configure, theme and listen — the integration guide for the <code>&lt;opencalc-sheet&gt;</code> element, its React wrapper and the headless engine.</p>
+            <div class="cta-row"><a class="btn btn-primary" href="#quick">Jump to a complete page</a><a class="btn btn-secondary" href="./embed.html">Try the live demo</a></div>
+          </div>
+          <div class="head-art il-wrap"><svg class="il" viewBox="0 0 320 210" role="img" aria-label="An opencalc-sheet element in a web page, configured with three API calls: theme, configure and open." focusable="false">
+  <rect class="sh" x="14" y="14" width="296" height="186" rx="10"/><rect class="pp" x="10" y="10" width="296" height="186" rx="10"/>
+  <path class="k" d="M10 32h296" opacity=".25"/>
+  <circle class="ln" cx="24" cy="21" r="3"/><circle class="ln" cx="34" cy="21" r="3"/><circle class="ln" cx="44" cy="21" r="3"/>
+  <g class="pop" style="--d:0"><rect class="pp" x="24" y="48" width="160" height="112" rx="6"/>
+    <rect class="ps" x="24.75" y="48.75" width="158.5" height="16" rx="5" stroke="none"/>
+    <path class="gr" d="M52 65v95M96 65v95M140 65v95M24 80h160M24 96h160M24 112h160M24 128h160M24 144h160" style="stroke: var(--il-line)"/>
+    <rect class="bk" x="96" y="96" width="44" height="16"/></g>
+  <rect fill="none" stroke="var(--il-brand)" stroke-width="1.5" stroke-dasharray="5 4" x="18" y="42" width="172" height="124" rx="8"/>
+  <g class="pop" style="--d:1"><rect class="br" x="40" y="170" width="128" height="18" rx="9"/><text class="tw mono" x="104" y="182.5" font-size="8.5" font-weight="700" text-anchor="middle">&lt;opencalc-sheet&gt;</text></g>
+  <g class="pop" style="--d:2"><rect class="bs" x="204" y="52" width="92" height="22" rx="5"/><text class="tb mono" x="212" y="66.5" font-size="8.5" font-weight="650">.theme({…})</text></g>
+  <g class="pop" style="--d:3"><rect class="bls" x="204" y="84" width="92" height="22" rx="5"/><text class="tbl mono" x="212" y="98.5" font-size="8.5" font-weight="650">.configure({…})</text></g>
+  <g class="pop" style="--d:4"><rect class="vis" x="204" y="116" width="92" height="22" rx="5"/><text class="tv mono" x="212" y="130.5" font-size="8.5" font-weight="650">.open(bytes)</text></g>
+  <path class="flow" d="M202 63h-10M202 95h-10M202 127h-10"/>
+</svg></div>
+        </div>
+      </header>
     <div class="wrap doc">
-      <aside class="toc">
-        <h4>Start</h4>
+      <nav class="toc" aria-label="On this page">
+        <p class="toc-h">Start</p>
         <a href="#install">Installation</a>
         <a href="#steps">Integrate in five steps</a>
         <a href="#quick">A complete page</a>
         <a href="#assets">Serving the engine</a>
-        <h4>Configure</h4>
+        <p class="toc-h">Configure</p>
         <a href="#config">Options</a>
         <a href="#theming">Theming</a>
         <a href="#chrome">Chrome and commands</a>
         <a href="#access">Read-only and preview</a>
         <a href="#i18n">Localization</a>
-        <h4>Use</h4>
+        <p class="toc-h">Use</p>
         <a href="#api">API</a>
         <a href="#events">Events</a>
-        <h4>Frameworks</h4>
+        <p class="toc-h">Frameworks</p>
         <a href="#react">React</a>
         <a href="#next">Next.js</a>
         <a href="#vue">Vue and Svelte</a>
-        <h4>Operate</h4>
+        <p class="toc-h">Operate</p>
         <a href="#csp">CSP and headers</a>
         <a href="#versioning">Versions and upgrades</a>
         <a href="#troubleshoot">Troubleshooting</a>
-        <h4>Notes</h4>
+        <p class="toc-h">Notes</p>
         <a href="#limits">Limits and caveats</a>
-      </aside>
+      </nav>
 
-      <main class="body">
-        <p class="eyebrow">SDK</p>
+      <article class="body">
         <h2 id="run-first">Run it before you read this</h2>
         <p>
           The fastest way to understand what you are integrating is to watch it work.
@@ -609,7 +616,52 @@ sheet.<span class="f">on</span>(<span class="s">"beforeCellsChanged"</span>, (e)
           Runnable examples are in
           <a href="https://github.com/CasualOffice/opencalc/tree/main/sdk/examples">sdk/examples</a>.
         </p>
-      </main>
+      </article>
     </div>
+    </main>
+
+    <footer class="site-footer">
+      <div class="wrap">
+        <div class="foot-grid">
+          <div>
+            <a class="brand" href="./index.html"><svg class="mark" viewBox="0 0 32 32" aria-hidden="true" focusable="false"><rect class="m-bg" width="32" height="32" rx="7"/><rect class="m-ln" x="7.5" y="7.5" width="17" height="17" rx="2"/><path class="m-ln" d="M7.5 13.5h17M13.5 7.5v17"/></svg>OpenCalc</a>
+            <p class="foot-tag">An open-source, Excel-compatible spreadsheet — and the engine behind it, for anyone to embed.</p>
+          </div>
+          <nav class="foot-col" aria-labelledby="f-product">
+            <h2 id="f-product">Product</h2>
+            <ul>
+              <li><a href="./editor.html">Open the editor</a></li>
+              <li><a href="./download.html">Download for desktop</a></li>
+              <li><a href="./index.html#today">What works today</a></li>
+              <li><a href="./index.html#roadmap">Roadmap</a></li>
+            </ul>
+          </nav>
+          <nav class="foot-col" aria-labelledby="f-dev">
+            <h2 id="f-dev">Developers</h2>
+            <ul>
+              <li><a href="./docs.html">SDK integration guide</a></li>
+              <li><a href="./docs.html#quick">Quick start</a></li>
+              <li><a href="./embed.html">Live embed demo</a></li>
+              <li><a href="./deploy.html">Self-hosting guide</a></li>
+              <li><a href="https://github.com/CasualOffice/opencalc/tree/main/server/casual-calc-mcp">MCP server</a></li>
+            </ul>
+          </nav>
+          <nav class="foot-col" aria-labelledby="f-project">
+            <h2 id="f-project">Project</h2>
+            <ul>
+              <li><a href="https://github.com/CasualOffice/opencalc">GitHub</a></li>
+              <li><a href="https://github.com/CasualOffice/opencalc/blob/main/docs/02-ARCHITECTURE.md">Architecture</a></li>
+              <li><a href="https://github.com/CasualOffice/opencalc/blob/main/docs/52-FIDELITY-TRACKER.md">Fidelity ledger</a></li>
+              <li><a href="https://github.com/CasualOffice/opencalc/blob/main/docs/14-EXECUTION-TRACKER.md">Execution tracker</a></li>
+              <li><a href="https://github.com/CasualOffice/opencalc/blob/main/LICENSE">License</a></li>
+            </ul>
+          </nav>
+        </div>
+        <div class="foot-bottom">
+          <span>© 2026 CasualOffice · Apache-2.0 · Alpha — the API is not yet stable.</span>
+          <span>Not affiliated with Microsoft. Excel is a trademark of Microsoft Corporation.</span>
+        </div>
+      </div>
+    </footer>
   </body>
 </html>

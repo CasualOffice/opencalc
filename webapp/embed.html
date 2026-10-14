@@ -4,26 +4,22 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>OpenCalc SDK — embed demo</title>
-    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%232f6df6'/%3E%3Cg fill='none' stroke='%23fff' stroke-width='2.4'%3E%3Crect x='7' y='7' width='18' height='18' rx='2'/%3E%3Cpath d='M7 13h18M13 7v18'/%3E%3C/g%3E%3C/svg%3E" />
+    <meta name="theme-color" content="#0e7a55" />
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230e7a55'/%3E%3Cg fill='none' stroke='%23fff' stroke-width='2.4'%3E%3Crect x='7' y='7' width='18' height='18' rx='2'/%3E%3Cpath d='M7 13h18M13 7v18'/%3E%3C/g%3E%3C/svg%3E" />
+    <link rel="preload" href="./fonts/inter-latin-400-700.woff2" as="font" type="font/woff2" crossorigin />
+    <link rel="stylesheet" href="./style.css?v=7" />
+    <script type="module" src="./site.js"></script>
     <style>
-      :root {
-        --ink: #0b0d12; --dim: #5b6270; --line: #e4e7ec; --paper: #fff;
-        --wash: #f7f8fa; --brand: #0e7a55; --code-bg: #0f1216; --code-fg: #d7dee9;
-      }
-      * { box-sizing: border-box; }
-      body {
-        margin: 0; background: var(--wash); color: var(--ink);
-        font: 400 15px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-        -webkit-font-smoothing: antialiased;
-      }
-      a { color: var(--brand); }
-      .wrap { max-width: 1320px; margin: 0 auto; padding: 28px 24px 56px; }
+      /* The demo's own layout. Colours are the site's tokens (style.css), so
+         the panel follows light and dark with the rest of the site. */
+      .demo { --ink: var(--fg); --dim: var(--muted); --line: var(--border); --paper: var(--panel);
+              max-width: var(--wrap); padding-top: 1.75rem; padding-bottom: 3.5rem; font-size: .9375rem; }
 
       header.top { display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap; }
-      header.top h1 { font-size: 22px; font-weight: 650; margin: 0; letter-spacing: -.01em; }
+      header.top h1 { font-size: clamp(1.5rem, 1.2rem + 1vw, 2rem); font-weight: 700; margin: 0; letter-spacing: -.025em; }
       header.top .tag {
         font-size: 12px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase;
-        color: var(--brand); background: #eaf1ff; border-radius: 999px; padding: 3px 10px;
+        color: var(--brand); background: var(--brand-soft); border-radius: 999px; padding: 3px 10px;
       }
       header.top p { margin: 0; color: var(--dim); font-size: 14px; flex: 1 1 320px; }
 
@@ -36,10 +32,10 @@
       }
       .stage-bar {
         display: flex; align-items: center; gap: 8px; padding: 9px 14px;
-        border-bottom: 1px solid var(--line); background: #fcfcfd;
+        border-bottom: 1px solid var(--line); background: var(--surface);
       }
       .dot3 { display: flex; gap: 6px; }
-      .dot3 i { width: 10px; height: 10px; border-radius: 50%; background: #e2e5ea; }
+      .dot3 i { width: 10px; height: 10px; border-radius: 50%; background: var(--border-2); }
       .stage-bar code { font-size: 12px; color: var(--dim); font-family: ui-monospace, Menlo, Consolas, monospace; }
       opencalc-sheet { display: block; height: 640px; }
 
@@ -55,8 +51,8 @@
         font: 500 13px/1 inherit; padding: 8px 12px; border-radius: 8px; cursor: pointer;
         border: 1px solid var(--line); background: var(--paper); color: var(--ink);
       }
-      button.chip:hover { border-color: #c8cdd6; }
-      button.chip[aria-pressed="true"] { background: var(--brand); border-color: var(--brand); color: #fff; }
+      button.chip:hover { border-color: var(--border-strong); }
+      button.chip[aria-pressed="true"] { background: var(--brand); border-color: var(--brand); color: var(--brand-ink); }
       button.chip .sw {
         display: inline-block; width: 10px; height: 10px; border-radius: 3px;
         margin-right: 7px; vertical-align: -1px; border: 1px solid rgba(0,0,0,.12);
@@ -64,7 +60,7 @@
       label.check { display: flex; align-items: center; gap: 8px; font-size: 13.5px; padding: 3px 0; }
 
       pre.code {
-        margin: 0; background: var(--code-bg); color: var(--code-fg); border-radius: 12px;
+        margin: 0; background: var(--term-bg); color: var(--term-fg); border-radius: 12px; border: 0;
         padding: 14px 16px; overflow: auto; font: 400 12.5px/1.6 ui-monospace, Menlo, Consolas, monospace;
         max-height: 320px;
       }
@@ -73,11 +69,11 @@
 
       .note { font-size: 13px; color: var(--dim); margin: 10px 0 0; }
       .note b { color: var(--ink); font-weight: 600; }
-      footer.foot { margin-top: 26px; font-size: 13px; color: var(--dim); }
+      .demo-foot { margin-top: 26px; font-size: 13px; color: var(--dim); }
 
       /* Injected on demand by the isolation demo — deliberately awful. */
       body.hostile { font-family: "Comic Sans MS", cursive; }
-      body.hostile .wrap { direction: rtl; }
+      body.hostile .demo { direction: rtl; }
       body.hostile :root, body.hostile { --bg: hotpink; --fg: lime; --accent: orange; }
       body.hostile button, body.hostile input, body.hostile select {
         background: yellow !important; border: 3px solid magenta !important; text-transform: uppercase;
@@ -87,7 +83,41 @@
     </style>
   </head>
   <body>
-    <div class="wrap">
+    <a class="skip" href="#main">Skip to content</a>
+
+    <header class="site-header">
+      <div class="wrap">
+        <a class="brand" href="./index.html" aria-label="OpenCalc home">
+          <svg class="mark" viewBox="0 0 32 32" aria-hidden="true" focusable="false"><rect class="m-bg" width="32" height="32" rx="7"/><rect class="m-ln" x="7.5" y="7.5" width="17" height="17" rx="2"/><path class="m-ln" d="M7.5 13.5h17M13.5 7.5v17"/></svg>
+          OpenCalc
+        </a>
+        <nav class="nav-links">
+          <a href="./index.html#product">Features</a>
+          <a href="./docs.html">Docs</a>
+          <a href="./embed.html" aria-current="page">Embed demo</a>
+          <a href="./deploy.html">Self-host</a>
+          <a href="./download.html">Download</a>
+          <a href="https://github.com/CasualOffice/opencalc">GitHub</a>
+        </nav>
+        <div class="header-actions">
+          <a class="btn btn-primary btn-sm" href="./editor.html"><span class="btn-cta-label">Open the editor</span><span class="sr-only"> (OpenCalc in your browser)</span><svg viewBox="0 0 20 20" aria-hidden="true" focusable="false"><path fill="currentColor" d="M11.3 4.3a1 1 0 0 1 1.4 0l5 5a1 1 0 0 1 0 1.4l-5 5a1 1 0 0 1-1.4-1.4L14.6 11H3a1 1 0 1 1 0-2h11.6l-3.3-3.3a1 1 0 0 1 0-1.4Z"/></svg></a>
+          <details class="menu">
+            <summary aria-label="Menu"><svg viewBox="0 0 20 20" aria-hidden="true" focusable="false"><path fill="currentColor" d="M3 5.5a.75.75 0 0 1 .75-.75h12.5a.75.75 0 0 1 0 1.5H3.75A.75.75 0 0 1 3 5.5Zm0 4.5a.75.75 0 0 1 .75-.75h12.5a.75.75 0 0 1 0 1.5H3.75A.75.75 0 0 1 3 10Zm.75 3.75a.75.75 0 0 0 0 1.5h12.5a.75.75 0 0 0 0-1.5H3.75Z"/></svg></summary>
+            <nav class="menu-panel" aria-label="Main (mobile)">
+              <a href="./index.html#product">Features</a>
+              <a href="./docs.html">Docs</a>
+              <a href="./embed.html" aria-current="page">Embed demo</a>
+              <a href="./deploy.html">Self-host</a>
+              <a href="./download.html">Download</a>
+              <a href="https://github.com/CasualOffice/opencalc">GitHub</a>
+              <a href="./editor.html">Open the editor</a>
+            </nav>
+          </details>
+        </div>
+      </div>
+    </header>
+
+    <main id="main" class="wrap demo">
       <header class="top">
         <h1>OpenCalc SDK</h1>
         <span class="tag">Embed demo</span>
@@ -106,7 +136,7 @@
           <opencalc-sheet id="sheet"></opencalc-sheet>
         </div>
 
-        <aside>
+        <aside aria-label="Embed controls">
           <div class="card">
             <h2>Theme</h2>
             <div class="row" id="themes"></div>
@@ -162,12 +192,56 @@
         </aside>
       </div>
 
-      <footer class="foot">
+      <p class="demo-foot">
         Full integration guide: <a href="./docs.html">SDK documentation</a> ·
         <a href="./editor.html">standalone editor</a> ·
         <a href="./index.html">about OpenCalc</a>
-      </footer>
-    </div>
+      </p>
+    </main>
+
+    <footer class="site-footer">
+      <div class="wrap">
+        <div class="foot-grid">
+          <div>
+            <a class="brand" href="./index.html"><svg class="mark" viewBox="0 0 32 32" aria-hidden="true" focusable="false"><rect class="m-bg" width="32" height="32" rx="7"/><rect class="m-ln" x="7.5" y="7.5" width="17" height="17" rx="2"/><path class="m-ln" d="M7.5 13.5h17M13.5 7.5v17"/></svg>OpenCalc</a>
+            <p class="foot-tag">An open-source, Excel-compatible spreadsheet — and the engine behind it, for anyone to embed.</p>
+          </div>
+          <nav class="foot-col" aria-labelledby="f-product">
+            <h2 id="f-product">Product</h2>
+            <ul>
+              <li><a href="./editor.html">Open the editor</a></li>
+              <li><a href="./download.html">Download for desktop</a></li>
+              <li><a href="./index.html#today">What works today</a></li>
+              <li><a href="./index.html#roadmap">Roadmap</a></li>
+            </ul>
+          </nav>
+          <nav class="foot-col" aria-labelledby="f-dev">
+            <h2 id="f-dev">Developers</h2>
+            <ul>
+              <li><a href="./docs.html">SDK integration guide</a></li>
+              <li><a href="./docs.html#quick">Quick start</a></li>
+              <li><a href="./embed.html">Live embed demo</a></li>
+              <li><a href="./deploy.html">Self-hosting guide</a></li>
+              <li><a href="https://github.com/CasualOffice/opencalc/tree/main/server/casual-calc-mcp">MCP server</a></li>
+            </ul>
+          </nav>
+          <nav class="foot-col" aria-labelledby="f-project">
+            <h2 id="f-project">Project</h2>
+            <ul>
+              <li><a href="https://github.com/CasualOffice/opencalc">GitHub</a></li>
+              <li><a href="https://github.com/CasualOffice/opencalc/blob/main/docs/02-ARCHITECTURE.md">Architecture</a></li>
+              <li><a href="https://github.com/CasualOffice/opencalc/blob/main/docs/52-FIDELITY-TRACKER.md">Fidelity ledger</a></li>
+              <li><a href="https://github.com/CasualOffice/opencalc/blob/main/docs/14-EXECUTION-TRACKER.md">Execution tracker</a></li>
+              <li><a href="https://github.com/CasualOffice/opencalc/blob/main/LICENSE">License</a></li>
+            </ul>
+          </nav>
+        </div>
+        <div class="foot-bottom">
+          <span>© 2026 CasualOffice · Apache-2.0 · Alpha — the API is not yet stable.</span>
+          <span>Not affiliated with Microsoft. Excel is a trademark of Microsoft Corporation.</span>
+        </div>
+      </div>
+    </footer>
 
     <script type="module">
       import "./embed.js";

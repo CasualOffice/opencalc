@@ -5,96 +5,105 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>OpenCalc — self-hosting and deployment</title>
     <meta name="description" content="Run OpenCalc on your own servers: Docker Compose, the host contract, every environment variable, reverse proxies, TLS, WOPI, monitoring and the failures worth knowing about first." />
-    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%232f6df6'/%3E%3Cg fill='none' stroke='%23fff' stroke-width='2.4'%3E%3Crect x='7' y='7' width='18' height='18' rx='2'/%3E%3Cpath d='M7 13h18M13 7v18'/%3E%3C/g%3E%3C/svg%3E" />
-    <link rel="stylesheet" href="./style.css?v=6" />
-    <style>
-      .doc { display: grid; grid-template-columns: 232px minmax(0, 1fr); gap: 48px; align-items: start; padding: 40px 0 80px; }
-      @media (max-width: 940px) { .doc { grid-template-columns: 1fr; gap: 20px; } .toc { position: static !important; } }
-      .toc { position: sticky; top: 84px; font-size: 14px; }
-      .toc h4 { font-size: 11px; letter-spacing: .1em; text-transform: uppercase; color: var(--faint); margin: 20px 0 8px; }
-      .toc h4:first-child { margin-top: 0; }
-      .toc a { display: block; padding: 4px 0; color: var(--muted); text-decoration: none; }
-      .toc a:hover { color: var(--fg); }
-      .body h2 { font-size: 26px; letter-spacing: -.01em; margin: 44px 0 10px; scroll-margin-top: 84px; }
-      .body h2:first-child { margin-top: 0; }
-      .body h3 { font-size: 17px; margin: 28px 0 8px; scroll-margin-top: 84px; }
-      .body p, .body li { color: var(--muted); line-height: 1.7; }
-      .body li { margin: 4px 0; }
-      .body b, .body strong { color: var(--fg); }
-      .body table { width: 100%; border-collapse: collapse; margin: 16px 0; font-size: 14.5px; }
-      .body th { text-align: left; font-size: 11px; letter-spacing: .08em; text-transform: uppercase; color: var(--faint); border-bottom: 1px solid var(--border); padding: 8px 10px 8px 0; }
-      .body td { border-bottom: 1px solid var(--line); padding: 10px 10px 10px 0; color: var(--muted); vertical-align: top; }
-      .body td code, .body p code, .body li code { font-size: 13px; background: var(--code-bg); border-radius: 5px; padding: 1px 5px; color: var(--code-fg); }
-      pre { background: #0f1216; color: #d7dee9; border-radius: 12px; padding: 16px 18px; overflow: auto; font: 400 13px/1.65 ui-monospace, Menlo, Consolas, monospace; margin: 14px 0; }
-      pre .c { color: #6b7686; } pre .s { color: #c3e88d; } pre .k { color: #c792ea; } pre .f { color: #82aaff; } pre .n { color: #f78c6c; }
-      .callout { border-left: 3px solid var(--accent, #0e7a55); background: var(--note-bg); border-radius: 0 10px 10px 0; padding: 14px 16px; margin: 18px 0; }
-      .callout.warn { border-left-color: #d97706; background: var(--note-warn-bg); }
-      .callout p { color: var(--muted); }
-      .lede { font-size: 18px; line-height: 1.6; color: var(--muted); }
-      .numlist { list-style: none; counter-reset: n; padding: 0; margin: 22px 0 0; }
-      .numlist > li { position: relative; counter-increment: n; padding: 0 0 22px 44px; margin: 0; border-left: 1px solid var(--border); }
-      .numlist > li:last-child { border-left-color: transparent; padding-bottom: 0; }
-      .numlist > li::before {
-        content: counter(n); position: absolute; left: -13px; top: 0;
-        display: inline-flex; align-items: center; justify-content: center;
-        width: 26px; height: 26px; border-radius: 8px; background: var(--accent); color: #fff;
-        font-family: var(--mono); font-size: 13px; font-weight: 600;
-      }
-      .numlist h3 { margin: 1px 0 6px; font-size: 16.5px; color: var(--fg); }
-      .numlist pre { margin: 10px 0 0; }
-    </style>
+    <meta name="theme-color" content="#0e7a55" />
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230e7a55'/%3E%3Cg fill='none' stroke='%23fff' stroke-width='2.4'%3E%3Crect x='7' y='7' width='18' height='18' rx='2'/%3E%3Cpath d='M7 13h18M13 7v18'/%3E%3C/g%3E%3C/svg%3E" />
+    <link rel="preload" href="./fonts/inter-latin-400-700.woff2" as="font" type="font/woff2" crossorigin />
+    <link rel="stylesheet" href="./style.css?v=7" />
+    <script type="module" src="./site.js"></script>
   </head>
   <body>
-    <header class="nav">
-      <div class="wrap nav-inner">
+    <a class="skip" href="#main">Skip to content</a>
+
+    <header class="site-header">
+      <div class="wrap">
         <a class="brand" href="./index.html" aria-label="OpenCalc home">
-          <span class="logo" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18M9 3v18"/></svg></span>
+          <svg class="mark" viewBox="0 0 32 32" aria-hidden="true" focusable="false"><rect class="m-bg" width="32" height="32" rx="7"/><rect class="m-ln" x="7.5" y="7.5" width="17" height="17" rx="2"/><path class="m-ln" d="M7.5 13.5h17M13.5 7.5v17"/></svg>
           OpenCalc
         </a>
         <nav class="nav-links">
-          <a href="./index.html#product">Product</a>
-          <a href="./index.html#today">What works</a>
-          <a href="./index.html#embed">Embed</a>
-          <a href="./docs.html">SDK docs</a>
-          <a href="./deploy.html">Self-host</a>
-          <a href="./embed.html">Live demo</a>
+          <a href="./index.html#product">Features</a>
+          <a href="./docs.html">Docs</a>
+          <a href="./embed.html">Embed demo</a>
+          <a href="./deploy.html" aria-current="page">Self-host</a>
+          <a href="./download.html">Download</a>
           <a href="https://github.com/CasualOffice/opencalc">GitHub</a>
-          <a class="btn btn-ink btn-sm" href="./editor.html">Open the editor</a>
         </nav>
+        <div class="header-actions">
+          <a class="btn btn-primary btn-sm" href="./editor.html"><span class="btn-cta-label">Open the editor</span><span class="sr-only"> (OpenCalc in your browser)</span><svg viewBox="0 0 20 20" aria-hidden="true" focusable="false"><path fill="currentColor" d="M11.3 4.3a1 1 0 0 1 1.4 0l5 5a1 1 0 0 1 0 1.4l-5 5a1 1 0 0 1-1.4-1.4L14.6 11H3a1 1 0 1 1 0-2h11.6l-3.3-3.3a1 1 0 0 1 0-1.4Z"/></svg></a>
+          <details class="menu">
+            <summary aria-label="Menu"><svg viewBox="0 0 20 20" aria-hidden="true" focusable="false"><path fill="currentColor" d="M3 5.5a.75.75 0 0 1 .75-.75h12.5a.75.75 0 0 1 0 1.5H3.75A.75.75 0 0 1 3 5.5Zm0 4.5a.75.75 0 0 1 .75-.75h12.5a.75.75 0 0 1 0 1.5H3.75A.75.75 0 0 1 3 10Zm.75 3.75a.75.75 0 0 0 0 1.5h12.5a.75.75 0 0 0 0-1.5H3.75Z"/></svg></summary>
+            <nav class="menu-panel" aria-label="Main (mobile)">
+              <a href="./index.html#product">Features</a>
+              <a href="./docs.html">Docs</a>
+              <a href="./embed.html">Embed demo</a>
+              <a href="./deploy.html" aria-current="page">Self-host</a>
+              <a href="./download.html">Download</a>
+              <a href="https://github.com/CasualOffice/opencalc">GitHub</a>
+              <a href="./editor.html">Open the editor</a>
+            </nav>
+          </details>
+        </div>
       </div>
     </header>
 
+    <main id="main">
+      <header class="page-head">
+        <div class="wrap">
+          <div class="head-copy">
+            <p class="eyebrow">Self-hosting</p>
+            <h1>Run OpenCalc on your own servers.</h1>
+            <p class="lede">Docker Compose, the host contract, every setting, reverse proxies, TLS, WOPI and monitoring — and the failures worth knowing about first.</p>
+            <div class="cta-row"><a class="btn btn-primary" href="#two-minutes">Start in two minutes</a><a class="btn btn-secondary" href="#contract">The host contract</a></div>
+          </div>
+          <div class="head-art il-wrap"><svg class="il" viewBox="0 0 320 200" role="img" aria-label="Two people's browsers connected to a collaboration server, which is connected to your document host — all on your own network." focusable="false">
+  <g class="pop" style="--d:0"><rect class="sh" x="18" y="26" width="84" height="58" rx="7"/><rect class="pp" x="14" y="22" width="84" height="58" rx="7"/><path class="k" d="M14 34h84" opacity=".25"/><path class="gr" d="M38 34v46M62 34v46M14 50h84M14 66h84" style="stroke: var(--il-line)"/><rect class="vk" x="38" y="50" width="24" height="16"/><path class="ptr" d="M58 60l9 4.5-3.8 1-1.9 3.8Z"/></g>
+  <g class="pop" style="--d:1"><rect class="sh" x="18" y="122" width="84" height="58" rx="7"/><rect class="pp" x="14" y="118" width="84" height="58" rx="7"/><path class="k" d="M14 130h84" opacity=".25"/><path class="gr" d="M38 130v46M62 130v46M14 146h84M14 162h84" style="stroke: var(--il-line)"/><rect class="ak" x="62" y="146" width="36" height="16"/><path class="ptr2" d="M90 156l9 4.5-3.8 1-1.9 3.8Z"/></g>
+  <path class="flow" d="M100 52c26 0 26 34 46 40"/>
+  <path class="flow" d="M100 148c26 0 26-34 46-40"/>
+  <g class="pop" style="--d:2"><rect class="sh" x="152" y="62" width="64" height="80" rx="7"/><rect class="pp" x="148" y="58" width="64" height="80" rx="7"/>
+    <rect class="ps" x="156" y="66" width="48" height="18" rx="3"/><circle class="br" cx="164" cy="75" r="2.5"/><rect class="ln" x="172" y="73" width="26" height="4" rx="2"/>
+    <rect class="ps" x="156" y="89" width="48" height="18" rx="3"/><circle class="br" cx="164" cy="98" r="2.5"/><rect class="ln" x="172" y="96" width="22" height="4" rx="2"/>
+    <rect class="ps" x="156" y="112" width="48" height="18" rx="3"/><circle class="br" cx="164" cy="121" r="2.5"/><rect class="ln" x="172" y="119" width="28" height="4" rx="2"/>
+    <text class="tm mono" x="180" y="154" font-size="8.5" text-anchor="middle">collab</text></g>
+  <path class="flow" d="M214 98h34"/>
+  <g class="pop" style="--d:3"><rect class="sh" x="254" y="74" width="56" height="52" rx="7"/><rect class="bs" x="250" y="70" width="56" height="52" rx="7"/><rect class="bk" x="250" y="70" width="56" height="52" rx="7"/>
+    <path class="bk" d="M268 82h14l6 6v20h-20Z" stroke-width="1.5"/><path class="bk" d="M272 96h12M272 101h9" stroke-width="1.2"/>
+    <text class="tm mono" x="278" y="138" font-size="8.5" text-anchor="middle">host</text></g>
+  <rect fill="none" stroke="var(--il-line)" stroke-dasharray="4 4" x="140" y="40" width="176" height="114" rx="12"/>
+  <text class="tm" x="228" y="34" font-size="8" text-anchor="middle">your network</text>
+</svg></div>
+        </div>
+      </header>
     <div class="wrap doc">
-      <aside class="toc">
-        <h4>Start</h4>
+      <nav class="toc" aria-label="On this page">
+        <p class="toc-h">Start</p>
         <a href="#two-minutes">Two minutes</a>
         <a href="#shape">What the pieces are</a>
         <a href="#stacks">Standalone or cluster</a>
-        <h4>Integrate</h4>
+        <p class="toc-h">Integrate</p>
         <a href="#contract">The host contract</a>
         <a href="#addresses">The two addresses</a>
         <a href="#tokens">Tokens and identity</a>
-        <h4>Configure</h4>
+        <p class="toc-h">Configure</p>
         <a href="#env-host">Host variables</a>
         <a href="#env-collab">Collaboration variables</a>
         <a href="#env-wopi">WOPI variables</a>
         <a href="#admin">The admin page</a>
         <a href="#fonts">Fonts</a>
-        <h4>Operate</h4>
+        <p class="toc-h">Operate</p>
         <a href="#proxy">Behind a reverse proxy</a>
         <a href="#tls">TLS</a>
         <a href="#health">Health and metrics</a>
         <a href="#backup">Storage and backup</a>
         <a href="#sizing">Sizing and performance</a>
-        <h4>Integrations</h4>
+        <p class="toc-h">Integrations</p>
         <a href="#wopi">Nextcloud, SharePoint, Moodle</a>
-        <h4>Notes</h4>
+        <p class="toc-h">Notes</p>
         <a href="#failures">Failures worth knowing first</a>
         <a href="#limits">What is not done yet</a>
-      </aside>
+      </nav>
 
-      <main class="body">
-        <p class="eyebrow">Self-hosting</p>
+      <article class="body">
         <h2 id="two-minutes">Two minutes</h2>
         <p class="lede">
           OpenCalc runs on your own servers. Nothing phones home, there is no licence
@@ -664,7 +673,52 @@ https://your-host/hosting/discovery</pre>
           and every variable's authoritative default is the <code>main.rs</code> of the
           binary that reads it — the only copy that cannot go stale.
         </p>
-      </main>
+      </article>
     </div>
+    </main>
+
+    <footer class="site-footer">
+      <div class="wrap">
+        <div class="foot-grid">
+          <div>
+            <a class="brand" href="./index.html"><svg class="mark" viewBox="0 0 32 32" aria-hidden="true" focusable="false"><rect class="m-bg" width="32" height="32" rx="7"/><rect class="m-ln" x="7.5" y="7.5" width="17" height="17" rx="2"/><path class="m-ln" d="M7.5 13.5h17M13.5 7.5v17"/></svg>OpenCalc</a>
+            <p class="foot-tag">An open-source, Excel-compatible spreadsheet — and the engine behind it, for anyone to embed.</p>
+          </div>
+          <nav class="foot-col" aria-labelledby="f-product">
+            <h2 id="f-product">Product</h2>
+            <ul>
+              <li><a href="./editor.html">Open the editor</a></li>
+              <li><a href="./download.html">Download for desktop</a></li>
+              <li><a href="./index.html#today">What works today</a></li>
+              <li><a href="./index.html#roadmap">Roadmap</a></li>
+            </ul>
+          </nav>
+          <nav class="foot-col" aria-labelledby="f-dev">
+            <h2 id="f-dev">Developers</h2>
+            <ul>
+              <li><a href="./docs.html">SDK integration guide</a></li>
+              <li><a href="./docs.html#quick">Quick start</a></li>
+              <li><a href="./embed.html">Live embed demo</a></li>
+              <li><a href="./deploy.html">Self-hosting guide</a></li>
+              <li><a href="https://github.com/CasualOffice/opencalc/tree/main/server/casual-calc-mcp">MCP server</a></li>
+            </ul>
+          </nav>
+          <nav class="foot-col" aria-labelledby="f-project">
+            <h2 id="f-project">Project</h2>
+            <ul>
+              <li><a href="https://github.com/CasualOffice/opencalc">GitHub</a></li>
+              <li><a href="https://github.com/CasualOffice/opencalc/blob/main/docs/02-ARCHITECTURE.md">Architecture</a></li>
+              <li><a href="https://github.com/CasualOffice/opencalc/blob/main/docs/52-FIDELITY-TRACKER.md">Fidelity ledger</a></li>
+              <li><a href="https://github.com/CasualOffice/opencalc/blob/main/docs/14-EXECUTION-TRACKER.md">Execution tracker</a></li>
+              <li><a href="https://github.com/CasualOffice/opencalc/blob/main/LICENSE">License</a></li>
+            </ul>
+          </nav>
+        </div>
+        <div class="foot-bottom">
+          <span>© 2026 CasualOffice · Apache-2.0 · Alpha — the API is not yet stable.</span>
+          <span>Not affiliated with Microsoft. Excel is a trademark of Microsoft Corporation.</span>
+        </div>
+      </div>
+    </footer>
   </body>
 </html>
