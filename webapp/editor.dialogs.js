@@ -2441,11 +2441,8 @@ export function sheetMenu(i, x, y) {
   menu.appendChild(document.createElement("div")).className = "menu-sep";
   let prot = [];
   try { prot = JSON.parse(wasm.session_sheet_protected()); } catch {}
-  item(prot[i] ? "Unprotect sheet" : "Protect sheet", false, () => {
-    try { wasm.session_set_sheet_protected(i, !prot[i]); renderTabs(); draw(); }
-    catch (e) { statusError(errText(e)); }
-    status.textContent = prot[i] ? "sheet unprotected" : "sheet protected";
-  });
+  // Excel's Protect Sheet / Unprotect Sheet dialogs (XL-UX-023), not a toggle.
+  item(prot[i] ? "Unprotect sheet…" : "Protect sheet…", false, () => protectSheetCommand(i));
   item("Hide sheet", false, () => {
     try { wasm.session_set_sheet_visibility(i, "hidden"); renderTabs(); draw(); }
     catch (e) { status.textContent = `${e}`.replace(/^Error:\s*/, ""); }
@@ -2745,7 +2742,7 @@ export function cellMenu(x, y, fromKeyboard = false) {
       draw();
     });
   })();
-  item("Define name…", false, () => openNameManager());
+  item("Define name…", false, () => nameDialog());
   item("Filter", false, () => toggleFilter());
   positionMenu(menu, x, y);
   menuKeyboard(menu, fromKeyboard);
@@ -3608,7 +3605,7 @@ export function goToSpecialDialog() {
 /// and a `close()` that tears the wiring down. One place for the plumbing every
 /// dialog here used to repeat, so a dialog cannot forget a listener and leave
 /// it catching keys after it has gone.
-function modalFrame(title, { onEnter, onCancel, onKey } = {}) {
+export function modalFrame(title, { onEnter, onCancel, onKey } = {}) {
   const modal = byId("oc-modal");
   const body = byId("oc-modal-body");
   byId("oc-modal-title").textContent = title;
@@ -3718,10 +3715,6 @@ export function openNameManager() {
   edit.id = "oc-nm-edit";
   const del = el("button", "oc-btn", "Delete");
   del.id = "oc-nm-delete";
-  // New and Edit open the New Name / Edit Name dialog, which arrives with
-  // XL-UX-022; until then they are shown in place but not offered.
-  neu.disabled = true;
-  edit.disabled = true;
   const filterLabel = el("label", "oc-form-label oc-nm-filter-label", "Filter");
   const filter = document.createElement("select");
   filter.id = "oc-nm-filter";
@@ -3783,6 +3776,7 @@ export function openNameManager() {
   };
   const syncButtons = () => {
     del.disabled = !selected();
+    edit.disabled = !selected();
   };
   const render = () => {
     all = nameRows();
@@ -3868,6 +3862,14 @@ export function openNameManager() {
       canvas.focus();
     });
   });
+  neu.addEventListener("click", () => { frame.close(); nameDialog(null, true); });
+  edit.addEventListener("click", () => {
+    const n = selected();
+    if (!n) return;
+    frame.close();
+    nameDialog(n, true);
+  });
+  rowsEl.addEventListener("dblclick", () => edit.click());
   del.addEventListener("click", () => {
     const n = selected();
     if (!n) return;
@@ -3884,4 +3886,322 @@ export function openNameManager() {
 
   render();
   (rowsEl.querySelector(".oc-nm-row.on") ?? rowsEl.querySelector(".oc-nm-row") ?? closeBtn).focus();
+}
+
+// ---- New Name / Edit Name (Formulas ▸ Define Name, fit-gap XL-UX-022) ---------
+
+/// The selection as Excel writes it into New Name's Refers to: absolute,
+/// sheet-qualified, every area of a multi-area selection — `=Sheet1!$B$2:$C$4`.
+function selectionRefersTo() {
+  let sheetName = "";
+  try { sheetName = JSON.parse(wasm.session_sheet_names())[state.sheet] ?? ""; } catch {}
+  const q = quoteSheet(sheetName);
+  return "=" + allRanges().map((r) => `${q}!${absRef(r)}`).join(",");
+}
+
+/// Excel's New Name dialog, or Edit Name when `editing` is a row of the Name
+/// Manager. Name, Scope, Comment, Refers to; OK refuses an invalid or
+/// duplicate name in Excel's words and stays open. `fromManager` returns to
+/// the Name Manager afterwards — on OK and on Cancel, as Excel does.
+export function nameDialog(editing = null, fromManager = false) {
+  const after = (picked) => {
+    if (fromManager) {
+      if (picked) nmState.selected = picked;
+      openNameManager();
+    } else canvas.focus();
+  };
+  const frame = modalFrame(editing ? "Edit Name" : "New Name", {
+    onEnter: () => (document.activeElement === comment ? null : apply()),
+    onCancel: () => { frame.close(); after(null); },
+    onKey: (e) => {
+      // Enter in the Comment box is a new line there, as in Excel.
+      if (e.key === "Enter" && document.activeElement === comment && !e.ctrlKey && !e.metaKey) {
+        e.stopPropagation();
+        return true;
+      }
+      return false;
+    },
+  });
+  const { body } = frame;
+
+  const form = el("div", "oc-name-form");
+  const label = (text, id) => {
+    const l = el("label", "oc-form-label", text);
+    l.htmlFor = id;
+    return l;
+  };
+  const name = document.createElement("input");
+  name.type = "text";
+  name.id = "oc-name-name";
+  name.className = "oc-form-field";
+  name.spellcheck = false;
+  name.autocomplete = "off";
+  name.maxLength = 255;
+  const err = el("div", "oc-form-error");
+  err.id = "oc-name-error";
+  err.setAttribute("role", "alert");
+  err.hidden = true;
+  const nameCell = el("div", "oc-form-cell");
+  nameCell.append(name, err);
+
+  const scope = document.createElement("select");
+  scope.id = "oc-name-scope";
+  let sheets = [];
+  try { sheets = JSON.parse(wasm.session_sheet_names()); } catch {}
+  for (const [value, text] of [[-1, "Workbook"], ...sheets.map((s, i) => [i, s])]) {
+    const o = document.createElement("option");
+    o.value = String(value);
+    o.textContent = text;
+    scope.appendChild(o);
+  }
+  // Excel does not let Edit Name move a name to another scope.
+  scope.value = String(editing ? editing.sheet : -1);
+  scope.disabled = !!editing;
+
+  const comment = document.createElement("textarea");
+  comment.id = "oc-name-comment";
+  comment.rows = 3;
+  comment.spellcheck = true;
+
+  const ref = document.createElement("input");
+  ref.type = "text";
+  ref.id = "oc-name-ref";
+  ref.className = "oc-form-field mono";
+  ref.spellcheck = false;
+  ref.autocomplete = "off";
+
+  name.value = editing ? editing.name : "";
+  comment.value = editing ? editing.comment || "" : "";
+  ref.value = editing ? "=" + editing.refersTo : selectionRefersTo();
+
+  form.append(
+    label("Name:", name.id), nameCell,
+    label("Scope:", scope.id), scope,
+    label("Comment:", comment.id), comment,
+    label("Refers to:", ref.id), ref,
+  );
+  const actions = el("div", "oc-confirm-actions");
+  const ok = el("button", "oc-btn primary", "OK");
+  const cancel = el("button", "oc-btn", "Cancel");
+  actions.append(ok, cancel);
+  body.append(form, actions);
+
+  const clearError = () => { err.hidden = true; err.textContent = ""; name.classList.remove("bad"); name.removeAttribute("aria-invalid"); };
+  name.addEventListener("input", clearError);
+  ref.addEventListener("input", clearError);
+
+  function apply() {
+    const want = name.value.trim();
+    const at = Number(scope.value);
+    try {
+      wasm.session_set_name(editing ? editing.name : "", editing ? editing.sheet : -1, want, at, ref.value, comment.value);
+    } catch (e) {
+      err.textContent = errText(e);
+      err.hidden = false;
+      name.classList.add("bad");
+      name.setAttribute("aria-invalid", "true");
+      name.focus();
+      name.select();
+      return;
+    }
+    frame.close();
+    draw();
+    status.textContent = editing ? `name ${want} changed` : `name ${want} defined`;
+    after({ name: want, sheet: editing ? editing.sheet : at });
+  }
+  ok.addEventListener("click", apply);
+  cancel.addEventListener("click", () => { frame.close(); after(null); });
+  name.focus();
+}
+
+// ---- Protect Sheet / Unprotect Sheet (Review ▸ Protect Sheet, XL-UX-023) -----
+
+/// Excel's "Allow all users of this worksheet to" list, in the dialog's order,
+/// with the `<sheetProtection>` attribute each one sets.
+const PROTECT_OPTIONS = [
+  ["selectLockedCells", "Select locked cells"],
+  ["selectUnlockedCells", "Select unlocked cells"],
+  ["formatCells", "Format cells"],
+  ["formatColumns", "Format columns"],
+  ["formatRows", "Format rows"],
+  ["insertColumns", "Insert columns"],
+  ["insertRows", "Insert rows"],
+  ["insertHyperlinks", "Insert hyperlinks"],
+  ["deleteColumns", "Delete columns"],
+  ["deleteRows", "Delete rows"],
+  ["sort", "Sort"],
+  ["autoFilter", "Use AutoFilter"],
+  ["pivotTables", "Use PivotTable & PivotChart"],
+  ["objects", "Edit objects"],
+  ["scenarios", "Edit scenarios"],
+];
+
+/// Run a protection edit; `false` (with the reason on the status line) when the
+/// engine refused it.
+function protEdit(fn) {
+  try { fn(); return true; } catch (e) { statusError(errText(e)); return false; }
+}
+
+/// A password field the way Excel's protection dialogs have them.
+function passwordField(id) {
+  const input = document.createElement("input");
+  input.type = "password";
+  input.id = id;
+  input.className = "oc-form-field";
+  input.autocomplete = "off";
+  input.spellcheck = false;
+  // Excel's dialog takes at most 255 characters; the legacy hash reads 15.
+  input.maxLength = 255;
+  return input;
+}
+
+function protectError() {
+  const err = el("div", "oc-form-error");
+  err.id = "oc-prot-error";
+  err.setAttribute("role", "alert");
+  err.hidden = true;
+  return err;
+}
+
+/// Review ▸ Protect Sheet — which on a protected sheet is Unprotect Sheet, as
+/// the ribbon button is in Excel. Protecting opens Excel's dialog; unprotecting
+/// asks for the password only when the sheet has one.
+export function protectSheetCommand(index = state.sheet) {
+  let prot = null;
+  try { prot = JSON.parse(wasm.session_sheet_protection(index)); } catch {}
+  if (!prot) return;
+  if (!prot.on) { protectSheetDialog(index, prot); return; }
+  if (!prot.password) {
+    if (protEdit(() => wasm.session_unprotect_sheet(index, ""))) {
+      renderTabs(); draw();
+      status.textContent = "sheet unprotected";
+    }
+    return;
+  }
+  unprotectSheetDialog(index);
+}
+
+function protectSheetDialog(index, prot) {
+  const frame = modalFrame("Protect Sheet", { onEnter: () => apply() });
+  const { body } = frame;
+  const form = el("div", "oc-prot");
+  const masterRow = el("label", "oc-check oc-prot-master");
+  const master = document.createElement("input");
+  master.type = "checkbox";
+  master.id = "oc-prot-on";
+  master.checked = true;
+  masterRow.append(master, el("span", null, "Protect worksheet and contents of locked cells"));
+  const pwLabel = el("label", "oc-form-label", "Password to unprotect sheet:");
+  pwLabel.htmlFor = "oc-prot-pw";
+  const pw = passwordField("oc-prot-pw");
+  const allowLabel = el("div", "oc-form-label", "Allow all users of this worksheet to:");
+  const allow = el("div", "oc-prot-allow");
+  allow.setAttribute("role", "group");
+  allow.setAttribute("aria-label", "Allow all users of this worksheet to");
+  for (const [key, label] of PROTECT_OPTIONS) {
+    const row = el("label", "oc-check");
+    const box = document.createElement("input");
+    box.type = "checkbox";
+    box.dataset.key = key;
+    box.checked = !!prot.allow?.[key];
+    row.append(box, el("span", null, label));
+    allow.appendChild(row);
+  }
+  form.append(masterRow, pwLabel, pw, allowLabel, allow);
+  const actions = el("div", "oc-confirm-actions");
+  const ok = el("button", "oc-btn primary", "OK");
+  const cancel = el("button", "oc-btn", "Cancel");
+  actions.append(ok, cancel);
+  body.append(form, actions);
+  master.addEventListener("change", () => { ok.disabled = !master.checked; });
+  cancel.addEventListener("click", () => { frame.close(); canvas.focus(); });
+
+  function apply() {
+    if (!master.checked) return;
+    const allowed = [...allow.querySelectorAll("input:checked")].map((b) => b.dataset.key).join(",");
+    const password = pw.value;
+    frame.close();
+    if (password) confirmPasswordDialog(index, password, allowed);
+    else finishProtect(index, "", allowed);
+  }
+  ok.addEventListener("click", apply);
+  pw.focus();
+}
+
+function finishProtect(index, password, allowed) {
+  if (protEdit(() => wasm.session_protect_sheet(index, password, allowed))) {
+    renderTabs(); draw();
+    status.textContent = "sheet protected — locked cells refuse edits";
+  }
+  canvas.focus();
+}
+
+/// Excel's Confirm Password step. A mismatch is answered in Excel's words and
+/// the box cleared for another try.
+function confirmPasswordDialog(index, password, allowed) {
+  const frame = modalFrame("Confirm Password", { onEnter: () => apply() });
+  const { body } = frame;
+  const form = el("div", "oc-prot");
+  const label = el("label", "oc-form-label", "Reenter password to proceed.");
+  label.htmlFor = "oc-prot-confirm";
+  const again = passwordField("oc-prot-confirm");
+  const err = protectError();
+  const note = el("p", "oc-prot-note",
+    "Caution: If you lose or forget the password, it cannot be recovered. Passwords are case-sensitive.");
+  form.append(label, again, err, note);
+  const actions = el("div", "oc-confirm-actions");
+  const ok = el("button", "oc-btn primary", "OK");
+  const cancel = el("button", "oc-btn", "Cancel");
+  actions.append(ok, cancel);
+  body.append(form, actions);
+  again.addEventListener("input", () => { err.hidden = true; });
+  cancel.addEventListener("click", () => { frame.close(); canvas.focus(); });
+  function apply() {
+    if (again.value !== password) {
+      err.textContent = "Confirmation password is not identical.";
+      err.hidden = false;
+      again.value = "";
+      again.focus();
+      return;
+    }
+    frame.close();
+    finishProtect(index, password, allowed);
+  }
+  ok.addEventListener("click", apply);
+  again.focus();
+}
+
+/// Excel's Unprotect Sheet: the password, refused in Excel's words when wrong.
+function unprotectSheetDialog(index) {
+  const frame = modalFrame("Unprotect Sheet", { onEnter: () => apply() });
+  const { body } = frame;
+  const form = el("div", "oc-prot");
+  const label = el("label", "oc-form-label", "Password:");
+  label.htmlFor = "oc-prot-unpw";
+  const pw = passwordField("oc-prot-unpw");
+  const err = protectError();
+  form.append(label, pw, err);
+  const actions = el("div", "oc-confirm-actions");
+  const ok = el("button", "oc-btn primary", "OK");
+  const cancel = el("button", "oc-btn", "Cancel");
+  actions.append(ok, cancel);
+  body.append(form, actions);
+  pw.addEventListener("input", () => { err.hidden = true; });
+  cancel.addEventListener("click", () => { frame.close(); canvas.focus(); });
+  function apply() {
+    try { wasm.session_unprotect_sheet(index, pw.value); }
+    catch (e) {
+      err.textContent = errText(e);
+      err.hidden = false;
+      pw.select();
+      pw.focus();
+      return;
+    }
+    frame.close();
+    renderTabs(); draw();
+    status.textContent = "sheet unprotected";
+    canvas.focus();
+  }
+  ok.addEventListener("click", apply);
+  pw.focus();
 }

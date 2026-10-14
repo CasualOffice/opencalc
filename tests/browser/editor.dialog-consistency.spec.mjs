@@ -17,7 +17,7 @@ async function boot(page) {
 const DIALOGS = [
   "format.format-cells", "formulas.insert-function", "file.properties", "data.sort-range.custom-sort",
   "insert.table", "format.row-height", "insert.hyperlink", "data.text-to-columns",
-  "data.remove-duplicates", "help.about-opencalc", "edit.go-to", "edit.go-to-special", "tools.name-manager",
+  "data.remove-duplicates", "help.about-opencalc", "edit.go-to", "edit.go-to-special", "tools.name-manager", "formulas.define-name", "format.protection.protect-this-sheet",
 ];
 const PANELS = ["data.data-validation", "file.page-setup", "insert.note", "file.version-history", "insert.pivottable"];
 

@@ -51,14 +51,14 @@ rare or power-user.
    dialogs, the destructive shortcuts, and formula AutoComplete.
 3. **Then the missing feature families**: images and shapes, chart types, What-If, and the
    missing functions.
+4. **Beyond Excel** (added 2026-10-15, owner): agent access (docs/97) and the items from the
+   external review below, worked in the same tracker and the same way — a spec seen red,
+   our UX, no silent data loss.
 
 ## Owner decisions these rows need
 
-- **Icon-only ribbon versus Excel's labelled ribbon.** XL-UX-006, -007, -010 and -093 ask
-  for group names, large-button labels, dialog launchers and named folded groups. These are
-  what "exactly like Excel" means. They contradict the owner's 2026-10-14 instruction of
-  icons only, with no text on the toolbar (docs/95 rule 1). File ▸ Options already offers
-  both, so the decision is only which one is the default.
+- ~~Icon-only ribbon versus Excel's labelled ribbon~~ — **decided 2026-10-14**: group names
+  on, button labels off (docs/95 rule 1); XL-UX-006/007/010 done, 093 done.
 - **Panels versus Excel's dialogs.** Conditional Formatting, Data Validation, Page Setup and
   Find & Replace are side panels or bars here, and dialogs in Excel (XL-UX rows).
 
@@ -245,6 +245,23 @@ rare or power-user.
 | Grid size | `crates/casual-calc-formula/src/reference.rs:43-45` (1,048,576 × 16,384) |
 
 ---
+
+## Beyond Excel: the external review (2026-10-15)
+
+A review that diffed OpenCalc against a comparable open-source spreadsheet. Its function
+list was confirmed by searching our crates; its other points were checked against the
+repository. Everything real is a row; the owner put it in this roadmap.
+
+| Row | Item | Decision |
+|---|---|---|
+| XL-FEAT-012, -013 | The missing functions it listed (XOR, AGGREGATE, the T/F/CHISQ family, BASE/DECIMAL/ARABIC, the IM* set, VSTACK/HSTACK/TAKE/DROP and the 2022 family) | In progress; each tested against LibreOffice and Microsoft's examples, and added to the CI oracle corpus |
+| XL-FEAT-119 | GROUPBY, PIVOTBY | Build, after LAMBDA-as-argument is confirmed |
+| XL-FEAT-120 | WEBSERVICE, FILTERXML, CUBE* | **Not built**: request forgery from a recalculation on a shared server; absent from Excel for the web and Mac; CUBE needs a data model. Cached values kept and named |
+| XL-FEAT-121 | PHONETIC, DBCS | With CJK support |
+| XL-FEAT-122 | Agent access — MCP server, CLI, live participant | **Accepted**: [docs/97](97-AGENT-ACCESS.md), rows AGENT-01..04 |
+| XL-FEAT-123 | A native (egui) desktop UI instead of the web shell in Tauri | **Not adopted**: a second UI to build and keep identical; the one web shell serves browser, desktop, embeds and collaboration. The desktop's real gaps are signing (XL-FEAT-044) and native menus, not the toolkit |
+| XL-FEAT-035 | `.xlsb` (and `.xls`) | Already a P1 row; the review's ODS-import point does not apply — `.ods` opens today (`casual-calc-ods`) |
+| XL-UX-157 | Cross-check our ribbon coverage against the reviewed project's parity checklists | Needs access to that repository |
 
 ## UX gaps (`XL-UX`)
 

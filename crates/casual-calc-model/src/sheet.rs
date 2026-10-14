@@ -357,7 +357,101 @@ impl SheetProtection {
         attrs.insert("sheet".to_owned(), "1".to_owned());
         Self { attrs }
     }
+
+    /// Excel's Protect Sheet: the master flag, the legacy hash of `password`
+    /// (none when empty — the password itself is never stored), and the
+    /// "Allow all users of this worksheet to" list. `allowed` names
+    /// [`ALLOW_OPTIONS`] keys; every option not named is withheld.
+    #[must_use]
+    pub fn protect(password: &str, allowed: &[&str]) -> Self {
+        let mut p = Self::enabled();
+        if let Some(hash) = crate::protection_hash::legacy_password_hash(password) {
+            p.attrs.insert("password".to_owned(), hash);
+        }
+        for &(key, default_protected) in ALLOW_OPTIONS {
+            let allow = allowed.contains(&key);
+            // Write only what differs from the schema default, as Excel does:
+            // a flag whose default already says the right thing is omitted.
+            if allow == default_protected {
+                let v = if allow { "0" } else { "1" };
+                p.attrs.insert(key.to_owned(), v.to_owned());
+            }
+        }
+        p
+    }
+
+    /// Whether the protected sheet lets users do `key` (an [`ALLOW_OPTIONS`]
+    /// key), reading the attribute against its schema default.
+    #[must_use]
+    pub fn allows(&self, key: &str) -> bool {
+        let default_protected = ALLOW_OPTIONS
+            .iter()
+            .find(|(k, _)| *k == key)
+            .is_some_and(|(_, d)| *d);
+        let protected = self.attrs.get(key).map_or(default_protected, |v| {
+            v == "1" || v.eq_ignore_ascii_case("true")
+        });
+        !protected
+    }
+
+    /// Whether a password guards the sheet — legacy or agile.
+    #[must_use]
+    pub fn has_password(&self) -> bool {
+        self.attrs.get("password").is_some_and(|v| !v.is_empty())
+            || self.attrs.contains_key("hashValue")
+    }
+
+    /// Whether `password` unprotects the sheet: Excel's check against whichever
+    /// hash the file carries. A sheet with no password accepts anything, as in
+    /// Excel, where Unprotect then asks nothing. An agile hash with an
+    /// algorithm other than SHA-512 cannot be checked here and refuses.
+    #[must_use]
+    pub fn verify_password(&self, password: &str) -> bool {
+        use crate::protection_hash::{agile_password_hash, base64_decode, legacy_password_hash};
+        if let Some(expected) = self.attrs.get("hashValue") {
+            let algorithm = self.attrs.get("algorithmName").map_or("", String::as_str);
+            if !algorithm.eq_ignore_ascii_case("SHA-512") {
+                return false;
+            }
+            let salt = self.attrs.get("saltValue").and_then(|s| base64_decode(s));
+            let spin = self.attrs.get("spinCount").and_then(|s| s.parse().ok());
+            let (Some(salt), Some(spin), Some(want)) = (salt, spin, base64_decode(expected)) else {
+                return false;
+            };
+            return agile_password_hash(password, &salt, spin)[..] == want[..];
+        }
+        match self.attrs.get("password").filter(|v| !v.is_empty()) {
+            // Compared as numbers: some writers drop the leading zeros.
+            Some(expected) => {
+                let num = |h: &str| u16::from_str_radix(h, 16).ok();
+                legacy_password_hash(password).is_some_and(|h| num(&h) == num(expected))
+            }
+            None => true,
+        }
+    }
 }
+
+/// The "Allow all users of this worksheet to" options of Excel's Protect Sheet,
+/// as `<sheetProtection>` attribute names in the dialog's order, with each
+/// attribute's schema default: `true` means absent = the action is protected
+/// (refused), `false` absent = allowed. Excel's dialog ticks the first two.
+pub const ALLOW_OPTIONS: &[(&str, bool)] = &[
+    ("selectLockedCells", false),
+    ("selectUnlockedCells", false),
+    ("formatCells", true),
+    ("formatColumns", true),
+    ("formatRows", true),
+    ("insertColumns", true),
+    ("insertRows", true),
+    ("insertHyperlinks", true),
+    ("deleteColumns", true),
+    ("deleteRows", true),
+    ("sort", true),
+    ("autoFilter", true),
+    ("pivotTables", true),
+    ("objects", false),
+    ("scenarios", false),
+];
 
 /// Whether a sheet's tab is shown — OOXML `<sheet state=…>`.
 ///

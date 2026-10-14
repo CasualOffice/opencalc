@@ -659,6 +659,115 @@ pub fn session_set_sheet_protected(index: usize, on: bool) -> Result<(), JsError
     })
 }
 
+/// Excel's message for a wrong password at Unprotect Sheet.
+pub(crate) const WRONG_PASSWORD: &str = "The password you supplied is not correct. Verify that \
+the CAPS LOCK key is off and be sure to use the correct capitalization.";
+
+/// A sheet's protection as Excel's Protect Sheet dialog reads it, as JSON
+/// `{"on":bool,"password":bool,"allow":{"selectLockedCells":bool,…}}` — the
+/// allow list in the dialog's order. An unprotected sheet reports Excel's
+/// defaults: the two Select options ticked, nothing else.
+#[wasm_bindgen]
+pub fn session_sheet_protection(index: usize) -> String {
+    with_session(|s| {
+        let prot = s
+            .workbook()
+            .sheets
+            .get(index)
+            .and_then(|sh| sh.protection.clone())
+            .filter(casual_calc_model::SheetProtection::is_enabled);
+        let on = prot.is_some();
+        let prot = prot.unwrap_or_else(|| {
+            casual_calc_model::SheetProtection::protect(
+                "",
+                &["selectLockedCells", "selectUnlockedCells"],
+            )
+        });
+        let allow: Vec<String> = casual_calc_model::ALLOW_OPTIONS
+            .iter()
+            .map(|(k, _)| format!("\"{k}\":{}", prot.allows(k)))
+            .collect();
+        format!(
+            "{{\"on\":{on},\"password\":{},\"allow\":{{{}}}}}",
+            on && prot.has_password(),
+            allow.join(",")
+        )
+    })
+    .unwrap_or_else(|| "null".to_owned())
+}
+
+/// Excel's Protect Sheet: protect sheet `index` with `password` (empty for
+/// none — only its legacy hash is stored) allowing the comma-separated
+/// `allowed` options. Undoable like any sheet edit.
+#[wasm_bindgen]
+pub fn session_protect_sheet(index: usize, password: &str, allowed: &str) -> Result<(), JsError> {
+    let allowed: Vec<&str> = allowed
+        .split(',')
+        .map(str::trim)
+        .filter(|k| !k.is_empty())
+        .collect();
+    let prot = casual_calc_model::SheetProtection::protect(password, &allowed);
+    edit_sheet_metadata(index, move |_, data| data.protection = Some(prot))
+}
+
+/// Excel's Unprotect Sheet: refuses, in Excel's words, a password that does
+/// not match the sheet's hash (legacy or SHA-512); a sheet without one
+/// unprotects whatever is given.
+#[wasm_bindgen]
+pub fn session_unprotect_sheet(index: usize, password: &str) -> Result<(), JsError> {
+    if !unprotect_allowed(index, password) {
+        return Err(JsError::new(WRONG_PASSWORD));
+    }
+    edit_sheet_metadata(index, |_, data| data.protection = None)
+}
+
+/// The decision behind [`session_unprotect_sheet`], testable off-wasm.
+pub(crate) fn unprotect_allowed(index: usize, password: &str) -> bool {
+    with_session(|s| {
+        s.workbook()
+            .sheets
+            .get(index)
+            .and_then(|sh| sh.protection.as_ref())
+            .is_none_or(|p| !p.is_enabled() || p.verify_password(password))
+    })
+    .unwrap_or(true)
+}
+
+#[cfg(test)]
+mod protect_sheet_tests {
+    use super::*;
+
+    #[test]
+    fn protect_reports_and_unprotect_checks_the_password() {
+        crate::session_new();
+        let fresh = session_sheet_protection(0);
+        assert!(
+            fresh.starts_with("{\"on\":false,\"password\":false"),
+            "{fresh}"
+        );
+        assert!(fresh.contains("\"selectLockedCells\":true"), "{fresh}");
+        assert!(fresh.contains("\"formatCells\":false"), "{fresh}");
+
+        session_protect_sheet(0, "abc", "selectUnlockedCells,formatColumns,deleteRows").unwrap();
+        let on = session_sheet_protection(0);
+        assert!(on.starts_with("{\"on\":true,\"password\":true"), "{on}");
+        assert!(on.contains("\"selectLockedCells\":false"), "{on}");
+        assert!(on.contains("\"formatColumns\":true"), "{on}");
+        assert!(on.contains("\"deleteRows\":true"), "{on}");
+        assert!(crate::axis::axis_edit_blocked(0, "formatRows"));
+        assert!(!crate::axis::axis_edit_blocked(0, "formatColumns"));
+
+        assert!(!unprotect_allowed(0, "ABC"));
+        assert!(!unprotect_allowed(0, ""));
+        assert!(unprotect_allowed(0, "abc"));
+        session_unprotect_sheet(0, "abc").unwrap();
+        assert!(session_sheet_protection(0).starts_with("{\"on\":false"));
+
+        session_protect_sheet(0, "", "").unwrap();
+        assert!(unprotect_allowed(0, ""), "no password, nothing to ask");
+    }
+}
+
 #[cfg(test)]
 mod field_code_agreement {
     use super::*;

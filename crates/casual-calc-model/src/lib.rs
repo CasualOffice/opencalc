@@ -21,6 +21,7 @@ mod error;
 mod ids;
 pub mod int_keys;
 mod pivot;
+pub mod protection_hash;
 mod sheet;
 mod store;
 mod strings;
@@ -42,9 +43,9 @@ pub use pivot::{
     PivotGroup, PivotGroupBy, PivotShowAs, PivotSort, PivotTable, PivotValueField,
 };
 pub use sheet::{
-    AutoFilter, AxisSizing, CellComment, CfRule, CommentReply, ConditionalFormat, CustomFilter,
-    DataValidation, DvKind, DvOperator, FilterOp, FilterRule, Hyperlink, OutlinePr, PrintSetup,
-    Sheet, SheetProtection, SheetView, SheetVisibility, SortState, Table, TableColumn,
+    ALLOW_OPTIONS, AutoFilter, AxisSizing, CellComment, CfRule, CommentReply, ConditionalFormat,
+    CustomFilter, DataValidation, DvKind, DvOperator, FilterOp, FilterRule, Hyperlink, OutlinePr,
+    PrintSetup, Sheet, SheetProtection, SheetView, SheetVisibility, SortState, Table, TableColumn,
     wildcard_match,
 };
 pub use store::{CellRange, CellRef, CellStore, GRID_MAX_COL, GRID_MAX_ROW};
