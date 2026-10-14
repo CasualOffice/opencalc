@@ -3316,6 +3316,7 @@ mod pdf_export {
             name: "Print_Titles".to_owned(),
             sheet: Some(sheet_id),
             formula: Expr::Raw("'Report'!$1:$1".to_owned()),
+            comment: None,
         });
 
         let (pdf, _) = session.export_pdf_with_report(0).unwrap();

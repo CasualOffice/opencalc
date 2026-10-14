@@ -2981,6 +2981,7 @@ mod pagination {
             name: name.to_owned(),
             sheet: Some(sheet),
             formula: Expr::Raw(refers_to.to_owned()),
+            comment: None,
         });
     }
 

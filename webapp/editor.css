@@ -1321,15 +1321,6 @@ input.tb-size::placeholder, input.tb-font::placeholder { color: var(--oc-faint-t
 .cmt-set { min-width: 240px; padding: 8px; }
 .cmt-input { width: 100%; margin: 4px 0 2px; padding: 8px 10px; border-radius: 8px; border: 1px solid var(--oc-border-color); background: var(--oc-background-color); color: var(--oc-text-color); font: inherit; font-size: 13px; resize: vertical; }
 .cmt-input:focus { outline: none; border-color: var(--oc-accent-color); }
-/* Name manager. */
-.nm-menu { min-width: 260px; max-width: 360px; max-height: 320px; overflow-y: auto; }
-.nm-row { display: flex; align-items: stretch; gap: 4px; }
-.nm-go { flex: 1; display: flex; flex-direction: column; align-items: flex-start; gap: 1px; padding: 6px 10px; background: none; border: 0; border-radius: 6px; cursor: pointer; text-align: left; }
-.nm-go:hover { background: var(--oc-popover-background-color); }
-.nm-go b { font-size: 13px; color: var(--oc-text-color); }
-.nm-go span { font-size: 12px; color: var(--oc-muted-text-color); font-family: var(--oc-mono-font-family); }
-.nm-del { width: 30px; border: 0; background: none; color: var(--oc-muted-text-color); font-size: 18px; cursor: pointer; border-radius: 6px; }
-.nm-del:hover { background: var(--oc-danger-ring); color: var(--oc-danger-color); }
 /* Formula function autocomplete. */
 /* Fixed, not absolute: the same menu is anchored under the in-cell editor
    (inside the grid wrapper) and under the formula bar (outside it), so its
@@ -2535,3 +2526,28 @@ html, .editor-body { overscroll-behavior: none; }
 .oc-gts-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0 24px; margin: 0 0 8px; align-items: start; }
 .oc-gts-types { display: flex; flex-direction: column; gap: 6px; padding-left: 24px; }
 .oc-gts-types .oc-check:has(input:disabled) { color: var(--oc-muted-text-color); }
+/* Name Manager (XL-UX-021): Excel's toolbar of New/Edit/Delete with the Filter
+   at the right, the five-column list, and the Refers to box under it. */
+.oc-modal-box:has(.oc-nm) { width: min(92vw, 560px); }
+.oc-nm { display: flex; flex-direction: column; gap: 6px; }
+.oc-nm-bar { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
+.oc-nm-bar .oc-btn { min-width: 0; padding: 0 12px; }
+.oc-nm-filter-label { margin-left: auto; }
+.oc-nm-list {
+  height: 200px; overflow: auto; border: 1px solid var(--oc-control-border-color); border-radius: 6px;
+  background: var(--oc-background-color); font-size: 12px;
+}
+.oc-nm-head, .oc-nm-row {
+  display: grid; grid-template-columns: 19% 14% 29% 18% 20%; min-width: 100%;
+}
+.oc-nm-head {
+  position: sticky; top: 0; background: var(--oc-surface-color);
+  border-bottom: 1px solid var(--oc-border-color); font-weight: 600; color: var(--oc-text-color);
+}
+.oc-nm-head span, .oc-nm-row span { padding: 4px 8px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.oc-nm-row { cursor: default; color: var(--oc-text-color); }
+.oc-nm-row:hover { background: var(--oc-surface-color); }
+.oc-nm-row.on { background: var(--oc-accent-soft); }
+.oc-nm-row:focus-visible { outline: 2px solid var(--oc-accent-color); outline-offset: -2px; }
+.oc-nm-row [data-col="refers"], .oc-nm-row [data-col="value"] { font-family: var(--oc-mono-font-family); }
+.oc-nm-empty { padding: 8px; }

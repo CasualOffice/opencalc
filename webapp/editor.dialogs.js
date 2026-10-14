@@ -2387,52 +2387,6 @@ export function openNameBoxList() {
   positionMenu(menu, r.left, r.bottom + 2);
 }
 
-export function openNameManager(x, y) {
-  closeSheetMenu();
-  let names = [];
-  try { names = JSON.parse(wasm.session_names()); } catch {}
-  const menu = document.createElement("div");
-  menu.className = "popmenu ctx-menu nm-menu";
-  menu.id = "sheet-ctx";
-  const head = document.createElement("div");
-  head.className = "menu-label";
-  head.textContent = names.length ? "Named ranges" : "No named ranges yet";
-  menu.appendChild(head);
-  names.forEach((n) => {
-    const row = document.createElement("div");
-    row.className = "nm-row";
-    const go = document.createElement("button");
-    go.className = "nm-go";
-    // Built, not interpolated. Both of these are workbook text: a `refersTo`
-    // reading `<img src=x onerror=...>` used to become a real element here, and
-    // opening the Name Manager on a file somebody sent you ran their script in
-    // this origin. Elements and `textContent` cannot do that.
-    const label = document.createElement("b");
-    label.textContent = n.name;
-    const target = document.createElement("span");
-    target.textContent = n.refersTo;
-    go.replaceChildren(label, target);
-    go.addEventListener("click", () => { closeSheetMenu(); gotoName(n.name); });
-    const del = document.createElement("button");
-    del.className = "nm-del";
-    del.textContent = "×";
-    del.title = "Delete";
-    // The row only goes when the name did. Removing it regardless took the
-    // entry off the list while the workbook still held it, so the next time the
-    // menu was opened it was back and nobody knew why.
-    del.addEventListener("click", (e) => {
-      e.stopPropagation();
-      try { wasm.session_delete_name(n.name); }
-      catch (err) { statusError(errText(err)); return; }
-      row.remove();
-      draw();
-    });
-    row.appendChild(go); row.appendChild(del);
-    menu.appendChild(row);
-  });
-  positionMenu(menu, x, y);
-}
-
 export function closeSheetMenu() {
   const m = byId("sheet-ctx");
   if (m) m.remove();
@@ -2791,10 +2745,7 @@ export function cellMenu(x, y, fromKeyboard = false) {
       draw();
     });
   })();
-  item("Define name…", false, () => {
-    const r = canvas.getBoundingClientRect();
-    openNameManager(r.left + 120, r.top + 90);
-  });
+  item("Define name…", false, () => openNameManager());
   item("Filter", false, () => toggleFilter());
   positionMenu(menu, x, y);
   menuKeyboard(menu, fromKeyboard);
@@ -3647,4 +3598,290 @@ export function goToSpecialDialog() {
   modal.addEventListener("click", onBackdrop);
   document.addEventListener("keydown", onKey, true);
   body.querySelector("input[name=oc-gts]:checked")?.focus();
+}
+
+// ---- Shared modal frame for the Excel dialogs below ---------------------------
+
+/// Open `#oc-modal` titled `title` with an empty body, and wire the ways out:
+/// the ✕, the backdrop and Escape all run `onCancel`; Enter runs `onEnter`
+/// unless a button has focus (which then gets its own click). Returns the body
+/// and a `close()` that tears the wiring down. One place for the plumbing every
+/// dialog here used to repeat, so a dialog cannot forget a listener and leave
+/// it catching keys after it has gone.
+function modalFrame(title, { onEnter, onCancel, onKey } = {}) {
+  const modal = byId("oc-modal");
+  const body = byId("oc-modal-body");
+  byId("oc-modal-title").textContent = title;
+  body.textContent = "";
+  modal.hidden = false;
+  const x = byId("oc-modal-x");
+  const cancel = () => (onCancel ? onCancel() : (close(), canvas.focus()));
+  const onBackdrop = (e) => { if (e.target === modal) cancel(); };
+  const key = (e) => {
+    if (modal.hidden || !body.isConnected) { close(); return; }
+    if (onKey && onKey(e)) return;
+    if (e.key === "Escape") { e.stopPropagation(); e.preventDefault(); cancel(); }
+    else if (e.key === "Enter") {
+      const active = document.activeElement;
+      e.stopPropagation(); e.preventDefault();
+      if (active instanceof HTMLButtonElement && body.contains(active)) active.click();
+      else if (onEnter) onEnter();
+    }
+  };
+  let open = true;
+  function close() {
+    if (!open) return;
+    open = false;
+    modal.hidden = true;
+    body.textContent = "";
+    document.removeEventListener("keydown", key, true);
+    x.removeEventListener("click", cancel);
+    modal.removeEventListener("click", onBackdrop);
+  }
+  document.addEventListener("keydown", key, true);
+  x.addEventListener("click", cancel);
+  modal.addEventListener("click", onBackdrop);
+  return { body, close };
+}
+
+// ---- Name Manager (Ctrl+F3, fit-gap XL-UX-021) --------------------------------
+
+/// Excel's Filter menu, in its order. "Clear Filter" shows everything.
+const NM_FILTERS = [
+  ["all", "Clear Filter"],
+  ["sheet", "Names Scoped to Worksheet"],
+  ["book", "Names Scoped to Workbook"],
+  ["errors", "Names with Errors"],
+  ["ok", "Names without Errors"],
+];
+
+/// What the Name Manager remembers between openings in a session, as Excel's
+/// does: the filter and the row last selected.
+const nmState = { filter: "all", selected: null };
+
+/// The workbook's names with what the Name Manager shows for each: the value
+/// as Excel writes it, and whether that value is an error.
+function nameRows() {
+  let names = [];
+  try { names = JSON.parse(wasm.session_names()); } catch {}
+  return names.map((n) => {
+    const at = n.sheet >= 0 ? n.sheet : state.sheet;
+    let value = "";
+    try { value = wasm.session_evaluate(at, n.refersTo); } catch {}
+    return { ...n, value, error: /^#/.test(value) };
+  }).sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: "base" }) || a.sheet - b.sheet);
+}
+
+const sameName = (a, b) => !!a && !!b && a.name.toLowerCase() === b.name.toLowerCase() && a.sheet === b.sheet;
+
+/// Excel's Name Manager: every defined name with its Value, Refers To, Scope
+/// and Comment, a Filter, New…/Edit…/Delete, and a Refers to box that edits
+/// the selected name in place.
+export function openNameManager() {
+  closeSheetMenu();
+  let refDirty = false;
+  const frame = modalFrame("Name Manager", {
+    onEnter: () => (document.activeElement === ref ? commitRef() : finish()),
+    onCancel: () => finish(),
+    onKey: (e) => {
+      // Escape in a changed Refers to box puts it back, as Excel's ✗ does,
+      // rather than closing the dialog over the edit.
+      if (e.key === "Escape" && document.activeElement === ref && refDirty) {
+        e.stopPropagation(); e.preventDefault();
+        showRef();
+        return true;
+      }
+      if ((e.key === "ArrowDown" || e.key === "ArrowUp") && list.contains(document.activeElement)) {
+        e.preventDefault();
+        const shown = [...list.querySelectorAll(".oc-nm-row")];
+        const i = shown.findIndex((r) => r.classList.contains("on"));
+        const next = shown[Math.max(0, Math.min(shown.length - 1, i + (e.key === "ArrowDown" ? 1 : -1)))];
+        next?.click();
+        next?.focus();
+        return true;
+      }
+      if (e.key === "Delete" && list.contains(document.activeElement)) {
+        e.preventDefault();
+        del.click();
+        return true;
+      }
+      return false;
+    },
+  });
+  const { body } = frame;
+
+  const root = el("div", "oc-nm");
+  const bar = el("div", "oc-nm-bar");
+  const neu = el("button", "oc-btn", "New…");
+  neu.id = "oc-nm-new";
+  const edit = el("button", "oc-btn", "Edit…");
+  edit.id = "oc-nm-edit";
+  const del = el("button", "oc-btn", "Delete");
+  del.id = "oc-nm-delete";
+  // New and Edit open the New Name / Edit Name dialog, which arrives with
+  // XL-UX-022; until then they are shown in place but not offered.
+  neu.disabled = true;
+  edit.disabled = true;
+  const filterLabel = el("label", "oc-form-label oc-nm-filter-label", "Filter");
+  const filter = document.createElement("select");
+  filter.id = "oc-nm-filter";
+  for (const [value, label] of NM_FILTERS) {
+    const o = document.createElement("option");
+    o.value = value;
+    o.textContent = label;
+    filter.appendChild(o);
+  }
+  filter.value = nmState.filter;
+  filterLabel.htmlFor = filter.id;
+  bar.append(neu, edit, del, filterLabel, filter);
+
+  const list = el("div", "oc-nm-list");
+  list.id = "oc-nm-list";
+  list.setAttribute("role", "grid");
+  list.setAttribute("aria-label", "Defined names");
+  const COLS = [["name", "Name"], ["value", "Value"], ["refers", "Refers To"], ["scope", "Scope"], ["comment", "Comment"]];
+  const head = el("div", "oc-nm-head");
+  head.setAttribute("role", "row");
+  for (const [key, label] of COLS) {
+    const c = el("span", null, label);
+    c.dataset.col = key;
+    c.setAttribute("role", "columnheader");
+    head.appendChild(c);
+  }
+  const rowsEl = el("div", "oc-nm-rows");
+  list.append(head, rowsEl);
+
+  const refLabel = el("label", "oc-form-label", "Refers to:");
+  refLabel.htmlFor = "oc-nm-ref";
+  const ref = document.createElement("input");
+  ref.type = "text";
+  ref.id = "oc-nm-ref";
+  ref.className = "oc-form-field mono";
+  ref.spellcheck = false;
+  ref.autocomplete = "off";
+  const err = el("div", "oc-form-error");
+  err.setAttribute("role", "alert");
+  err.hidden = true;
+  const refCell = el("div", "oc-form-cell");
+  refCell.append(ref, err);
+
+  root.append(bar, list, refLabel, refCell);
+  const actions = el("div", "oc-confirm-actions");
+  const closeBtn = el("button", "oc-btn primary", "Close");
+  actions.append(closeBtn);
+  body.append(root, actions);
+
+  let all = [];
+  const selected = () => all.find((n) => sameName(n, nmState.selected)) ?? null;
+  const showRef = () => {
+    const n = selected();
+    ref.value = n ? "=" + n.refersTo : "";
+    ref.disabled = !n;
+    refDirty = false;
+    err.hidden = true;
+    ref.classList.remove("bad");
+  };
+  const syncButtons = () => {
+    del.disabled = !selected();
+  };
+  const render = () => {
+    all = nameRows();
+    const keep = {
+      all: () => true,
+      sheet: (n) => n.sheet >= 0,
+      book: (n) => n.sheet < 0,
+      errors: (n) => n.error,
+      ok: (n) => !n.error,
+    }[nmState.filter] ?? (() => true);
+    rowsEl.textContent = "";
+    const shown = all.filter(keep);
+    if (!shown.some((n) => sameName(n, nmState.selected))) nmState.selected = null;
+    for (const n of shown) {
+      const r = el("div", "oc-nm-row");
+      r.setAttribute("role", "row");
+      r.tabIndex = -1;
+      // Built from text nodes: every one of these is workbook text, and a
+      // name or target reading `<img onerror=…>` must stay text.
+      for (const [key, text] of [["name", n.name], ["value", n.value], ["refers", "=" + n.refersTo], ["scope", n.scope], ["comment", n.comment]]) {
+        const c = el("span", null, text);
+        c.dataset.col = key;
+        c.setAttribute("role", "gridcell");
+        c.title = text;
+        r.appendChild(c);
+      }
+      const on = sameName(n, nmState.selected);
+      r.classList.toggle("on", on);
+      r.setAttribute("aria-selected", String(on));
+      r.addEventListener("click", () => {
+        if (refDirty && !sameName(n, nmState.selected)) commitRef();
+        nmState.selected = { name: n.name, sheet: n.sheet };
+        rowsEl.querySelectorAll(".oc-nm-row").forEach((o) => {
+          o.classList.toggle("on", o === r);
+          o.setAttribute("aria-selected", String(o === r));
+        });
+        showRef();
+        syncButtons();
+      });
+      rowsEl.appendChild(r);
+    }
+    if (!shown.length) rowsEl.appendChild(el("div", "panel-hint oc-nm-empty", all.length ? "No names match the filter." : "No defined names yet."));
+    showRef();
+    syncButtons();
+  };
+
+  /// Store the Refers to box on the selected name. Excel's ✓.
+  function commitRef() {
+    const n = selected();
+    if (!n || !refDirty) return true;
+    try {
+      wasm.session_set_name(n.name, n.sheet, n.name, n.sheet, ref.value, n.comment || "");
+    } catch (e) {
+      err.textContent = errText(e);
+      err.hidden = false;
+      ref.classList.add("bad");
+      ref.focus();
+      return false;
+    }
+    refDirty = false;
+    draw();
+    render();
+    return true;
+  }
+  ref.addEventListener("input", () => { refDirty = true; err.hidden = true; ref.classList.remove("bad"); });
+  filter.addEventListener("change", () => { nmState.filter = filter.value; render(); });
+
+  const finish = () => {
+    frame.close();
+    canvas.focus();
+  };
+  closeBtn.addEventListener("click", () => {
+    // A changed Refers to box is kept on Close, after asking — Excel's
+    // "Do you want to save the changes you made to the name reference?".
+    if (!refDirty) { finish(); return; }
+    const pending = { ...selected(), text: ref.value };
+    frame.close();
+    confirmModal("Name Manager", "Do you want to save the changes you made to the name reference?", "Yes").then((yes) => {
+      if (yes) {
+        try { wasm.session_set_name(pending.name, pending.sheet, pending.name, pending.sheet, pending.text, pending.comment || ""); draw(); }
+        catch (e) { statusError(errText(e)); }
+      }
+      canvas.focus();
+    });
+  });
+  del.addEventListener("click", () => {
+    const n = selected();
+    if (!n) return;
+    frame.close();
+    confirmModal("Name Manager", `Are you sure you want to delete the name ${n.name}?`, "OK").then((yes) => {
+      if (yes) {
+        // The row only goes when the name did.
+        try { wasm.session_delete_name_in(n.name, n.sheet); nmState.selected = null; draw(); }
+        catch (e) { statusError(errText(e)); }
+      }
+      openNameManager();
+    });
+  });
+
+  render();
+  (rowsEl.querySelector(".oc-nm-row.on") ?? rowsEl.querySelector(".oc-nm-row") ?? closeBtn).focus();
 }

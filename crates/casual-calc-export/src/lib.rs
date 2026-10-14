@@ -1445,8 +1445,15 @@ fn workbook_xml(
                 .and_then(|id| sheet_index(workbook, id))
                 .map(|i| format!(" localSheetId=\"{i}\""))
                 .unwrap_or_default();
+            // The Name Manager's Comment column. Written only when present, so
+            // a name without one is byte-for-byte what it always was.
+            let comment = name
+                .comment
+                .as_deref()
+                .map(|c| format!(" comment=\"{}\"", escape_attr(c)))
+                .unwrap_or_default();
             s.push_str(&format!(
-                "<definedName name=\"{}\"{scope}>{}</definedName>",
+                "<definedName name=\"{}\"{comment}{scope}>{}</definedName>",
                 escape_attr(&name.name),
                 escape_text(&formula_text(&name.formula, ABSOLUTE))
             ));

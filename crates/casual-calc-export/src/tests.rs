@@ -3663,6 +3663,7 @@ mod future_functions {
             name: "Joined".to_owned(),
             sheet: None,
             formula: parse("TEXTJOIN(\",\",TRUE,A1:A3)").unwrap(),
+            comment: None,
         });
 
         let bytes = write_workbook(&wb).unwrap();
@@ -5363,4 +5364,53 @@ fn a_measure_carries_its_number_format_into_the_package() {
         "the pivot names numFmtId={id} and styles.xml does not define it as 0.00%. \
          A format the package does not define is the file Excel repairs silently:\n{styles}"
     );
+}
+
+/// A defined name's comment and scope survive a save and a reopen — the
+/// Comment and Scope boxes of Excel's New Name (`XL-UX-022`). The comment used
+/// to be dropped on import, so a file whose names carried notes lost them on
+/// the first save.
+#[test]
+fn a_defined_names_comment_and_scope_round_trip() {
+    use casual_calc_formula::parse;
+    use casual_calc_model::{DefinedName, Id, Sheet, SheetId, Workbook};
+
+    let mut wb = Workbook::new(Id::from_parts(1, 1));
+    wb.sheets
+        .push(Sheet::new(SheetId(Id::from_parts(2, 1)), "S"));
+    wb.sheets
+        .push(Sheet::new(SheetId(Id::from_parts(2, 2)), "T"));
+    let t = wb.sheets[1].id;
+    wb.defined_names.push(DefinedName {
+        name: "Rate".to_owned(),
+        sheet: Some(t),
+        formula: parse("S!$A$1").unwrap(),
+        comment: Some("VAT \"standard\" & <reduced>".to_owned()),
+    });
+    wb.defined_names.push(DefinedName {
+        name: "Plain".to_owned(),
+        sheet: None,
+        formula: parse("S!$B$1").unwrap(),
+        comment: None,
+    });
+
+    let bytes = write_workbook(&wb).unwrap();
+    let back = import_package(bytes).unwrap().workbook;
+    let rate = back
+        .defined_names
+        .iter()
+        .find(|d| d.name == "Rate")
+        .unwrap();
+    assert_eq!(
+        rate.comment.as_deref(),
+        Some("VAT \"standard\" & <reduced>")
+    );
+    assert_eq!(rate.sheet, Some(back.sheets[1].id));
+    let plain = back
+        .defined_names
+        .iter()
+        .find(|d| d.name == "Plain")
+        .unwrap();
+    assert_eq!(plain.comment, None);
+    assert_eq!(plain.sheet, None);
 }

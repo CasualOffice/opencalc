@@ -194,9 +194,9 @@ test("Ctrl+F3 opens the name manager", async ({ page }) => {
     window.opencalcEditor.wasmApi().session_define_name("Sales", "Sheet1!$A$1:$A$3"));
   await page.locator("#grid").focus();
   await page.keyboard.press("Control+F3");
-  const menu = page.locator("#sheet-ctx");
-  await expect(menu).toBeVisible();
-  await expect(menu).toContainText("Sales");
+  // Excel's Name Manager dialog since XL-UX-021, not the old popover.
+  await expect(page.locator("#oc-modal-title")).toHaveText("Name Manager");
+  await expect(page.locator("#oc-nm-list")).toContainText("Sales");
 });
 
 // --- Help must not advertise a chord that does nothing ---------------------

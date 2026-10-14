@@ -2,7 +2,8 @@
 //!
 //! Since `PERF-11` these are the rewrites relative storage does *not* do for
 //! free: moving a formula while keeping its targets ([`restore_at`]) and
-//! following a renamed sheet ([`rename_sheet_references`]). Copy and fill need
+//! following a renamed sheet ([`rename_sheet_references`]) or a renamed defined
+//! name ([`rename_name_references`]). Copy and fill need
 //! neither — resolving a shared tree at the destination is the shift.
 
 use crate::ast::Expr;
@@ -97,6 +98,47 @@ pub fn rename_sheet_references(expr: &mut Expr, old: &str, new: &str) -> bool {
     }
 }
 
+/// Rewrite every use of the defined name `old` (case-insensitively, as Excel
+/// resolves names) to `new` — a bare `Total`, and a named LAMBDA called as
+/// `MyFn(…)`. What Excel does when a name is renamed in the Name Manager: the
+/// formulas that used it follow, rather than turning into `#NAME?`. Returns
+/// `true` if anything changed.
+pub fn rename_name_references(expr: &mut Expr, old: &str, new: &str) -> bool {
+    match expr {
+        Expr::Name(n) if n.eq_ignore_ascii_case(old) => {
+            new.clone_into(n);
+            true
+        }
+        Expr::Unary { operand, .. } => rename_name_references(operand, old, new),
+        Expr::Binary { left, right, .. } => {
+            let l = rename_name_references(left, old, new);
+            let r = rename_name_references(right, old, new);
+            l || r
+        }
+        Expr::Function { name, args } => {
+            // A call of a named LAMBDA parses as a function. Function names are
+            // stored upper-cased, so the new one is too.
+            let mut changed = false;
+            if name.eq_ignore_ascii_case(old) {
+                *name = new.to_ascii_uppercase();
+                changed = true;
+            }
+            for arg in args {
+                changed |= rename_name_references(arg, old, new);
+            }
+            changed
+        }
+        Expr::Call { callee, args } => {
+            let mut changed = rename_name_references(callee, old, new);
+            for arg in args {
+                changed |= rename_name_references(arg, old, new);
+            }
+            changed
+        }
+        _ => false,
+    }
+}
+
 fn rename_ref(r: &mut StoredRef, old: &str, new: &str) -> bool {
     if r.sheet
         .as_deref()
@@ -112,6 +154,16 @@ fn rename_ref(r: &mut StoredRef, old: &str, new: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::restore_at;
+
+    #[test]
+    fn a_renamed_name_is_followed_wherever_it_is_used() {
+        use super::rename_name_references;
+        let mut e = crate::parse("SUM(total)+total*2+OTHER").unwrap();
+        assert!(rename_name_references(&mut e, "Total", "Revenue"));
+        assert_eq!(e.to_string(), "SUM(Revenue)+Revenue*2+OTHER");
+        let mut untouched = crate::parse("SUM(A1:A3)+Totals").unwrap();
+        assert!(!rename_name_references(&mut untouched, "Total", "Revenue"));
+    }
     use crate::parse;
     use crate::print::print_at;
     use crate::stored::{ABSOLUTE, Origin};

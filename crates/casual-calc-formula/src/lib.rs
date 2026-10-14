@@ -37,7 +37,7 @@ pub use parse::parse;
 pub use print::print_at;
 pub use reference::{CellReference, MAX_COL, MAX_ROW, column_to_letters, parse_a1, parse_a1_axis};
 pub use refscan::{RefSpan, reference_spans};
-pub use rewrite::{rename_sheet_references, restore_at};
+pub use rewrite::{rename_name_references, rename_sheet_references, restore_at};
 
 #[cfg(test)]
 mod tests;

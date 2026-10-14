@@ -1791,6 +1791,7 @@ fn set_defined_names_is_self_inverse() {
         name: n.to_owned(),
         sheet: None,
         formula: parse(f).unwrap(),
+        comment: None,
     };
 
     // Define "Total" over A1:A3.
@@ -1816,6 +1817,7 @@ fn defined_names_undo_redo_through_history() {
         name: n.to_owned(),
         sheet: None,
         formula: parse(f).unwrap(),
+        comment: None,
     };
 
     history
@@ -2540,6 +2542,7 @@ mod defined_names_shift {
             name: "Total".to_owned(),
             sheet: scoped.then_some(sheet),
             formula: parse(refers_to).expect("parses"),
+            comment: None,
         });
         wb
     }
@@ -3645,6 +3648,7 @@ fn a_defined_name_follows_a_moved_column() {
         name: "Rate".to_owned(),
         sheet: None,
         formula: parse("S!$B$1").unwrap(),
+        comment: None,
     });
     apply(
         &mut wb,
@@ -3726,6 +3730,7 @@ fn moving_columns_undoes_exactly() {
         name: "Rate".to_owned(),
         sheet: None,
         formula: parse("S!$B$1:$C$1").unwrap(),
+        comment: None,
     });
     let before = wb.clone();
 
@@ -3943,6 +3948,7 @@ fn moving_a_range_undoes_exactly() {
         name: "Rate".to_owned(),
         sheet: None,
         formula: parse("S!$A$1").unwrap(),
+        comment: None,
     });
     let before = wb.clone();
 

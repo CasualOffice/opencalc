@@ -448,6 +448,7 @@ fn feature_workbook() -> Workbook {
         name: "Values".to_owned(),
         sheet: None,
         formula: parse("Data!A2:A6").unwrap(),
+        comment: None,
     });
     wb
 }

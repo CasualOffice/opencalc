@@ -6927,10 +6927,7 @@ function registerShellCommands() {
   } });
   R("formulas.autosum", { label: "AutoSum", shortcut: "Alt+=", run: () => autoSum() });
   R("formulas.insert-function", { label: "Insert Function…", shortcut: "Shift+F3", run: () => insertFunctionDialog() });
-  R("formulas.define-name", { label: "Define Name…", run: () => {
-    const r = canvas.getBoundingClientRect();
-    openNameManager(r.left + 120, r.top + 90);
-  } });
+  R("formulas.define-name", { label: "Define Name…", run: () => openNameManager() });
   R("edit.replace", { label: "Replace…", shortcut: "Ctrl+H", run: () => openReplace() });
   R("edit.go-to", { label: "Go To…", shortcut: "Ctrl+G", run: () => goToDialog() });
   R("edit.go-to-special", { label: "Go To Special…", run: () => goToSpecialDialog() });
@@ -8620,7 +8617,7 @@ function wireEvents() {
       // by opening Find and tabbing across, which is not the shortcut.
       if (k === "h") { openReplace(); e.preventDefault(); return; }
       if (k === "g") { goToDialog(); e.preventDefault(); return; } // Go To dialog (XL-UX-019)
-      if (e.key === "F3") { const r = canvas.getBoundingClientRect(); openNameManager(r.left + 120, r.top + 90); e.preventDefault(); return; } // Name Manager
+      if (e.key === "F3") { openNameManager(); e.preventDefault(); return; } // Name Manager (XL-UX-021)
       if (k === "z" && !e.shiftKey) { doUndo(); e.preventDefault(); return; }
       if (k === "y" || (k === "z" && e.shiftKey)) { doRedo(); e.preventDefault(); return; }
       // The document's own format, not `.xlsx` regardless. `doSave` is the raw
@@ -10136,7 +10133,7 @@ function wireEvents() {
         // (`UX-DESK-01`). `openSettings()` is the one entry point and picks
         // its own presentation.
         ["Settings…", () => openSettings()],
-        ["Name manager…", () => openNameManager(160, 120)],
+        ["Name manager…", () => openNameManager()],
         "sep",
         // Excel's Formulas ▸ Calculation Options. A workbook saved with
         // calculation off opens that way, so the state has to be visible and
