@@ -5667,4 +5667,25 @@ fn an_unreadable_macros_part_is_retained_verbatim() {
     let written = write_workbook(&wb).unwrap();
     assert_eq!(xml_of(&written, "xl/jsaProject.bin"), "{not json");
     assert!(xml_of(&written, "xl/_rels/workbook.xml.rels").contains("jsaProject"));
+
+    // Macros written over it replace it whole: one relationship, one
+    // declaration, one part — not the retained copy beside the fresh one.
+    let mut edited = wb.clone();
+    edited.macros.macros.push(casual_calc_model::Macro {
+        guid: "g".into(),
+        name: "New".into(),
+        source: "1;".into(),
+        autostart: false,
+    });
+    let written = write_workbook(&edited).unwrap();
+    let rels = xml_of(&written, "xl/_rels/workbook.xml.rels");
+    assert_eq!(
+        rels.matches("jsaProject").count(),
+        2,
+        "one Type and one Target: {rels}"
+    );
+    let ct = xml_of(&written, "[Content_Types].xml");
+    assert_eq!(ct.matches("/xl/jsaProject.bin").count(), 1, "{ct}");
+    let back = import_package(written).unwrap().workbook;
+    assert_eq!(back.macros, edited.macros);
 }
