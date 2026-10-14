@@ -66,6 +66,7 @@ import {
   insertDeleteDialog,
   goToDialog,
   goToSpecialDialog,
+  goalSeekDialog,
   headerMenu,
   hyperlinkDialog,
   manageCfRules,
@@ -481,6 +482,7 @@ export {
   insertDeleteDialog,
   goToDialog,
   goToSpecialDialog,
+  goalSeekDialog,
   headerMenu,
   hyperlinkDialog,
   manageCfRules,
@@ -6929,6 +6931,7 @@ function registerShellCommands() {
   R("edit.replace", { label: "Replace…", shortcut: "Ctrl+H", run: () => openReplace() });
   R("edit.go-to", { label: "Go To…", shortcut: "Ctrl+G", run: () => goToDialog() });
   R("edit.go-to-special", { label: "Go To Special…", run: () => goToSpecialDialog() });
+  R("data.goal-seek", { label: "Goal Seek…", run: () => goalSeekDialog() }); // XL-FEAT-032
 }
 
 // ---- Insert Function / Function Arguments (Shift+F3, XL-UX-026/027) ---------

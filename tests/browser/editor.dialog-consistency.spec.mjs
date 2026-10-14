@@ -20,6 +20,7 @@ const DIALOGS = [
   "data.remove-duplicates", "help.about-opencalc", "edit.go-to", "edit.go-to-special", "tools.name-manager", "formulas.define-name", "format.protection.protect-this-sheet",
   // Find and Replace (XL-UX-024/025): modeless, but the same frame.
   "edit.find-replace", "edit.replace",
+  "data.goal-seek",
 ];
 const PANELS = ["data.data-validation", "file.page-setup", "insert.note", "file.version-history", "insert.pivottable"];
 

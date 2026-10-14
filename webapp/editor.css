@@ -2598,3 +2598,9 @@ html, .editor-body { overscroll-behavior: none; }
 .oc-fr-table tbody tr:hover { background: var(--oc-surface-color); }
 .oc-fr-table tbody tr.on { background: color-mix(in srgb, var(--oc-accent-color) 14%, transparent); }
 .oc-fr-count { margin-top: 6px; font-size: 12px; color: var(--oc-muted-text-color); }
+
+/* Goal Seek (XL-FEAT-032). */
+.oc-gs-form { display: grid; grid-template-columns: auto 1fr; gap: 8px 12px; align-items: center; margin: 0 0 6px; }
+.oc-gs-head { margin: 0 0 10px; }
+.oc-gs-status { display: grid; grid-template-columns: auto 1fr; gap: 4px 12px; }
+.oc-gs-num { font-family: var(--oc-mono-font-family); }

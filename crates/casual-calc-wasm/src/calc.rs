@@ -353,3 +353,76 @@ pub fn session_set_volatile(now: f64, seed: f64) {
 pub fn session_volatile_now() -> f64 {
     with_session(|s| s.workbook().volatile_now).unwrap_or(0.0)
 }
+
+/// Excel's Goal Seek (XL-FEAT-032): the number for the cell at
+/// `(change_row, change_col)` that makes the formula at `(set_row, set_col)`
+/// evaluate to `target`, both on `sheet`.
+///
+/// **Changes nothing.** Every trial runs on a scratch copy of the workbook, so
+/// the search makes no undo step and no collaboration operation; the editor
+/// commits `input` with one ordinary edit if the person keeps it. Returns JSON
+/// `{"found","input","inputText","value","display","iterations"}` — `display`
+/// is the target cell's value at `input` with the cell's number format, as
+/// Excel's Goal Seek Status shows it, and `inputText` is `input` written out
+/// in full for the edit. Errors carry Excel's message ("Cell must contain a
+/// formula.", "Cell must contain a value.").
+#[wasm_bindgen]
+pub fn session_goal_seek(
+    sheet: usize,
+    set_row: u32,
+    set_col: u32,
+    target: f64,
+    change_row: u32,
+    change_col: u32,
+) -> Result<String, JsError> {
+    if !target.is_finite() {
+        return Err(JsError::new("Invalid value."));
+    }
+    with_session(|s| {
+        let set_at = CellRef::new(set_row, set_col);
+        let r = s
+            .goal_seek(
+                sheet,
+                set_at,
+                target,
+                CellRef::new(change_row, change_col),
+                casual_calc_sdk::GoalSeekOptions::default(),
+            )
+            .map_err(|e| JsError::new(&e.to_string()))?;
+        let wb = s.workbook();
+        let style = wb
+            .sheets
+            .get(sheet)
+            .and_then(|sh| sh.cells.get(set_at))
+            .and_then(|c| c.style);
+        let display = if r.value.is_finite() {
+            display_text(
+                wb,
+                &Cell {
+                    value: CellValue::Number(r.value),
+                    style,
+                    ..Cell::default()
+                },
+            )
+        } else {
+            String::new()
+        };
+        let num = |x: f64| {
+            if x.is_finite() {
+                format!("{x}")
+            } else {
+                "null".to_owned()
+            }
+        };
+        Ok(format!(
+            "{{\"found\":{},\"input\":{},\"inputText\":{},\"value\":{},\"display\":{},\"iterations\":{}}}",
+            r.found,
+            num(r.input),
+            json_string(&format!("{}", r.input)),
+            num(r.value),
+            json_string(&display),
+            r.iterations
+        ))
+    })
+    .unwrap_or_else(|| Err(JsError::new("no session")))
+}

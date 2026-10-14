@@ -26,6 +26,7 @@
 pub mod conditional;
 mod eval;
 mod functions;
+pub mod goal_seek;
 mod graph;
 pub mod pivot;
 mod ranges;

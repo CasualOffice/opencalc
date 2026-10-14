@@ -135,6 +135,12 @@ export const TABS = [
         [S("data.data-validation", "checkmark", "Data Validation"), S("data.convert-text-to-numbers", "number_symbol", "Convert Text to Numbers")],
       ]),
     ] },
+    // Excel's Forecast group. What-If Analysis lists only what is built:
+    // Scenario Manager and Data Table are not, and are left out rather than
+    // drawn dead (XL-FEAT-032).
+    { label: "Forecast", fold: 1, icon: "data_line", items: [
+      L("data.goal-seek", "data_line", "What-If Analysis", { menu: ["data.goal-seek"] }),
+    ] },
     { label: "Outline", fold: 4, icon: "table_cells_merge", items: [
       L("data.group", "table_cells_merge", "Group", { menu: ["data.group.group-rows", "data.group.group-columns"] }),
       L("data.ungroup", "table_delete_row", "Ungroup", { menu: ["data.group.ungroup-rows", "data.group.ungroup-columns"] }),

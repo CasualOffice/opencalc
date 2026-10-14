@@ -2868,6 +2868,10 @@ fn recalc_plan(op: &Operation) -> RecalcPlan {
 pub mod views;
 
 mod entry;
+mod what_if;
+
+pub use casual_calc_eval::goal_seek::{GoalSeekOptions, GoalSeekResult};
+pub use what_if::GoalSeekError;
 
 use std::collections::{BTreeMap, BTreeSet};
 
