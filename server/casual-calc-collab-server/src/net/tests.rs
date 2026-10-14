@@ -657,6 +657,43 @@ async fn a_mismatched_protocol_is_told_so_at_once() {
     );
 }
 
+/// **A protocol-8 peer is refused at the handshake, not on its first edit**
+/// (`COL-65`).
+///
+/// Protocol 8's `DefinedName` had no `comment` (nor, after `XL-FEAT-124`, the
+/// rest of `<definedName>`'s attributes), and the struct denies unknown fields.
+/// Admitted, such a peer joins happily and then fails to parse the first
+/// `SetDefinedNames` carrying a commented name — mid-session, with edits in
+/// flight. Refused here, it is told plainly before anything is at stake.
+#[tokio::test]
+async fn a_peer_from_before_defined_name_attributes_is_refused_at_the_handshake() {
+    const BEFORE_NAME_ATTRIBUTES: u32 = 8;
+    let addr = start(Arc::new(Canned(package()))).await;
+    let mut socket = connect(addr).await;
+    say(
+        &mut socket,
+        &ClientMessage::Join {
+            protocol: BEFORE_NAME_ATTRIBUTES,
+            token: token(&claims("Ada", Access::Edit)),
+            resume: None,
+        },
+    )
+    .await;
+    let answer = hear(&mut socket).await;
+    let Some(ServerMessage::Stopped {
+        reason: Refusal::ProtocolVersion { server, client },
+        ..
+    }) = answer
+    else {
+        panic!(
+            "a protocol-{BEFORE_NAME_ATTRIBUTES} peer cannot read a commented defined \
+             name and must be stopped at the door; got {answer:?}"
+        );
+    };
+    assert_eq!(server, PROTOCOL_VERSION);
+    assert_eq!(client, BEFORE_NAME_ATTRIBUTES);
+}
+
 // --- Permissions are enforced at the socket --------------------------------
 
 #[tokio::test]

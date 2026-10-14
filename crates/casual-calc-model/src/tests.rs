@@ -1299,3 +1299,51 @@ mod string_provenance {
         assert_eq!(back.strings.preserved_len(), 3);
     }
 }
+
+/// The persisted side of `COL-65`: the collaboration server stores a document
+/// as this snapshot, so a server one release behind reads a newer server's
+/// snapshot during a rolling deploy.
+///
+/// ADR-010's answer, pinned for defined names: a field the reader does not
+/// know is **refused**, not skipped. Skipping would load the name without its
+/// comment and write the next snapshot without it — the user's note gone with
+/// no error anywhere. A refused snapshot is a loud failure to open, which is
+/// recoverable; a quietly thinner one is not. And the field is additive, so a
+/// snapshot without it still loads and re-serializes byte-identically —
+/// `SCHEMA_VERSION` does not move.
+#[test]
+fn a_defined_name_field_an_older_reader_does_not_know_is_refused_not_dropped() {
+    use casual_calc_formula::parse;
+
+    let mut wb = Workbook::new(wb_id());
+    wb.sheets
+        .push(Sheet::new(SheetId(Id::from_parts(2, 1)), "S"));
+    wb.defined_names.push(crate::DefinedName {
+        name: "Rate".to_owned(),
+        sheet: None,
+        formula: parse("S!$A$1").unwrap(),
+        comment: Some("VAT".to_owned()),
+    });
+    let json = String::from_utf8(wb.to_snapshot().unwrap()).unwrap();
+
+    // Round trip: the comment is persisted and read back.
+    let back = Workbook::from_snapshot(json.as_bytes()).expect("loads");
+    assert_eq!(back.defined_names, wb.defined_names);
+
+    // A field from a newer writer: refused, never silently dropped.
+    let newer = json.replace(r#""comment":"VAT""#, r#""comment":"VAT","fromTheFuture":1"#);
+    assert_ne!(newer, json, "the substitution found nothing to do");
+    let refused = Workbook::from_snapshot(newer.as_bytes())
+        .expect_err("a defined-name field this reader does not know was dropped, not refused");
+    assert!(refused.to_string().contains("fromTheFuture"), "{refused}");
+
+    // And a name written before the field existed loads and writes the same bytes.
+    wb.defined_names[0].comment = None;
+    let older = wb.to_snapshot().unwrap();
+    assert!(!String::from_utf8_lossy(&older).contains("comment"));
+    let reread = Workbook::from_snapshot(&older)
+        .unwrap()
+        .to_snapshot()
+        .unwrap();
+    assert_eq!(reread, older);
+}
