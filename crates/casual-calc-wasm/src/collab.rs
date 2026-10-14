@@ -345,6 +345,29 @@ pub(crate) fn with_session_and_collab<T>(
     })
 }
 
+/// A mark for [`session_group_undo_since`], taken before the edits of one
+/// gesture; `-1` with no session.
+#[wasm_bindgen]
+#[must_use]
+pub fn session_undo_mark() -> f64 {
+    with_session(|s| s.undo_mark() as f64).unwrap_or(-1.0)
+}
+
+/// Make everything applied since [`session_undo_mark`] one undo step — the
+/// value typed and the column widening it caused (`XL-UX-036`). Returns
+/// whether the history was regrouped.
+#[wasm_bindgen]
+pub fn session_group_undo_since(mark: f64) -> bool {
+    if mark.is_nan() || mark < 0.0 {
+        return false;
+    }
+    SESSION.with(|cell| {
+        cell.borrow_mut()
+            .as_mut()
+            .is_some_and(|s| s.group_undo_since(mark as u64))
+    })
+}
+
 /// Undo the last edit.
 #[wasm_bindgen]
 pub fn session_undo() -> Result<(), JsError> {

@@ -91,6 +91,7 @@ import {
   t,
   updateRefSpans,
   updateSignatureTip,
+  textWidth,
   usedBounds,
   wasm,
   wrap,
@@ -579,6 +580,7 @@ export function commit(value, advance, source = "user") {
     }
   }
   try {
+    const mark = undoMark();
     wasm.session_set_cell(state.sheet, state.sel.row, state.sel.col, value);
     // A value with a hard line break is only legible with wrap on, so entering
     // one turns wrap on for that cell — as Excel does for Alt+Enter.
@@ -596,6 +598,9 @@ export function commit(value, advance, source = "user") {
     // common answer is "that cell borders no table". Reporting that would put
     // an error on the status bar for an edit that succeeded.
     try { wasm.session_table_autoexpand(state.sheet, state.sel.row, state.sel.col); } catch {}
+    // A number or date too wide for a default-width column widens it, in the
+    // same undo step (`XL-UX-036`).
+    widenForEntry(mark, [{ r0: state.sel.row, c0: state.sel.col, r1: state.sel.row, c1: state.sel.col }]);
     if (advisory) statusError(advisory);
     else status.textContent = "ok";
   } catch (e) {
@@ -760,6 +765,68 @@ export function autofitColumn(col) {
   try { wasm.session_set_col_width(state.sheet, col, Math.ceil(maxw) + 14); }
   catch (e) { statusError(errText(e)); }
   draw();
+}
+
+/// Columns this editor widened on entry, as `"sheet:col"` → the width it set.
+/// Such a column is still Excel's to widen (a later, longer entry grows it
+/// again); any other explicit width is the user's and is left alone. Checked
+/// against the current width, so a column resized since — by hand, by a
+/// co-editor, by an undo — drops out.
+const entryWidened = new Map();
+
+/// Excel's widen-on-entry (`XL-UX-036`).
+///
+/// After an entry or a number-format change, a number (dates and times are
+/// numbers) that no longer fits its column would paint as `#####`. Excel grows
+/// the column instead — but only a column whose width the user never set, and
+/// never for text, which spills. The fit test is the renderer's own (`tw >
+/// w - 8`, with `cellFont` and the shared width cache) and the new width is
+/// autofit's (`text + 14`), so what is measured is what is painted.
+///
+/// The width goes through `session_set_col_width`, the call a manual resize
+/// makes, so collaborators receive the same `SetColumnWidth` either way. Then
+/// `session_group_undo_since(mark)` folds it into the edit that caused it: one
+/// Ctrl+Z takes back the value and the width together. Never narrows.
+export function widenForEntry(mark, ranges) {
+  if (!wasm) return false;
+  const sheet = state.sheet;
+  const b = usedBounds();
+  let merges = null;
+  let widened = false;
+  for (const rg of ranges) {
+    const r1 = Math.min(rg.r1, b.rows - 1);
+    const c1 = Math.min(rg.c1, b.cols - 1);
+    if (r1 < rg.r0) continue;
+    for (let c = rg.c0; c <= c1; c += 1) {
+      const key = sheet + ":" + c;
+      const cur = wasm.session_col_width(sheet, c);
+      if (wasm.session_col_has_width(sheet, c) && entryWidened.get(key) !== cur) continue;
+      let need = 0;
+      for (const it of JSON.parse(wasm.session_cells(sheet, rg.r0, c, r1, c))) {
+        if (!it.n || !it.t || it.w || it.rot || it.shrink) continue;
+        // A cell merged across columns does not size one of them (autofit's rule).
+        merges ??= JSON.parse(wasm.session_merges(sheet));
+        if (merges.some((m) => it.r >= m.r0 && it.r <= m.r1 && c >= m.c0 && c <= m.c1 && m.c1 > m.c0)) continue;
+        const tw = textWidth(cellFont(it), String(it.t));
+        if (tw > cur - 8) need = Math.max(need, Math.ceil(tw) + 14);
+      }
+      if (need <= cur) continue;
+      // A protected sheet refuses the width; the value still stands, and shows
+      // ##### as it would in Excel under the same protection.
+      try { wasm.session_set_col_width(sheet, c, need); } catch { continue; }
+      entryWidened.set(key, wasm.session_col_width(sheet, c));
+      widened = true;
+    }
+  }
+  if (widened && mark >= 0) {
+    try { wasm.session_group_undo_since(mark); } catch {}
+  }
+  return widened;
+}
+
+/// A mark for `widenForEntry`, taken before the edit it may widen for.
+export function undoMark() {
+  try { return wasm.session_undo_mark(); } catch { return -1; }
 }
 
 export function autofitRow(row) {

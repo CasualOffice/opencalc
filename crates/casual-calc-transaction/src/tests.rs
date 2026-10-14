@@ -4533,3 +4533,49 @@ fn undoing_a_saved_edit_is_visible_to_a_host_watching_edits_applied() {
          doc comment says cannot happen"
     );
 }
+
+/// `XL-UX-036`: a value and the column widening it caused are one undo step,
+/// and a mark from before an undo cannot group anything.
+#[test]
+fn group_since_folds_a_gesture_into_one_undo_step() {
+    let mut wb = workbook();
+    let mut history = History::new();
+    let at = CellRef::new(1, 1);
+    let set = |v: f64| Operation::SetValue {
+        sheet: 0,
+        at,
+        value: CellValue::Number(v),
+    };
+    let widen = |w: i64| Operation::SetColumnWidth {
+        sheet: 0,
+        col: 1,
+        width: Some(w),
+    };
+    history.apply(&mut wb, set(1.0)).unwrap();
+
+    let mark = history.undo_mark();
+    history.apply(&mut wb, set(2.0)).unwrap();
+    history.apply(&mut wb, widen(2400)).unwrap();
+    assert!(history.group_since(mark));
+
+    history.undo(&mut wb).unwrap();
+    assert_eq!(value_at(&wb, at), CellValue::Number(1.0));
+    assert!(!wb.sheets[0].columns.sizes.contains_key(&1));
+    // One more undo reaches the edit before the gesture, not half of it.
+    history.redo(&mut wb).unwrap();
+    assert_eq!(value_at(&wb, at), CellValue::Number(2.0));
+    assert_eq!(wb.sheets[0].columns.sizes.get(&1), Some(&2400));
+
+    // A mark taken before an undo no longer describes the top of the stack.
+    let stale = history.undo_mark();
+    history.undo(&mut wb).unwrap();
+    history.apply(&mut wb, set(3.0)).unwrap();
+    history.apply(&mut wb, widen(3000)).unwrap();
+    assert!(!history.group_since(stale));
+    history.undo(&mut wb).unwrap();
+    assert_eq!(
+        value_at(&wb, at),
+        CellValue::Number(3.0),
+        "ungrouped: width only"
+    );
+}

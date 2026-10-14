@@ -299,6 +299,8 @@ import {
   autofillToNeighbour,
   autofitColumn,
   autofitColumnForTest,
+  undoMark,
+  widenForEntry,
   autofitRow,
   autofitRowForTest,
   callAtCaret,
@@ -709,6 +711,8 @@ export {
   autofillToNeighbour,
   autofitColumn,
   autofitColumnForTest,
+  undoMark,
+  widenForEntry,
   autofitRow,
   autofitRowForTest,
   callAtCaret,
@@ -8559,7 +8563,13 @@ function wireEvents() {
         const text = e.shiftKey
           ? `${now.getHours()}:${String(now.getMinutes()).padStart(2, "0")}`
           : `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
-        tryEdit(() => wasm.session_set_cell(state.sheet, state.sel.row, state.sel.col, text));
+        // Excel widens a default-width column for the stamp rather than
+        // showing ##### (`XL-UX-036`), in the same undo step.
+        tryEdit(() => {
+          const mark = undoMark();
+          wasm.session_set_cell(state.sheet, state.sel.row, state.sel.col, text);
+          widenForEntry(mark, [{ r0: state.sel.row, c0: state.sel.col, r1: state.sel.row, c1: state.sel.col }]);
+        });
         e.preventDefault(); return;
       }
       // Ctrl+1 — Format Cells, the shortcut every spreadsheet user already has
