@@ -569,3 +569,38 @@ ROWS(FILTER(C1:C10,C1:C10>5))  @since-lo: 24.8
 NETWORKDAYS.INTL(DATE(2024,1,1),DATE(2024,1,31))
 WORKDAY.INTL(DATE(2024,1,1),10)
 ISO.CEILING(4.3,2)
+
+# XL-FEAT-131: a function whose parameter is one value, handed a range or an
+# array, is evaluated per element. Wrapped in SUMPRODUCT (which takes arrays in
+# both engines) so each line is one comparable number.
+SUMPRODUCT(MOD(C1:C10,4))
+SUMPRODUCT(ROUND(G1:G5,0))
+SUMPRODUCT(ABS(G1:G5))
+SUMPRODUCT(LEN(E1:E5))
+SUMPRODUCT(--(UPPER(E1:E5)="BETA"))
+SUMPRODUCT(--ISNUMBER(SEARCH("a",E1:E5)))
+SUMPRODUCT(DATE(2024,C1:C3,1))
+SUMPRODUCT(YEAR(C1:C3*1000))
+SUMPRODUCT(1/COUNTIF(C1:C10,C1:C10))
+SUMPRODUCT(--ISBLANK(H1:H5))
+SUMPRODUCT(LEN(CONCATENATE(E1:E3,"!")))
+# Broadcasting: a column against a row is the outer product; where a shorter
+# array runs out the element is #N/A.
+SUMPRODUCT(MOD(C3:C5,TRANSPOSE(C2:C3)))
+SUMPRODUCT(C1:C2+TRANSPOSE(D1:D3))
+SUMPRODUCT(ISNA(C1:C3*C1:C2)*1)
+SUMPRODUCT(ISNA(POWER(C1:C3,C1:C2))*1)
+SUMPRODUCT(ISNA(IF(F1:F3,C1:C2,0))*1)
+SUMPRODUCT(C1:C3*C1:C2)  @differs: the third element is #N/A in both engines (the ISNA line above agrees), and Excel's SUMPRODUCT propagates it; LibreOffice's skips it and answers 5
+# AND/OR skip text and blanks inside a reference; text typed as an argument
+# is #VALUE!, and a range with no logical at all is #VALUE!.
+AND(E1:F1)
+OR(E1:E5,F2)
+AND(C1:C3,E1:E5)
+AND(H1:H5,TRUE)
+AND(E1:E5)
+OR(H1:H5)
+AND("abc",TRUE)
+OR("abc",TRUE)
+OR(C1:C10>5)  @differs: outside an array formula LibreOffice implicitly intersects the comparison (#VALUE! off rows 1-10, the cell rows agree); dynamic-array Excel passes the whole array, as Microsoft documents OR over an array
+AND(C1:C10>0)  @differs: outside an array formula LibreOffice implicitly intersects the comparison (#VALUE! off rows 1-10, the cell rows agree); dynamic-array Excel passes the whole array, as Microsoft documents OR over an array
