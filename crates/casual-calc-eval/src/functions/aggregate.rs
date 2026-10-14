@@ -611,9 +611,10 @@ fn aggregate_reduce(code: u8, values: &[Value]) -> Value {
     }
 }
 
-/// `QUARTILE`'s `quart` as the fraction it names, or `None` outside 0..=4.
+/// `QUARTILE`'s `quart` as the fraction it names, or `None` outside 0..=4
+/// (truncated after the range check: 4.5 is out of range, not 4).
 pub(crate) fn quartile_k(quart: f64) -> Option<f64> {
-    (0.0..5.0).contains(&quart).then(|| quart.trunc() / 4.0)
+    (0.0..=4.0).contains(&quart).then(|| quart.trunc() / 4.0)
 }
 
 /// `PERCENTILE.INC` over sorted data, or `None` for no data or `k` outside

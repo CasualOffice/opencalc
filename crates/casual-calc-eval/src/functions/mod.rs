@@ -99,6 +99,10 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("BESSELJ", "BESSELJ(x, n)"),
     ("BESSELK", "BESSELK(x, n)"),
     ("BESSELY", "BESSELY(x, n)"),
+    (
+        "BETA.DIST",
+        "BETA.DIST(x, alpha, beta, cumulative, [A], [B])",
+    ),
     ("BETA.INV", "BETA.INV(probability, alpha, beta, [A], [B])"),
     ("BETADIST", "BETADIST(x, alpha, beta, [A], [B])"),
     ("BETAINV", "BETAINV(probability, alpha, beta, [A], [B])"),
@@ -109,6 +113,11 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
         "BINOM.DIST",
         "BINOM.DIST(number_s, trials, probability_s, cumulative)",
     ),
+    (
+        "BINOM.DIST.RANGE",
+        "BINOM.DIST.RANGE(trials, probability_s, number_s, [number_s2])",
+    ),
+    ("BINOM.INV", "BINOM.INV(trials, probability_s, alpha)"),
     (
         "BINOMDIST",
         "BINOMDIST(number_s, trials, probability_s, cumulative)",
@@ -130,7 +139,9 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("CHAR", "CHAR(number)"),
     ("CHIDIST", "CHIDIST(x, degrees_freedom)"),
     ("CHIINV", "CHIINV(probability, degrees_freedom)"),
+    ("CHISQ.DIST", "CHISQ.DIST(x, deg_freedom, cumulative)"),
     ("CHISQ.DIST.RT", "CHISQ.DIST.RT(x, degrees_freedom)"),
+    ("CHISQ.INV", "CHISQ.INV(probability, deg_freedom)"),
     ("CHISQ.INV.RT", "CHISQ.INV.RT(probability, degrees_freedom)"),
     ("CHISQ.TEST", "CHISQ.TEST(actual, expected)"),
     ("CHITEST", "CHITEST(actual, expected)"),
@@ -149,6 +160,7 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
         "CONFIDENCE.NORM",
         "CONFIDENCE.NORM(alpha, standard_dev, size)",
     ),
+    ("CONFIDENCE.T", "CONFIDENCE.T(alpha, standard_dev, size)"),
     ("CONVERT", "CONVERT(number, from_unit, to_unit)"),
     ("CORREL", "CORREL(array1, array2)"),
     ("COS", "COS(number)"),
@@ -186,6 +198,7 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ),
     ("COVAR", "COVAR(array1, array2)"),
     ("COVARIANCE.P", "COVARIANCE.P(array1, array2)"),
+    ("COVARIANCE.S", "COVARIANCE.S(array1, array2)"),
     ("CRITBINOM", "CRITBINOM(trials, probability_s, alpha)"),
     ("CSC", "CSC(number)"),
     ("CSCH", "CSCH(number)"),
@@ -233,7 +246,9 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("EFFECT", "EFFECT(nominal_rate, npery)"),
     ("EOMONTH", "EOMONTH(start_date, months)"),
     ("ERF", "ERF(lower, [upper])"),
+    ("ERF.PRECISE", "ERF.PRECISE(x)"),
     ("ERFC", "ERFC(x)"),
+    ("ERFC.PRECISE", "ERFC.PRECISE(x)"),
     ("ERROR.TYPE", "ERROR.TYPE(error)"),
     ("EVEN", "EVEN(number)"),
     ("EXACT", "EXACT(text1, text2)"),
@@ -241,9 +256,14 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("EXPON.DIST", "EXPON.DIST(x, lambda, cumulative)"),
     ("EXPONDIST", "EXPONDIST(x, lambda, cumulative)"),
     (
+        "F.DIST",
+        "F.DIST(x, deg_freedom1, deg_freedom2, cumulative)",
+    ),
+    (
         "F.DIST.RT",
         "F.DIST.RT(x, degrees_freedom1, degrees_freedom2)",
     ),
+    ("F.INV", "F.INV(probability, deg_freedom1, deg_freedom2)"),
     (
         "F.INV.RT",
         "F.INV.RT(probability, deg_freedom1, deg_freedom2)",
@@ -264,16 +284,23 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("FLOOR.MATH", "FLOOR.MATH(number, [significance], [mode])"),
     ("FLOOR.PRECISE", "FLOOR.PRECISE(number, [significance])"),
     ("FORECAST", "FORECAST(x, known_y, known_x)"),
+    (
+        "FORECAST.LINEAR",
+        "FORECAST.LINEAR(x, known_y's, known_x's)",
+    ),
     ("FORMULATEXT", "FORMULATEXT(reference)"),
     ("FREQUENCY", "FREQUENCY(data_array, bins_array)"),
     ("FTEST", "FTEST(array1, array2)"),
     ("FV", "FV(rate, nper, pmt, [pv], [type])"),
     ("FVSCHEDULE", "FVSCHEDULE(principal, schedule)"),
+    ("GAMMA", "GAMMA(number)"),
     ("GAMMA.DIST", "GAMMA.DIST(x, alpha, beta, cumulative)"),
     ("GAMMA.INV", "GAMMA.INV(probability, alpha, beta)"),
     ("GAMMADIST", "GAMMADIST(x, alpha, beta, cumulative)"),
     ("GAMMAINV", "GAMMAINV(probability, alpha, beta)"),
     ("GAMMALN", "GAMMALN(x)"),
+    ("GAMMALN.PRECISE", "GAMMALN.PRECISE(x)"),
+    ("GAUSS", "GAUSS(z)"),
     ("GCD", "GCD(number1, …)"),
     ("GEOMEAN", "GEOMEAN(number1, …)"),
     ("GESTEP", "GESTEP(number, [step])"),
@@ -289,6 +316,10 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("HLOOKUP", "HLOOKUP(lookup, table, row, [exact])"),
     ("HOUR", "HOUR(serial_number)"),
     ("HYPERLINK", "HYPERLINK(link, [friendly])"),
+    (
+        "HYPGEOM.DIST",
+        "HYPGEOM.DIST(sample_s, number_sample, population_s, number_pop, cumulative)",
+    ),
     (
         "HYPGEOMDIST",
         "HYPGEOMDIST(sample_s, number_sample, population_s, number_pop)",
@@ -394,12 +425,17 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("MMULT", "MMULT(array1, array2)"),
     ("MOD", "MOD(number, divisor)"),
     ("MODE", "MODE(number1, …)"),
+    ("MODE.MULT", "MODE.MULT(number1, …)"),
     ("MODE.SNGL", "MODE.SNGL(number1, …)"),
     ("MONTH", "MONTH(serial_number)"),
     ("MROUND", "MROUND(number, multiple)"),
     ("MULTINOMIAL", "MULTINOMIAL(number1, …)"),
     ("N", "N(value)"),
     ("NA", "NA()"),
+    (
+        "NEGBINOM.DIST",
+        "NEGBINOM.DIST(number_f, number_s, probability_s, cumulative)",
+    ),
     (
         "NEGBINOMDIST",
         "NEGBINOMDIST(number_f, number_s, probability_s)",
@@ -451,14 +487,20 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("PDURATION", "PDURATION(rate, pv, fv)"),
     ("PEARSON", "PEARSON(array1, array2)"),
     ("PERCENTILE", "PERCENTILE(array, k)"),
+    ("PERCENTILE.EXC", "PERCENTILE.EXC(array, k)"),
     ("PERCENTILE.INC", "PERCENTILE.INC(array, k)"),
     ("PERCENTRANK", "PERCENTRANK(array, x, [significance])"),
+    (
+        "PERCENTRANK.EXC",
+        "PERCENTRANK.EXC(array, x, [significance])",
+    ),
     (
         "PERCENTRANK.INC",
         "PERCENTRANK.INC(array, x, [significance])",
     ),
     ("PERMUT", "PERMUT(n, k)"),
     ("PERMUTATIONA", "PERMUTATIONA(n, k)"),
+    ("PHI", "PHI(x)"),
     ("PI", "PI()"),
     ("PMT", "PMT(rate, nper, pv, [fv], [type])"),
     ("POISSON", "POISSON(x, mean, cumulative)"),
@@ -482,12 +524,14 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("PROPER", "PROPER(text)"),
     ("PV", "PV(rate, nper, pmt, [fv], [type])"),
     ("QUARTILE", "QUARTILE(array, quart)"),
+    ("QUARTILE.EXC", "QUARTILE.EXC(array, quart)"),
     ("QUARTILE.INC", "QUARTILE.INC(array, quart)"),
     ("QUOTIENT", "QUOTIENT(numerator, denominator)"),
     ("RADIANS", "RADIANS(angle)"),
     ("RAND", "RAND()"),
     ("RANDBETWEEN", "RANDBETWEEN(bottom, top)"),
     ("RANK", "RANK(number, ref, [order])"),
+    ("RANK.AVG", "RANK.AVG(number, ref, [order])"),
     ("RANK.EQ", "RANK.EQ(number, ref, [order])"),
     ("RATE", "RATE(nper, pmt, pv, [fv], [type], [guess])"),
     (
@@ -525,6 +569,7 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("SIN", "SIN(number)"),
     ("SINH", "SINH(number)"),
     ("SKEW", "SKEW(number1, …)"),
+    ("SKEW.P", "SKEW.P(number1, …)"),
     ("SLN", "SLN(cost, salvage, life)"),
     ("SLOPE", "SLOPE(known_y, known_x)"),
     ("SMALL", "SMALL(array, k)"),
@@ -556,6 +601,10 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ),
     ("SYD", "SYD(cost, salvage, life, per)"),
     ("T", "T(value)"),
+    ("T.DIST", "T.DIST(x, deg_freedom, cumulative)"),
+    ("T.DIST.2T", "T.DIST.2T(x, deg_freedom)"),
+    ("T.DIST.RT", "T.DIST.RT(x, deg_freedom)"),
+    ("T.INV", "T.INV(probability, deg_freedom)"),
     ("T.INV.2T", "T.INV.2T(probability, degrees_freedom)"),
     ("T.TEST", "T.TEST(array1, array2, tails, type)"),
     ("TAN", "TAN(number)"),
@@ -888,7 +937,7 @@ pub fn call_function(ev: &mut Evaluator<'_>, sheet: usize, name: &str, args: &[E
             slope(ys, xs).map(|m| mean(ys) - m * mean(xs))
         }),
         "STEYX" => paired(ev, sheet, args, steyx),
-        "FORECAST" => eval_forecast(ev, sheet, args),
+        "FORECAST" | "FORECAST.LINEAR" => eval_forecast(ev, sheet, args),
         // Distributions and transforms.
         "FISHER" => checked(ev, sheet, args, |x| {
             if x <= -1.0 || x >= 1.0 {
@@ -901,7 +950,7 @@ pub fn call_function(ev: &mut Evaluator<'_>, sheet: usize, name: &str, args: &[E
             let e = (2.0 * y).exp();
             (e - 1.0) / (e + 1.0)
         }),
-        "GAMMALN" => checked(ev, sheet, args, |x| {
+        "GAMMALN" | "GAMMALN.PRECISE" => checked(ev, sheet, args, |x| {
             if x <= 0.0 {
                 Value::Error(ErrorValue::Num)
             } else {
@@ -943,7 +992,31 @@ pub fn call_function(ev: &mut Evaluator<'_>, sheet: usize, name: &str, args: &[E
         "WEIBULL" | "WEIBULL.DIST" => eval_weibull(ev, sheet, args),
         "NEGBINOMDIST" => eval_negbinomdist(ev, sheet, args),
         "HYPGEOMDIST" => eval_hypgeomdist(ev, sheet, args),
-        "CRITBINOM" => eval_critbinom(ev, sheet, args),
+        "CRITBINOM" | "BINOM.INV" => eval_critbinom(ev, sheet, args),
+        "BINOM.DIST.RANGE" => eval_binom_dist_range(ev, sheet, args),
+        "HYPGEOM.DIST" => eval_hypgeom_dist(ev, sheet, args),
+        "NEGBINOM.DIST" => eval_negbinom_dist(ev, sheet, args),
+        "CONFIDENCE.T" => eval_confidence_t(ev, sheet, args),
+        "PERCENTILE.EXC" => eval_percentile_exc(ev, sheet, args, false),
+        "QUARTILE.EXC" => eval_percentile_exc(ev, sheet, args, true),
+        "PERCENTRANK.EXC" => eval_percentrank_exc(ev, sheet, args),
+        "RANK.AVG" => eval_rank_avg(ev, sheet, args),
+        "MODE.MULT" => eval_mode_mult(ev, sheet, args),
+        "SKEW.P" => eval_skew_p(ev, sheet, args),
+        // The sample covariance: n - 1, where COVARIANCE.P divides by n.
+        "COVARIANCE.S" => paired(ev, sheet, args, |xs, ys| {
+            if xs.len() < 2 {
+                return None;
+            }
+            let (mx, my) = (mean(xs), mean(ys));
+            Some(
+                xs.iter()
+                    .zip(ys)
+                    .map(|(x, y)| (x - mx) * (y - my))
+                    .sum::<f64>()
+                    / (xs.len() - 1) as f64,
+            )
+        }),
         "CONFIDENCE" | "CONFIDENCE.NORM" => eval_confidence(ev, sheet, args),
         // Base conversion. Each pair is (from, to) radix; the negative handling
         // lives in the helpers because it is the part that differs.
@@ -968,7 +1041,15 @@ pub fn call_function(ev: &mut Evaluator<'_>, sheet: usize, name: &str, args: &[E
         "GESTEP" => eval_delta(ev, sheet, args, false),
         "GETPIVOTDATA" => eval_getpivotdata(ev, sheet, args),
         "ERF" => eval_erf(ev, sheet, args),
-        "ERFC" => scalar(ev, sheet, args, |x| 1.0 - erf(x)),
+        "ERFC" | "ERFC.PRECISE" => scalar(ev, sheet, args, erfc),
+        // `ERF` with one argument; the `.PRECISE` name exists because the
+        // two-argument form could not be made to accept a negative bound.
+        "ERF.PRECISE" => checked(ev, sheet, args, |x| Value::Number(erf(x))),
+        "GAUSS" => scalar(ev, sheet, args, |z| 0.5 * erf(z / std::f64::consts::SQRT_2)),
+        "PHI" => scalar(ev, sheet, args, |x| {
+            (-x * x / 2.0).exp() / (2.0 * std::f64::consts::PI).sqrt()
+        }),
+        "GAMMA" => checked(ev, sheet, args, gamma_value),
         // The annuity family. All five are the same equation rearranged, so
         // they share `annuity_factor` rather than repeating the algebra.
         "PV" => eval_pv(ev, sheet, args),
@@ -1066,6 +1147,16 @@ pub fn call_function(ev: &mut Evaluator<'_>, sheet: usize, name: &str, args: &[E
         "CHIINV" | "CHISQ.INV.RT" => eval_chiinv(ev, sheet, args),
         "TDIST" => eval_tdist(ev, sheet, args),
         "TINV" | "T.INV.2T" => eval_tinv(ev, sheet, args),
+        // The 2010 forms are left-tailed with a density option; not aliases.
+        "T.DIST" => eval_t_dist(ev, sheet, args),
+        "T.DIST.2T" => eval_t_dist_tail(ev, sheet, args, true),
+        "T.DIST.RT" => eval_t_dist_tail(ev, sheet, args, false),
+        "T.INV" => eval_t_inv(ev, sheet, args),
+        "F.DIST" => eval_f_dist(ev, sheet, args),
+        "F.INV" => eval_f_inv(ev, sheet, args),
+        "CHISQ.DIST" => eval_chisq_dist(ev, sheet, args),
+        "CHISQ.INV" => eval_chisq_inv(ev, sheet, args),
+        "BETA.DIST" => eval_beta_dist(ev, sheet, args),
         "FDIST" | "F.DIST.RT" => eval_fdist(ev, sheet, args),
         "FINV" | "F.INV.RT" => eval_finv(ev, sheet, args),
         "GAMMADIST" | "GAMMA.DIST" => eval_gammadist(ev, sheet, args),
