@@ -407,3 +407,36 @@
 }
 .oc-chrome-ribbon .rb-btn.rb-swatch[data-cmd="toolbar.fontcolor"]::after { background: var(--rb-swatch, var(--oc-text-color)); }
 .oc-chrome-ribbon .rb-btn.rb-swatch[data-cmd="toolbar.border"]::after { background: var(--rb-swatch, currentColor); }
+
+/* ── Host chrome regions (`<opencalc-sheet>.chrome()`, the page's `?hide=`) ──
+ *
+ * The region names predate this shell and hosts already use them, so they are
+ * mapped onto it rather than renamed (`embed.js` documents the table): the
+ * menu bar is the tab row, the toolbar is the band. Written as a compound on
+ * the element that carries both classes — `<html>` on the page, the embed's
+ * shell element in a shadow root — so the two mounts read the same rule.
+ *
+ * The roster is not chrome (`UX-CHROME-01`): with the tab row hidden the row
+ * keeps it alone, and collapses to nothing when there is nobody to show. */
+.oc-chrome-ribbon.oc-hide-toolbar .oc-ribbon .rb-band,
+.oc-chrome-ribbon.oc-hide-toolbar .oc-ribbon.rb-peek .rb-band,
+.oc-chrome-ribbon.oc-hide-toolbar .rb-mobile { display: none; }
+.oc-chrome-ribbon.oc-hide-menubar .rb-tabs > :not(.presence),
+.oc-chrome-ribbon.oc-hide-menubar .rb-mpick,
+.oc-chrome-ribbon.oc-hide-menubar .rb-mchips { display: none; }
+.oc-chrome-ribbon.oc-hide-menubar .rb-tabs { height: auto; }
+
+/* ── Embedded: the shell is the element's, not the window's ──────────────
+ *
+ * `oc-phone` is set from the element's own width when embedded, so the rules
+ * the page takes from `max-width: 600px` are restated on the class. On the
+ * page the class and the query agree, so this changes nothing there. */
+.oc-phone .rb-search, .oc-phone .rb-share span { display: none; }
+.oc-phone .rb-backstage { flex-direction: column; }
+.oc-phone .rb-rail { width: auto; flex-direction: row; overflow-x: auto; padding: 8px; border-right: 0; border-bottom: 1px solid var(--oc-border-color); }
+.oc-phone .rb-back { margin: 0 4px 0 0; flex: none; }
+.oc-phone .rb-rail-item { flex: none; }
+.oc-phone .rb-pane { padding: 20px 16px; }
+/* The File page covers the editor, not the host's page around it. */
+:host .editor-body.oc-chrome-ribbon { position: relative; }
+:host .rb-backstage { position: absolute; }
