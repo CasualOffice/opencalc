@@ -871,6 +871,12 @@ pre.code {
 .motion .final .bigmark .m-ln { stroke-dasharray: 1; stroke-dashoffset: 1; transition: stroke-dashoffset 1s var(--ease-io) .2s; }
 .motion .final .in .bigmark .m-ln, .motion .final .bigmark.in .m-ln { stroke-dashoffset: 0; }
 
+/* Paper never scrolls, so nothing on it may wait for a reveal. */
+@media print {
+  .motion .rv, .motion .seq > *, .motion .pipe .node, .motion .il-wrap .pop, .motion .story * { opacity: 1 !important; transform: none !important; transition: none !important; }
+  .site-header, .menu, .story-bar, .window { display: none !important; }
+}
+
 /* Belt and braces: whatever a rule above forgot, reduced motion wins. */
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; }

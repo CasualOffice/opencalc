@@ -270,4 +270,20 @@ test.describe("motion", () => {
     await tile.scrollIntoViewIfNeeded();
     await expect.poll(() => tile.evaluate((el) => getComputedStyle(el).opacity)).toBe("1");
   });
+
+  // Paper never scrolls, so a reveal waiting for a scroll prints as a blank.
+  test("printing shows what a reveal is still holding back", async ({ page }) => {
+    await page.emulateMedia({ reducedMotion: "no-preference" });
+    await open(page, "index");
+    await expect(page.locator("html")).toHaveClass(/\bmotion\b/);
+    const faded = () => page.evaluate(() =>
+      [...document.querySelectorAll(".rv, .seq > *, .pipe .node, .il-wrap .pop")]
+        .filter((el) => parseFloat(getComputedStyle(el).opacity) < 1).length);
+    // On screen, below the fold is held back — once the fade-out has settled.
+    // (Asserting before it settles raced the 0.7s transition and passed.)
+    await expect.poll(() => page.locator("#compare .cmp").evaluate((el) => getComputedStyle(el).opacity)).toBe("0");
+    expect(await faded(), "the screen holds reveals back").toBeGreaterThan(0);
+    await page.emulateMedia({ media: "print", reducedMotion: "no-preference" });
+    expect(await faded(), "elements printed invisible").toBe(0);
+  });
 });
