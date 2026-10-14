@@ -931,8 +931,18 @@ fn every_dotted_function_is_written_with_the_xlfn_prefix() {
     // test instead of a user's file. `future.rs` says to add to it in the same
     // change; this is what makes that instruction enforceable.
     //
-    // `ERROR.TYPE` predates the convention and must stay undecorated.
-    const PREDATES_THE_PREFIX: &[&str] = &["ERROR.TYPE"];
+    // `ERROR.TYPE` predates the convention and must stay undecorated. So do
+    // the four below, which Excel writes **bare** (XL-FEAT-129: the earlier
+    // claim that "every dotted name" needs the prefix was wrong for them, and
+    // a prefix made Excel read them as `#NAME?`; checked against XlsxWriter's
+    // table of the functions Excel qualifies).
+    const PREDATES_THE_PREFIX: &[&str] = &[
+        "ECMA.CEILING",
+        "ERROR.TYPE",
+        "ISO.CEILING",
+        "NETWORKDAYS.INTL",
+        "WORKDAY.INTL",
+    ];
 
     let mut unsaveable: Vec<&str> = crate::FUNCTIONS
         .iter()

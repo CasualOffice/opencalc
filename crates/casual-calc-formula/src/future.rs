@@ -100,7 +100,6 @@ pub const FUTURE_FUNCTIONS: &[&str] = &[
     "DAYS",
     "DECIMAL",
     "DROP",
-    "ECMA.CEILING",
     "ENCODEURL",
     "ERF.PRECISE",
     "ERFC.PRECISE",
@@ -134,7 +133,6 @@ pub const FUTURE_FUNCTIONS: &[&str] = &[
     "IMSINH",
     "IMTAN",
     "ISFORMULA",
-    "ISO.CEILING",
     "ISOMITTED",
     "ISOWEEKNUM",
     "LAMBDA",
@@ -149,7 +147,6 @@ pub const FUTURE_FUNCTIONS: &[&str] = &[
     "MODE.SNGL",
     "MUNIT",
     "NEGBINOM.DIST",
-    "NETWORKDAYS.INTL",
     "NORM.DIST",
     "NORM.INV",
     "NORM.S.DIST",
@@ -204,7 +201,6 @@ pub const FUTURE_FUNCTIONS: &[&str] = &[
     "VAR.S",
     "VSTACK",
     "WEIBULL.DIST",
-    "WORKDAY.INTL",
     "WRAPCOLS",
     "WRAPROWS",
     "XLOOKUP",
@@ -219,16 +215,34 @@ pub fn is_future_function(name: &str) -> bool {
     FUTURE_FUNCTIONS.binary_search(&name).is_ok()
 }
 
+/// Future functions Excel also qualifies with the worksheet namespace:
+/// `_xlfn._xlws.FILTER`, `_xlfn._xlws.SORT` (XL-FEAT-129). With only `_xlfn.`
+/// Excel reads them as `#NAME?`.
+const WORKSHEET_QUALIFIED: &[&str] = &["FILTER", "SORT"];
+
+/// Functions Excel writes **bare**, which earlier builds of this engine
+/// wrongly prefixed (XL-FEAT-129). Never written with a prefix now, but a
+/// prefixed one in a file this engine saved before is still read as the
+/// function rather than as an unknown name.
+const ONCE_WRONGLY_PREFIXED: &[&str] = &[
+    "ECMA.CEILING",
+    "ISO.CEILING",
+    "NETWORKDAYS.INTL",
+    "WORKDAY.INTL",
+];
+
 /// Add the `_xlfn.` prefix to every future function in `expr`, for writing.
 ///
 /// Idempotent: a name that already carries the prefix is left alone, so a tree
 /// that has been through here twice is not `_xlfn._xlfn.CONCAT`.
 pub fn qualify_future_functions(expr: &mut Expr) -> bool {
     map_function_names(expr, &mut |name| {
-        if is_future_function(name) {
-            Some(format!("{XLFN}{name}"))
-        } else {
+        if !is_future_function(name) {
             None
+        } else if WORKSHEET_QUALIFIED.contains(&name) {
+            Some(format!("{XLFN}{XLWS}{name}"))
+        } else {
+            Some(format!("{XLFN}{name}"))
         }
     })
 }
@@ -252,7 +266,7 @@ pub fn strip_future_prefixes(expr: &mut Expr) -> bool {
             Some(bare) => (true, bare),
             None => (false, rest),
         };
-        if is_future_function(bare) {
+        if is_future_function(bare) || ONCE_WRONGLY_PREFIXED.contains(&bare) {
             return Some(bare.to_owned());
         }
         // Not ours: keep the qualification, in the lower case the file format
@@ -464,6 +478,49 @@ mod tests {
         let mut expr = parse(src).unwrap();
         strip_future_prefixes(&mut expr);
         expr.to_string()
+    }
+
+    /// Written exactly as Excel writes them (XL-FEAT-129). FILTER and SORT are
+    /// worksheet-qualified, `_xlfn._xlws.`; the four 2010 functions below are
+    /// in Excel's own list *bare*, and a prefix on them is `#NAME?` in Excel.
+    /// Checked against XlsxWriter's table of future functions, which writes
+    /// these for Excel.
+    #[test]
+    fn each_function_is_written_as_excel_writes_it() {
+        assert_eq!(
+            qualified("FILTER(A1:A3,B1:B3)"),
+            "_XLFN._XLWS.FILTER(A1:A3,B1:B3)"
+        );
+        assert_eq!(qualified("SORT(A1:A3)"), "_XLFN._XLWS.SORT(A1:A3)");
+        assert_eq!(
+            qualified("SORTBY(A1:A3,B1:B3)"),
+            "_XLFN.SORTBY(A1:A3,B1:B3)"
+        );
+        for bare in [
+            "ECMA.CEILING(1.2,1)",
+            "ISO.CEILING(1.2,1)",
+            "NETWORKDAYS.INTL(A1,B1)",
+            "WORKDAY.INTL(A1,3)",
+        ] {
+            assert_eq!(
+                qualified(bare),
+                bare,
+                "{bare} must be written without a prefix"
+            );
+        }
+    }
+
+    /// A file this engine saved before XL-FEAT-129 carries the wrong prefix on
+    /// those four; it must still read as the function, not as an unknown name.
+    #[test]
+    fn a_wrongly_prefixed_file_from_an_older_build_still_reads() {
+        assert_eq!(
+            stripped("_xlfn.NETWORKDAYS.INTL(A1,B1)"),
+            "NETWORKDAYS.INTL(A1,B1)"
+        );
+        assert_eq!(stripped("_xlfn.ISO.CEILING(1.2,1)"), "ISO.CEILING(1.2,1)");
+        assert_eq!(stripped("_xlfn._xlws.SORT(A1:A3)"), "SORT(A1:A3)");
+        assert_eq!(stripped("_xlfn.FILTER(A1:A3,B1:B3)"), "FILTER(A1:A3,B1:B3)");
     }
 
     #[test]

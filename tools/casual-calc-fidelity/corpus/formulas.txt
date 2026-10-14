@@ -558,3 +558,14 @@ ROWS(TRIMRANGE(C1:D20))
 COLUMNS(TRIMRANGE(A1:E20))
 COLUMNS(TRIMRANGE(A1:E20,3,2))
 SUM(TRIMRANGE(C1:C1000))
+
+# XL-FEAT-129: FILTER and SORT (written _xlfn._xlws.*) and the four 2010
+# functions Excel writes bare. These lines check the values only: LibreOffice
+# reads every one of these with or without the prefix (measured), so it cannot
+# catch a wrong prefix. That rule is pinned by the unit tests in
+# crates/casual-calc-formula/src/future.rs, against XlsxWriter's table.
+INDEX(SORT(C1:C10,1,-1),1)  @since-lo: 24.8
+ROWS(FILTER(C1:C10,C1:C10>5))  @since-lo: 24.8
+NETWORKDAYS.INTL(DATE(2024,1,1),DATE(2024,1,31))
+WORKDAY.INTL(DATE(2024,1,1),10)
+ISO.CEILING(4.3,2)
