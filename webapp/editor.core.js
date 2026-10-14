@@ -432,6 +432,11 @@ import { forgetVersions, loadVersions, persistVersions } from "./editor.versions
 export function reloadVersionsForTest() {
   return loadVersions(wasm);
 }
+// The macro engine (`MACRO-01`, docs/99): a sandboxed worker runs the macro
+// against a copy of the workbook, and the editor replays what it did as one
+// undo step. Re-exported so a host — and the Macros window to come — reaches it
+// on `window.opencalcEditor` like every other verb.
+export { MACRO_MAX_OPS, MACRO_TIME_LIMIT_MS, runMacro, runMacroForTest } from "./editor.macros.js";
 export {
   autosaveFault,
   breakDraftStoreForTest,
