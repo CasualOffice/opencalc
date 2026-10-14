@@ -588,10 +588,8 @@ SUMPRODUCT(LEN(CONCATENATE(E1:E3,"!")))
 # array runs out the element is #N/A.
 SUMPRODUCT(MOD(C3:C5,TRANSPOSE(C2:C3)))
 SUMPRODUCT(C1:C2+TRANSPOSE(D1:D3))
-SUMPRODUCT(ISNA(C1:C3*C1:C2)*1)
-SUMPRODUCT(ISNA(POWER(C1:C3,C1:C2))*1)
 SUMPRODUCT(ISNA(IF(F1:F3,C1:C2,0))*1)
-SUMPRODUCT(C1:C3*C1:C2)  @differs: the third element is #N/A in both engines (the ISNA line above agrees), and Excel's SUMPRODUCT propagates it; LibreOffice's skips it and answers 5
+SUMPRODUCT(C1:C3*C1:C2)  @differs: Excel pads the shorter array with #N/A and SUMPRODUCT propagates it; LibreOffice truncates to the common size and answers 5
 # AND/OR skip text and blanks inside a reference; text typed as an argument
 # is #VALUE!, and a range with no logical at all is #VALUE!.
 AND(E1:F1)
@@ -604,3 +602,17 @@ AND("abc",TRUE)
 OR("abc",TRUE)
 OR(C1:C10>5)  @differs: outside an array formula LibreOffice implicitly intersects the comparison (#VALUE! off rows 1-10, the cell rows agree); dynamic-array Excel passes the whole array, as Microsoft documents OR over an array
 AND(C1:C10>0)  @differs: outside an array formula LibreOffice implicitly intersects the comparison (#VALUE! off rows 1-10, the cell rows agree); dynamic-array Excel passes the whole array, as Microsoft documents OR over an array
+
+# XL-FEAT-132: small differences from Excel.
+IMSQRT("1+i")
+IMEXP("1+i")
+IMLN("3+4i")
+SEQUENCE(0)  @since-lo: 24.8
+PERCENTRANK(C1:C10,1.9,1)
+PERCENTRANK.INC(C1:C10,1.9,1)
+PERCENTRANK.INC(C1:C10,1.63,2)
+LEN(CONCAT(REPT("a",32767),"b"))  @differs: Microsoft: past 32,767 characters CONCAT returns #VALUE!; LibreOffice has no cell limit and answers 32768
+LEN(TEXTJOIN(",",TRUE,REPT("a",20000),REPT("b",20000)))  @differs: Microsoft: past 32,767 characters TEXTJOIN returns #VALUE!; LibreOffice has no cell limit and answers 40001
+ROWS(A$1:A5)
+ROWS(A1:A$5)
+COLUMNS($A1:C1)

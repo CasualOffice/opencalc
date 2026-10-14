@@ -1675,3 +1675,121 @@ fn and_or_skip_text_and_blanks_inside_a_reference() {
     // Errors propagate.
     error("AND(TRUE,1/0)", ErrorValue::Div0);
 }
+
+// --- XL-FEAT-132: small differences from Excel -------------------------------
+
+#[test]
+fn isformula_reads_the_referenced_sheet() {
+    // MS: ISFORMULA "checks whether there is a reference to a cell that
+    // contains a formula" — the referenced cell, on its own sheet. It read
+    // the formula's own sheet at the same address.
+    let run = |formula: &str| {
+        let (mut wb, sheet) = fixture();
+        let mut other = Sheet::new(SheetId(Id::from_parts(2, 2)), "Other");
+        // Other!B5 holds a formula and S!B5 does not; S!B6 does, Other!B6
+        // does not.
+        put_formula(&mut wb, &mut other, (4, 1), "C1+1");
+        let mut first = sheet;
+        put_formula(&mut wb, &mut first, (5, 1), "C1+2");
+        put_formula(&mut wb, &mut first, AT, formula);
+        wb.sheets.push(first);
+        wb.sheets.push(other);
+        recalculate(&mut wb);
+        let v = cell(&wb, AT.0, AT.1);
+        show(&wb, &v)
+    };
+    assert_eq!(run("ISFORMULA(Other!B5)"), "TRUE");
+    assert_eq!(run("ISFORMULA(Other!B6)"), "FALSE");
+    assert_eq!(run("ISFORMULA(B6)"), "TRUE");
+    assert_eq!(run("ISFORMULA(Nowhere!B5)"), "#REF!");
+}
+
+#[test]
+fn subtotal_skips_cells_that_are_subtotals() {
+    // MS: "If there are other subtotals within ref1, ref2,… (or nested
+    // subtotals), these nested subtotals are ignored to avoid double
+    // counting." A3 and A5 are subtotals of A1:A2; the total of A1:A5 is
+    // 1 + 2 + 4.
+    let setup = |wb: &mut Workbook, sheet: &mut Sheet| {
+        put_number(sheet, (0, 0), 1.0);
+        put_number(sheet, (1, 0), 2.0);
+        put_formula(wb, sheet, (2, 0), "SUBTOTAL(9,A1:A2)");
+        put_number(sheet, (3, 0), 4.0);
+        put_formula(wb, sheet, (4, 0), "AGGREGATE(9,0,A1:A2)*1");
+    };
+    let read = |f: &str| {
+        let (wb, v) = eval_in(f, setup);
+        show(&wb, &v)
+    };
+    assert_eq!(read("SUBTOTAL(9,A1:A5)"), "7");
+    assert_eq!(read("SUBTOTAL(109,A1:A5)"), "7");
+    assert_eq!(read("SUBTOTAL(2,A1:A5)"), "3");
+    assert_eq!(read("SUBTOTAL(2,A3)"), "0");
+    assert_eq!(read("SUBTOTAL(2,A4)"), "1");
+    // A plain SUM still counts them: the rule is SUBTOTAL's.
+    assert_eq!(read("SUM(A1:A5)"), "13");
+}
+
+#[test]
+fn complex_results_print_fifteen_significant_digits() {
+    // MS, each function's documented example, as Excel prints it.
+    text("IMSQRT(\"1+i\")", "1.09868411346781+0.455089860562227i");
+    text("IMEXP(\"1+i\")", "1.46869393991589+2.28735528717884i");
+    text("IMLN(\"3+4i\")", "1.6094379124341+0.927295218001612i");
+    // Exact results are untouched.
+    text("IMDIV(\"-238+240i\",\"10+24i\")", "5+12i");
+    text("COMPLEX(0.1+0.2,1)", "0.3+i");
+}
+
+#[test]
+fn an_empty_sequence_is_calc() {
+    // Excel: a function that would return an empty array is #CALC!.
+    error("SEQUENCE(0)", ErrorValue::Calc);
+    error("SEQUENCE(1,0)", ErrorValue::Calc);
+    error("SEQUENCE(0.5)", ErrorValue::Calc);
+}
+
+#[test]
+fn percentrank_truncates_without_losing_a_digit_to_rounding() {
+    // 1.9 sits 0.9 of the way from 1 to 2 over nine steps: exactly 0.1, which
+    // floating point computes as 0.09999999999999999. Truncating that to one
+    // digit gave 0. LO: 0.1 (and PERCENTRANK.EXC already had the fuzz).
+    num("PERCENTRANK(C1:C10,1.9,1)", 0.1);
+    num("PERCENTRANK.INC(C1:C10,1.9,1)", 0.1);
+    num("PERCENTRANK.INC(C1:C10,1.63,2)", 0.07);
+    num("PERCENTRANK.INC(C1:C10,1.45,3)", 0.05);
+    // Truncation itself is kept: 0.0333… is 0.033, not 0.034.
+    num("PERCENTRANK.INC(C1:C10,1.3)", 0.033);
+}
+
+#[test]
+fn concat_and_textjoin_refuse_text_longer_than_a_cell() {
+    // MS: "If the resulting string exceeds 32767 characters (cell limit),
+    // CONCAT returns the #VALUE! error." TEXTJOIN documents the same.
+    num("LEN(CONCAT(REPT(\"a\",32767)))", 32767.0);
+    error("CONCAT(REPT(\"a\",32767),\"b\")", ErrorValue::Value);
+    error(
+        "CONCATENATE(REPT(\"a\",20000),REPT(\"b\",20000))",
+        ErrorValue::Value,
+    );
+    error(
+        "TEXTJOIN(\",\",TRUE,REPT(\"a\",20000),REPT(\"b\",20000))",
+        ErrorValue::Value,
+    );
+    num(
+        "LEN(TEXTJOIN(\",\",TRUE,REPT(\"a\",16383),REPT(\"b\",16383)))",
+        32767.0,
+    );
+}
+
+#[test]
+fn rows_and_columns_measure_a_mixed_reference() {
+    // The formula sits on row 20: a range with one end anchored and one
+    // relative must be resolved before it is measured.
+    num("ROWS(A$1:A5)", 5.0);
+    num("ROWS(A1:A$5)", 5.0);
+    num("COLUMNS($A1:C1)", 3.0);
+    num("COLUMNS(A1:$C1)", 3.0);
+    num("ROWS($A$1:$A$5)", 5.0);
+    num("ROWS(A1:A5)", 5.0);
+}

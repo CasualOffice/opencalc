@@ -268,14 +268,20 @@ pub(crate) fn eval_dim(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr], rows
         return Value::Error(ErrorValue::Value);
     }
     match args.first() {
-        Some(Expr::Range(a, b)) => {
-            let n = if rows {
-                a.row.max(b.row) - a.row.min(b.row) + 1
-            } else {
-                a.col.max(b.col) - a.col.min(b.col) + 1
-            };
-            Value::Number(n as f64)
-        }
+        // Measured between the *resolved* corners. A stored endpoint is an
+        // offset from this cell unless `$`-anchored, so subtracting raw fields
+        // of `A$1:A5` mixed an address with an offset (`XL-FEAT-132`).
+        Some(Expr::Range(a, b)) => match (a.resolve(ev.origin()), b.resolve(ev.origin())) {
+            (Some(a), Some(b)) => {
+                let n = if rows {
+                    a.row.abs_diff(b.row)
+                } else {
+                    a.col.abs_diff(b.col)
+                };
+                Value::Number(f64::from(n) + 1.0)
+            }
+            _ => Value::Error(ErrorValue::Ref),
+        },
         Some(Expr::Reference(_)) => Value::Number(1.0),
         // A computed array has a shape too: `ROWS(VSTACK(a, b))` is how a
         // formula asks how far a spill reaches. Only an error is refused —

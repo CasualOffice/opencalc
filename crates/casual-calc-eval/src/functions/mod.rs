@@ -1725,6 +1725,19 @@ pub(crate) fn eval_round(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) ->
     Value::Number((value * factor).round() / factor)
 }
 
+/// Whether `text` is longer than a cell may hold ([`MAX_TEXT_CHARS`]).
+///
+/// Cheap while the text is short — a UTF-8 string has at least as many bytes
+/// as characters, so only one past the limit in bytes is counted — which lets
+/// a joining loop ask after every piece and stop as soon as it is over,
+/// rather than build a string the size of a column of long texts first.
+pub(crate) fn exceeds_text_limit(text: &str) -> bool {
+    text.len() > MAX_TEXT_CHARS && text.chars().count() > MAX_TEXT_CHARS
+}
+
+/// `CONCAT` and `CONCATENATE`. A result longer than a cell may hold is
+/// `#VALUE!`, as Microsoft documents for both, and as `REPT` already was
+/// (`XL-FEAT-132`).
 pub(crate) fn eval_concat(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -> Value {
     let mut out = String::new();
     for arg in args {
@@ -1732,6 +1745,9 @@ pub(crate) fn eval_concat(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -
             match value.as_text() {
                 Ok(s) => out.push_str(&s),
                 Err(e) => return Value::Error(e),
+            }
+            if exceeds_text_limit(&out) {
+                return Value::Error(ErrorValue::Value);
             }
         }
     }

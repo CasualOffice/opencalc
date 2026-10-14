@@ -195,11 +195,17 @@ pub(crate) fn eval_is_formula(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr
     let Some(resolved) = reference.resolve(ev.origin()) else {
         return Value::Error(ErrorValue::Ref);
     };
+    // The referenced cell's own sheet: `ISFORMULA(Sheet2!A1)` asks about
+    // Sheet2, and reading the formula's sheet at the same address answered a
+    // different cell (`XL-FEAT-132`). A sheet that does not exist is `#REF!`.
+    let Some(target) = ev.resolve_sheet(&reference.sheet, sheet) else {
+        return Value::Error(ErrorValue::Ref);
+    };
     let at = CellRef::new(resolved.row, resolved.col);
     let has = ev
         .workbook()
         .sheets
-        .get(sheet)
+        .get(target)
         .and_then(|s| s.cells.get(at))
         .is_some_and(|c| c.formula.is_some());
     Value::Bool(has)

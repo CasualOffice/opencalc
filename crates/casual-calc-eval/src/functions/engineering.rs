@@ -307,8 +307,12 @@ pub(crate) fn parse_complex(text: &str) -> Option<(f64, f64, char)> {
 }
 
 /// Format `(real, imaginary)` the way Excel writes one: the parts that are zero
-/// are omitted, and a unit coefficient is written as a bare `i`.
+/// are omitted, a unit coefficient is written as a bare `i`, and each part
+/// carries at most 15 significant digits — Excel's precision, so
+/// `IMSQRT("1+i")` is `1.09868411346781+0.455089860562227i` and not the 17
+/// digits a shortest round-trip prints (`XL-FEAT-132`).
 pub(crate) fn format_complex(real: f64, imag: f64, suffix: char) -> String {
+    let (real, imag) = (significant_15(real), significant_15(imag));
     let n = |v: f64| number_to_text(v);
     if imag == 0.0 {
         return n(real);
@@ -328,6 +332,14 @@ pub(crate) fn format_complex(real: f64, imag: f64, suffix: char) -> String {
     } else {
         format!("{}{imag_part}", n(real))
     }
+}
+
+/// `v` rounded to 15 significant digits.
+fn significant_15(v: f64) -> f64 {
+    if v == 0.0 || !v.is_finite() {
+        return v;
+    }
+    format!("{v:.14e}").parse().unwrap_or(v)
 }
 
 pub(crate) fn complex_arg(

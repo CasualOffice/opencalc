@@ -276,10 +276,11 @@ pub(crate) fn eval_percentrank(ev: &mut Evaluator<'_>, sheet: usize, args: &[Exp
         },
         None => 3,
     };
-    let factor = 10f64.powi(digits);
     // Truncated, not rounded: PERCENTRANK reports significant digits rather
-    // than a rounded value.
-    Value::Number((rank * factor).trunc() / factor)
+    // than a rounded value — but with the rounding fuzz PERCENTRANK.EXC has,
+    // so an exact 0.1 that floating point holds as 0.0999… keeps its digit
+    // (`XL-FEAT-132`).
+    Value::Number(truncate_digits(rank, digits.min(15)))
 }
 
 /// `TRIMMEAN(array, percent)` — the mean after discarding the extremes.
@@ -1156,9 +1157,25 @@ pub(crate) fn eval_subtotal(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr])
     // Gather the values, skipping hidden rows for the 100-series.
     let mut values = Vec::new();
     for arg in &args[1..] {
-        match range_cells(ev, sheet, arg) {
+        // A single reference is a cell too — one that may itself be a
+        // subtotal, or on a hidden row.
+        let cells = match arg {
+            Expr::Reference(r) => match (ev.resolve_sheet(&r.sheet, sheet), r.resolve(ev.origin()))
+            {
+                (Some(target), Some(at)) => Some((target, vec![CellRef::new(at.row, at.col)])),
+                _ => return Value::Error(ErrorValue::Ref),
+            },
+            _ => range_cells(ev, sheet, arg),
+        };
+        match cells {
             Some((target, cells)) => {
                 for at in cells {
+                    // MS: nested subtotals "are ignored to avoid double
+                    // counting" — the rule AGGREGATE's options 0-3 follow, and
+                    // the same test (`XL-FEAT-132`).
+                    if is_subtotal_cell(ev, target, at) {
+                        continue;
+                    }
                     if ignore_hidden {
                         let hidden = ev
                             .workbook()

@@ -526,10 +526,16 @@ pub(crate) fn eval_dynamic(
                 Ok(v) => v,
                 Err(e) => return e,
             };
+            if v[0] < 0.0 || v[1] < 0.0 {
+                return Value::Error(ErrorValue::Value);
+            }
             let (rows, cols, start, step) =
                 (array_dimension(v[0]), array_dimension(v[1]), v[2], v[3]);
+            // No rows or no columns is an empty array, which Excel reports
+            // as #CALC! — as every function here that would return nothing
+            // does (`XL-FEAT-132`).
             if rows < 1 || cols < 1 {
-                return Value::Error(ErrorValue::Value);
+                return Value::Error(ErrorValue::Calc);
             }
             let size = match checked_array_size(rows, cols) {
                 Ok(n) => n,

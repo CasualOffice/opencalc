@@ -253,7 +253,11 @@ pub(crate) fn eval_textjoin(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr])
         Ok(b) => b,
         Err(e) => return Value::Error(e),
     };
-    let mut parts = Vec::new();
+    // Joined as it goes, so a result past a cell's 32,767 characters is
+    // `#VALUE!` (Microsoft documents it) as soon as it gets there — not after
+    // building the whole of it (`XL-FEAT-132`).
+    let mut out = String::new();
+    let mut first = true;
     for arg in &args[2..] {
         for v in flatten_values(ev, sheet, arg) {
             if let Value::Error(e) = v {
@@ -263,10 +267,17 @@ pub(crate) fn eval_textjoin(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr])
             if ignore_empty && s.is_empty() {
                 continue;
             }
-            parts.push(s);
+            if !first {
+                out.push_str(&delim);
+            }
+            first = false;
+            out.push_str(&s);
+            if exceeds_text_limit(&out) {
+                return Value::Error(ErrorValue::Value);
+            }
         }
     }
-    Value::Text(parts.join(&delim))
+    Value::Text(out)
 }
 
 /// `CHAR` and `UNICHAR`.

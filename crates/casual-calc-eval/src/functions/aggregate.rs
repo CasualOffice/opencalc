@@ -377,6 +377,20 @@ pub(crate) fn ymd_to_serial_for_test(y: i64, m: i64, d: i64) -> i64 {
     ymd_to_serial(y, m, d)
 }
 
+/// Whether the cell at `at` on sheet `target` is a subtotal — its formula
+/// calls `SUBTOTAL` or `AGGREGATE` ([`contains_subtotal`]). The one test both
+/// functions use to skip such a cell.
+pub(crate) fn is_subtotal_cell(ev: &Evaluator<'_>, target: usize, at: CellRef) -> bool {
+    let workbook = ev.workbook();
+    workbook
+        .sheets
+        .get(target)
+        .and_then(|s| s.cells.get(at))
+        .and_then(|c| c.formula)
+        .and_then(|h| workbook.formula(h))
+        .is_some_and(contains_subtotal)
+}
+
 /// Whether an expression calls `SUBTOTAL` or `AGGREGATE` anywhere.
 ///
 /// A cell whose formula does is a *subtotal*, and both functions skip it so a
@@ -549,14 +563,7 @@ fn aggregate_values(
         if skip.hidden && sheet_ref.is_row_hidden(at.row) {
             continue;
         }
-        if skip.nested
-            && sheet_ref
-                .cells
-                .get(at)
-                .and_then(|c| c.formula)
-                .and_then(|h| workbook.formula(h))
-                .is_some_and(contains_subtotal)
-        {
+        if skip.nested && is_subtotal_cell(ev, target, at) {
             continue;
         }
         match ev.eval_cell(target, at) {
