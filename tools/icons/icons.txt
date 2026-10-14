@@ -110,3 +110,5 @@ arrow_import
 tab_desktop_multiple
 table_cell_center
 text_case_title
+code
+play

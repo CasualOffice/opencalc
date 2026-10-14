@@ -7,6 +7,7 @@
 // without touching a single body.
 
 import { syncVolatileClock } from "./editor.selection.js";
+import { offerAutostartMacros } from "./editor.macros-window.js";
 import {
   A1,
   HH,
@@ -1097,6 +1098,10 @@ export function openBytes(raw, name = "workbook.xlsx", budgetMs = undefined) {
   // previous document's name in place, because the previous document is what
   // is still on screen.
   if (ok) openedName = name;
+  // MACRO-02: a workbook whose macros ask to run on open is *offered* them on
+  // a message bar — never run from here. A failed open leaves the previous
+  // document, whose offer (if any) was already made.
+  if (ok) offerAutostartMacros(name);
   return ok;
 }
 

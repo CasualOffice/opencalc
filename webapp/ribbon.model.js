@@ -168,6 +168,13 @@ export const TABS = [
       L("view.freeze", "table_freeze_column_and_row", "Freeze Panes", { menu: ["view.freeze.up-to-selection", "view.freeze.top-row", "view.freeze.first-column", "view.freeze.unfreeze"] }),
     ] },
     { label: "Collaboration", fold: 4, icon: "history", items: [L("file.version-history", "history", "Version History")] },
+    // ONLYOFFICE keeps Macros on its View tab (docs/99 §3), and so do we.
+    { label: "Macros", fold: 1, icon: "code", items: [L("view.macros", "code", "Macros (Alt+F8)")] },
+  ] },
+  // Excel's Developer tab. Only what is built: Record Macro (MACRO-03) and
+  // Convert VBA (MACRO-05) arrive with their rows, not as dead buttons now.
+  { id: "developer", label: "Developer", key: "L", groups: [
+    { label: "Code", fold: 1, icon: "code", items: [L("developer.macros", "code", "Macros (Alt+F8)")] },
   ] },
   { id: "help", label: "Help", key: "Y", groups: [
     { label: "Help", fold: 1, icon: "question_circle", items: [
