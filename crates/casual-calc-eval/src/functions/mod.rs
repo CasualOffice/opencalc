@@ -70,6 +70,10 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("ACOSH", "ACOSH(number)"),
     ("ADDRESS", "ADDRESS(row, column, [abs], [a1], [sheet])"),
     (
+        "AGGREGATE",
+        "AGGREGATE(function_num, options, ref1_or_array, [ref2_or_k], …)",
+    ),
+    (
         "AMORDEGRC",
         "AMORDEGRC(cost, date_purchased, first_period, salvage, period, rate, [basis])",
     ),
@@ -117,6 +121,11 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("BYCOL", "BYCOL(array, lambda)"),
     ("BYROW", "BYROW(array, lambda)"),
     ("CEILING", "CEILING(number, significance)"),
+    (
+        "CEILING.MATH",
+        "CEILING.MATH(number, [significance], [mode])",
+    ),
+    ("CEILING.PRECISE", "CEILING.PRECISE(number, [significance])"),
     ("CELL", "CELL(info_type, [reference])"),
     ("CHAR", "CHAR(number)"),
     ("CHIDIST", "CHIDIST(x, degrees_freedom)"),
@@ -252,7 +261,10 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
     ("FISHERINV", "FISHERINV(y)"),
     ("FIXED", "FIXED(number, [decimals], [no_commas])"),
     ("FLOOR", "FLOOR(number, significance)"),
+    ("FLOOR.MATH", "FLOOR.MATH(number, [significance], [mode])"),
+    ("FLOOR.PRECISE", "FLOOR.PRECISE(number, [significance])"),
     ("FORECAST", "FORECAST(x, known_y, known_x)"),
+    ("FORMULATEXT", "FORMULATEXT(reference)"),
     ("FREQUENCY", "FREQUENCY(data_array, bins_array)"),
     ("FTEST", "FTEST(array1, array2)"),
     ("FV", "FV(rate, nper, pmt, [pv], [type])"),
@@ -602,6 +614,7 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
         "XMATCH(lookup, lookup_array, [match_mode], [search_mode])",
     ),
     ("XNPV", "XNPV(rate, values, dates)"),
+    ("XOR", "XOR(logical1, …)"),
     ("YEAR", "YEAR(serial_number)"),
     ("YEARFRAC", "YEARFRAC(start, end, [basis])"),
     (
@@ -1065,6 +1078,16 @@ pub fn call_function(ev: &mut Evaluator<'_>, sheet: usize, name: &str, args: &[E
         "CHITEST" | "CHISQ.TEST" => eval_chitest(ev, sheet, args),
         "PROB" => eval_prob(ev, sheet, args),
         "SUBTOTAL" => eval_subtotal(ev, sheet, args),
+        "AGGREGATE" => eval_aggregate(ev, sheet, args),
+        "XOR" => eval_xor(ev, sheet, args),
+        "FORMULATEXT" => eval_formulatext(ev, sheet, args),
+        // The 2010/2013 roundings. `.PRECISE` is `ISO.CEILING`'s rule (and
+        // its floor); `.MATH` adds a mode that flips the direction for a
+        // negative number.
+        "CEILING.MATH" => eval_round_to_multiple(ev, sheet, args, true, true),
+        "FLOOR.MATH" => eval_round_to_multiple(ev, sheet, args, false, true),
+        "CEILING.PRECISE" => eval_round_to_multiple(ev, sheet, args, true, false),
+        "FLOOR.PRECISE" => eval_round_to_multiple(ev, sheet, args, false, false),
         "SUMX2MY2" => paired(ev, sheet, args, |xs, ys| {
             Some(xs.iter().zip(ys).map(|(x, y)| x * x - y * y).sum())
         }),
@@ -1329,6 +1352,55 @@ pub(crate) fn eval_and_or(
         return Value::Error(ErrorValue::Value);
     }
     Value::Bool(acc)
+}
+
+/// `XOR(logical1, …)` — TRUE when an odd number of the arguments are TRUE.
+///
+/// The coercion is Excel's for the logical functions, and it depends on how a
+/// value arrives: text written as an argument must read as a logical or the
+/// answer is `#VALUE!`, while text (and blanks) inside a reference or an array
+/// are skipped. No logical anywhere is `#VALUE!` too, not FALSE — there was
+/// nothing to count.
+pub(crate) fn eval_xor(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -> Value {
+    let mut seen = false;
+    let mut odd = false;
+    let mut count = |v: &Value, from_block: bool| -> Result<(), ErrorValue> {
+        let truth = match v {
+            Value::Bool(b) => *b,
+            Value::Number(n) => *n != 0.0,
+            Value::Error(e) => return Err(*e),
+            Value::Empty => return Ok(()),
+            Value::Text(_) | Value::Lambda(_) | Value::Array { .. } if from_block => {
+                return Ok(());
+            }
+            other => other.as_bool()?,
+        };
+        seen = true;
+        odd ^= truth;
+        Ok(())
+    };
+    for arg in args {
+        let result = match arg {
+            // A reference, even to one cell, is a reference: its text is skipped.
+            Expr::Reference(_) | Expr::Range(..) | Expr::StructuredRef { .. } => {
+                flatten_values(ev, sheet, arg)
+                    .iter()
+                    .try_for_each(|v| count(v, true))
+            }
+            _ => match ev.eval_expr_array(sheet, arg) {
+                Value::Array { cells, .. } => cells.iter().try_for_each(|v| count(v, true)),
+                v => count(&v, false),
+            },
+        };
+        if let Err(e) = result {
+            return Value::Error(e);
+        }
+    }
+    if seen {
+        Value::Bool(odd)
+    } else {
+        Value::Error(ErrorValue::Value)
+    }
 }
 
 pub(crate) fn eval_not(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -> Value {

@@ -595,3 +595,54 @@ pub(crate) fn eval_cumulative(
     }
     Value::Number(total)
 }
+
+/// `CEILING.MATH` / `FLOOR.MATH` (with `mode`) and `CEILING.PRECISE` /
+/// `FLOOR.PRECISE` (without): round to a multiple of `|significance|`.
+///
+/// Unlike `CEILING`/`FLOOR` none of them refuses a mismatched sign — the
+/// significance's sign is simply ignored — and a zero significance is 0. They
+/// differ only on a **negative** number: the plain direction is toward +∞ for
+/// the ceiling and −∞ for the floor, and a non-zero `mode` (the `.MATH`
+/// functions only) flips a negative to round away from zero for the ceiling
+/// and toward it for the floor.
+pub(crate) fn eval_round_to_multiple(
+    ev: &mut Evaluator<'_>,
+    sheet: usize,
+    args: &[Expr],
+    up: bool,
+    has_mode: bool,
+) -> Value {
+    let max = if has_mode { 3 } else { 2 };
+    if args.is_empty() || args.len() > max {
+        return Value::Error(ErrorValue::Value);
+    }
+    let mut read = |i: usize, default: f64| -> Result<f64, ErrorValue> {
+        match args.get(i) {
+            None | Some(Expr::Empty) => Ok(default),
+            Some(a) => ev.eval_expr(sheet, a).as_number(),
+        }
+    };
+    let (n, step, mode) = match (read(0, 0.0), read(1, 1.0), read(2, 0.0)) {
+        (Ok(n), Ok(s), Ok(m)) => (n, s.abs(), m),
+        (Err(e), _, _) | (_, Err(e), _) | (_, _, Err(e)) => return Value::Error(e),
+    };
+    if step == 0.0 || n == 0.0 {
+        return Value::Number(0.0);
+    }
+    // A negative number with a non-zero mode goes the other way: the ceiling
+    // away from zero, the floor toward it.
+    let up = if n < 0.0 && mode != 0.0 { !up } else { up };
+    let q = n / step;
+    // A quotient within a rounding error of an integer *is* that integer:
+    // `CEILING.MATH(0.3, 0.1)` must not become 0.4 because 0.3/0.1 is
+    // 2.9999999999999996.
+    let nearest = q.round();
+    let q = if (q - nearest).abs() < 1e-12 * nearest.abs().max(1.0) {
+        nearest
+    } else if up {
+        q.ceil()
+    } else {
+        q.floor()
+    };
+    finite_or(q * step, ErrorValue::Num)
+}

@@ -60,6 +60,7 @@ const XLWS: &str = "_XLWS.";
 /// rather than against a copy of this list, so a dotted function added there
 /// and forgotten here fails a test instead of a user's file.
 pub const FUTURE_FUNCTIONS: &[&str] = &[
+    "AGGREGATE",
     "BETA.INV",
     "BINOM.DIST",
     "BITAND",
@@ -69,6 +70,8 @@ pub const FUTURE_FUNCTIONS: &[&str] = &[
     "BITXOR",
     "BYCOL",
     "BYROW",
+    "CEILING.MATH",
+    "CEILING.PRECISE",
     "CHISQ.DIST.RT",
     "CHISQ.INV.RT",
     "CHISQ.TEST",
@@ -87,6 +90,9 @@ pub const FUTURE_FUNCTIONS: &[&str] = &[
     "F.INV.RT",
     "F.TEST",
     "FILTER",
+    "FLOOR.MATH",
+    "FLOOR.PRECISE",
+    "FORMULATEXT",
     "GAMMA.DIST",
     "GAMMA.INV",
     "IFNA",
@@ -145,6 +151,7 @@ pub const FUTURE_FUNCTIONS: &[&str] = &[
     "WORKDAY.INTL",
     "XLOOKUP",
     "XMATCH",
+    "XOR",
     "Z.TEST",
 ];
 
@@ -511,11 +518,27 @@ mod tests {
             stripped("_xlfn._xlws.NOTAREALFUNCTION(1)"),
             "_xlfn._xlws.NOTAREALFUNCTION(1)"
         );
-        // And writing leaves it exactly as read.
-        let mut expr = parse("_xlfn.CEILING.MATH(4.2)").unwrap();
+        // And writing leaves it exactly as read. (`CEILING.MATH` was the
+        // example until XL-FEAT-012 implemented it; `FORECAST.ETS` is not.)
+        let mut expr = parse("_xlfn.FORECAST.ETS(4.2)").unwrap();
         strip_future_prefixes(&mut expr);
         qualify_future_functions(&mut expr);
-        assert_eq!(expr.to_string(), "_xlfn.CEILING.MATH(4.2)");
+        assert_eq!(expr.to_string(), "_xlfn.FORECAST.ETS(4.2)");
+    }
+
+    #[test]
+    fn the_functions_xl_feat_012_added_are_written_with_the_prefix() {
+        // Each of these is listed as `_xlfn.` in [MS-XLSX] 2.2.2 "Functions"
+        // (or, for the ones that postdate that list, is written so by Excel).
+        // Undotted names are the dangerous ones — nothing in the catalog test
+        // can tell `XOR` or `GAMMA` needs the prefix.
+        for name in ["XOR", "AGGREGATE", "FORMULATEXT", "CEILING.MATH"] {
+            let mut expr = parse(&format!("{name}(1)")).unwrap();
+            assert!(qualify_future_functions(&mut expr), "{name} written bare");
+            assert_eq!(expr.to_string(), format!("_XLFN.{name}(1)"));
+            assert!(strip_future_prefixes(&mut expr));
+            assert_eq!(expr.to_string(), format!("{name}(1)"));
+        }
     }
 
     #[test]
