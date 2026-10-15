@@ -190,7 +190,7 @@ ROW(C5)
 COLUMN(D1)
 ROWS(C1:C10)
 COLUMNS(C1:D10)
-XLOOKUP(3,C1:C10,D1:D10)
+XLOOKUP(3,C1:C10,D1:D10)  @since-lo: 24.8
 
 # --- Information ------------------------------------------------------------
 ISNUMBER(1)
@@ -245,11 +245,11 @@ COUNT(H1:H5)
 -"5"
 
 # --- First-class functions (LET/LAMBDA), which need both prefixes -----------
-LET(x,5,x*2)
-LET(x,5,y,x+1,x*y)
+LET(x,5,x*2)  @since-lo: 24.8
+LET(x,5,y,x+1,x*y)  @since-lo: 24.8
 LAMBDA(x,x+1)(4)  @differs: LibreOffice 26.2 cannot call a LAMBDA literal inline (Err:509)
-SUM(MAP(C1:C3,LAMBDA(v,v*2)))
-REDUCE(0,C1:C5,LAMBDA(a,b,a+b))
+SUM(MAP(C1:C3,LAMBDA(v,v*2)))  @differs: LibreOffice 26.2 does not implement MAP (#NAME?)
+REDUCE(0,C1:C5,LAMBDA(a,b,a+b))  @differs: LibreOffice 26.2 does not implement REDUCE (#NAME?)
 
 # --- XL-FEAT-012/013 group 1: XOR, AGGREGATE, .MATH/.PRECISE, FORMULATEXT ----
 XOR(TRUE,TRUE)
@@ -350,9 +350,9 @@ BINOM.INV(6,0.5,0.75)
 BINOM.INV(10,0.3,0)
 BINOM.INV(10,0.3,1)
 BINOM.INV(10,1.3,0.5)
-BINOM.DIST.RANGE(60,0.75,45,50)
-BINOM.DIST.RANGE(60,0.75,48)
-BINOM.DIST.RANGE(60,0.75,50,45)
+BINOM.DIST.RANGE(60,0.75,45,50)  @differs: LibreOffice 26.2 does not implement BINOM.DIST.RANGE (#NAME?)
+BINOM.DIST.RANGE(60,0.75,48)  @differs: LibreOffice 26.2 does not implement BINOM.DIST.RANGE (#NAME?)
+BINOM.DIST.RANGE(60,0.75,50,45)  @differs: LibreOffice 26.2 does not implement BINOM.DIST.RANGE (#NAME?)
 HYPGEOM.DIST(1,4,8,20,TRUE)
 HYPGEOM.DIST(1,4,8,20,FALSE)
 HYPGEOM.DIST(5,4,8,20,FALSE)
@@ -369,10 +369,10 @@ QUARTILE.EXC(C1:C10,2.7)
 QUARTILE.EXC(C1:C10,0)
 PERCENTRANK.EXC(C1:C10,7)
 PERCENTRANK.EXC(C1:C10,7,5)
-PERCENTRANK.EXC(C1:C10,5.43)
-PERCENTRANK.EXC(C1:C10,5.43,1)
-PERCENTRANK.EXC(C1:C10,1)
-PERCENTRANK.EXC(C1:C10,7,0)
+PERCENTRANK.EXC(C1:C10,5.43)  @differs: Excel truncates to `significance` digits (Microsoft's PERCENTRANK.EXC remarks); LibreOffice rounds or keeps more
+PERCENTRANK.EXC(C1:C10,5.43,1)  @differs: Excel truncates to `significance` digits (Microsoft's PERCENTRANK.EXC remarks); LibreOffice rounds or keeps more
+PERCENTRANK.EXC(C1:C10,1)  @differs: Excel truncates to `significance` digits (Microsoft's PERCENTRANK.EXC remarks); LibreOffice rounds or keeps more
+PERCENTRANK.EXC(C1:C10,7,0)  @differs: Excel truncates to `significance` digits (Microsoft's PERCENTRANK.EXC remarks); LibreOffice rounds or keeps more
 RANK.AVG(5,C1:C10)
 RANK.AVG(3,C1:C10,1)
 RANK.AVG(-0.25,G1:G5)
@@ -433,8 +433,8 @@ ARABIC("IIII")
 ARABIC("IC")
 ARABIC("ABC")
 ARABIC(5)
-ARABIC("-MMXI")
-ARABIC("  XV  ")
+ARABIC("-MMXI")  @differs: Excel accepts a leading minus and surrounding spaces (Microsoft's ARABIC remarks); LibreOffice refuses
+ARABIC("  XV  ")  @differs: Excel accepts a leading minus and surrounding spaces (Microsoft's ARABIC remarks); LibreOffice refuses
 BASE(7,2)
 BASE(100,16)
 BASE(15,2,10)
@@ -468,60 +468,60 @@ ENCODEURL("http://contoso.sharepoint.com/Finance/Profit and Loss Statement.xlsx"
 
 # --- XL-FEAT-012/013 group 4: the 2022 dynamic-array functions ---------------
 # They spill; the oracle reads one cell, so each asks for a shape or an element.
-ROWS(VSTACK(C1:C3,D1:D2))
-INDEX(VSTACK(C1:C3,D1:D2),4,1)
-INDEX(VSTACK(C1:D2,E1:E2),3,2)
-COLUMNS(VSTACK(C1:D2,E1:E2))
-INDEX(VSTACK(1,C1:D1),1,2)
-COLUMNS(HSTACK(C1:C3,D1:D2))
-INDEX(HSTACK(C1:C3,D1:D2),2,2)
-INDEX(HSTACK(C1:C3,D1:D2),3,2)
-INDEX(TAKE(C1:D10,2),2,2)
-ROWS(TAKE(C1:D10,2))
-INDEX(TAKE(C1:D10,-2),1,1)
-INDEX(TAKE(C1:D10,,-1),3,1)
-COLUMNS(TAKE(C1:D10,,-1))
-ROWS(TAKE(C1:D10,20))
-INDEX(TAKE(C1:D10,-3,-1),1,1)
-TAKE(C1:D10,0)
-INDEX(DROP(C1:D10,2),1,1)
-ROWS(DROP(C1:D10,2))
-INDEX(DROP(C1:D10,-2,1),8,1)
-INDEX(DROP(C1:D10,0,0),1,1)
-DROP(C1:D10,10)  @differs: dropping every row leaves an empty array, #CALC! in Excel; LibreOffice answers 1
+ROWS(VSTACK(C1:C3,D1:D2))  @since-lo: 24.8
+INDEX(VSTACK(C1:C3,D1:D2),4,1)  @since-lo: 24.8
+INDEX(VSTACK(C1:D2,E1:E2),3,2)  @since-lo: 24.8
+COLUMNS(VSTACK(C1:D2,E1:E2))  @since-lo: 24.8
+INDEX(VSTACK(1,C1:D1),1,2)  @since-lo: 24.8
+COLUMNS(HSTACK(C1:C3,D1:D2))  @since-lo: 24.8
+INDEX(HSTACK(C1:C3,D1:D2),2,2)  @since-lo: 24.8
+INDEX(HSTACK(C1:C3,D1:D2),3,2)  @since-lo: 24.8
+INDEX(TAKE(C1:D10,2),2,2)  @since-lo: 24.8
+ROWS(TAKE(C1:D10,2))  @since-lo: 24.8
+INDEX(TAKE(C1:D10,-2),1,1)  @since-lo: 24.8
+INDEX(TAKE(C1:D10,,-1),3,1)  @since-lo: 24.8
+COLUMNS(TAKE(C1:D10,,-1))  @since-lo: 24.8
+ROWS(TAKE(C1:D10,20))  @since-lo: 24.8
+INDEX(TAKE(C1:D10,-3,-1),1,1)  @since-lo: 24.8
+TAKE(C1:D10,0)  @since-lo: 24.8
+INDEX(DROP(C1:D10,2),1,1)  @since-lo: 24.8
+ROWS(DROP(C1:D10,2))  @since-lo: 24.8
+INDEX(DROP(C1:D10,-2,1),8,1)  @since-lo: 24.8
+INDEX(DROP(C1:D10,0,0),1,1)  @since-lo: 24.8
+DROP(C1:D10,10)  @since-lo: 24.8  @differs: dropping every row leaves an empty array, #CALC! in Excel; LibreOffice answers 1
 INDEX(CHOOSECOLS(C1:E3,3,1),1,1)  @since-lo: 24.8
 INDEX(CHOOSECOLS(C1:E3,-1),2,1)  @since-lo: 24.8
 CHOOSECOLS(C1:E3,4)  @since-lo: 24.8
 CHOOSECOLS(C1:E3,0)  @since-lo: 24.8
-INDEX(CHOOSEROWS(C1:D10,10,-1),2,2)
-INDEX(CHOOSEROWS(C1:D10,SEQUENCE(2,1,2)),2,1)
-CHOOSEROWS(C1:D10,11)
-ROWS(TOCOL(C1:D3))
-INDEX(TOCOL(C1:D3),2,1)
-INDEX(TOCOL(C1:D3,0,TRUE),2,1)
-ROWS(TOCOL(H1:H5,1))
-ROWS(TOCOL(H1:H5))
-COLUMNS(TOROW(C1:D3))
-INDEX(TOROW(C1:D3),1,2)
-INDEX(TOROW(C1:D3,,TRUE),1,2)
-INDEX(WRAPROWS(C1:C10,4),3,2)
-INDEX(WRAPROWS(C1:C10,4),3,3)
-INDEX(WRAPROWS(C1:C10,4,0),3,3)
-ROWS(WRAPROWS(C1:C10,4))
-INDEX(WRAPCOLS(C1:C10,4),2,3)
-INDEX(WRAPCOLS(C1:C10,4),4,3)
-WRAPROWS(C1:D2,2)
-WRAPROWS(C1:C10,0)
+INDEX(CHOOSEROWS(C1:D10,10,-1),2,2)  @since-lo: 24.8
+INDEX(CHOOSEROWS(C1:D10,SEQUENCE(2,1,2)),2,1)  @since-lo: 24.8
+CHOOSEROWS(C1:D10,11)  @since-lo: 24.8
+ROWS(TOCOL(C1:D3))  @since-lo: 24.8
+INDEX(TOCOL(C1:D3),2,1)  @since-lo: 24.8
+INDEX(TOCOL(C1:D3,0,TRUE),2,1)  @since-lo: 24.8
+ROWS(TOCOL(H1:H5,1))  @since-lo: 24.8
+ROWS(TOCOL(H1:H5))  @since-lo: 24.8
+COLUMNS(TOROW(C1:D3))  @since-lo: 24.8
+INDEX(TOROW(C1:D3),1,2)  @since-lo: 24.8
+INDEX(TOROW(C1:D3,,TRUE),1,2)  @since-lo: 24.8
+INDEX(WRAPROWS(C1:C10,4),3,2)  @since-lo: 24.8
+INDEX(WRAPROWS(C1:C10,4),3,3)  @since-lo: 24.8
+INDEX(WRAPROWS(C1:C10,4,0),3,3)  @since-lo: 24.8
+ROWS(WRAPROWS(C1:C10,4))  @since-lo: 24.8
+INDEX(WRAPCOLS(C1:C10,4),2,3)  @since-lo: 24.8
+INDEX(WRAPCOLS(C1:C10,4),4,3)  @since-lo: 24.8
+WRAPROWS(C1:D2,2)  @since-lo: 24.8
+WRAPROWS(C1:C10,0)  @since-lo: 24.8
 ROWS(EXPAND(C1:D2,3,3))  @since-lo: 24.8
 INDEX(EXPAND(C1:D2,3,3),3,3)  @since-lo: 24.8
 INDEX(EXPAND(C1:D2,3,3,"-"),3,3)  @since-lo: 24.8
 INDEX(EXPAND(C1:D2,3),3,1)  @since-lo: 24.8
 INDEX(EXPAND(C1:D2,,4,0),1,4)  @since-lo: 24.8
 EXPAND(C1:D2,1)  @since-lo: 24.8
-ROWS(RANDARRAY(3,2))
-COLUMNS(RANDARRAY(3,2))
-RANDARRAY(1,1,3,3,TRUE)
-RANDARRAY(2,2,5,1)
+ROWS(RANDARRAY(3,2))  @since-lo: 24.8
+COLUMNS(RANDARRAY(3,2))  @since-lo: 24.8
+RANDARRAY(1,1,3,3,TRUE)  @since-lo: 24.8
+RANDARRAY(2,2,5,1)  @since-lo: 24.8
 INDEX(TEXTSPLIT("a,b,c",","),1,2)  @since-lo: 24.8
 COLUMNS(TEXTSPLIT("a,b,c",","))  @since-lo: 24.8
 INDEX(TEXTSPLIT("a,b;c,d",",",";"),2,2)  @since-lo: 24.8
@@ -554,10 +554,10 @@ TEXTAFTER("alpha-beta","a",2)  @since-lo: 24.8
 TEXTAFTER("abc","")  @since-lo: 24.8  @differs: Microsoft: an empty delimiter matches at once, so TEXTAFTER forwards is the whole text; LibreOffice answers #N/A
 ARRAYTOTEXT(C1:D2,1)  @differs: LibreOffice 26.2 does not implement ARRAYTOTEXT (#NAME?); Excel gives {1,10;2,20}
 VALUETOTEXT("abc",1)  @differs: LibreOffice 26.2 does not implement VALUETOTEXT (#NAME?)
-ROWS(TRIMRANGE(C1:D20))
-COLUMNS(TRIMRANGE(A1:E20))
-COLUMNS(TRIMRANGE(A1:E20,3,2))
-SUM(TRIMRANGE(C1:C1000))
+ROWS(TRIMRANGE(C1:D20))  @differs: LibreOffice 26.2 does not implement TRIMRANGE (#NAME?)
+COLUMNS(TRIMRANGE(A1:E20))  @differs: LibreOffice 26.2 does not implement TRIMRANGE (#NAME?)
+COLUMNS(TRIMRANGE(A1:E20,3,2))  @differs: LibreOffice 26.2 does not implement TRIMRANGE (#NAME?)
+SUM(TRIMRANGE(C1:C1000))  @differs: LibreOffice 26.2 does not implement TRIMRANGE (#NAME?)
 
 # XL-FEAT-129: FILTER and SORT (written _xlfn._xlws.*) and the four 2010
 # functions Excel writes bare. These lines check the values only: LibreOffice
@@ -569,3 +569,50 @@ ROWS(FILTER(C1:C10,C1:C10>5))  @since-lo: 24.8
 NETWORKDAYS.INTL(DATE(2024,1,1),DATE(2024,1,31))
 WORKDAY.INTL(DATE(2024,1,1),10)
 ISO.CEILING(4.3,2)
+
+# XL-FEAT-131: a function whose parameter is one value, handed a range or an
+# array, is evaluated per element. Wrapped in SUMPRODUCT (which takes arrays in
+# both engines) so each line is one comparable number.
+SUMPRODUCT(MOD(C1:C10,4))
+SUMPRODUCT(ROUND(G1:G5,0))
+SUMPRODUCT(ABS(G1:G5))
+SUMPRODUCT(LEN(E1:E5))
+SUMPRODUCT(--(UPPER(E1:E5)="BETA"))
+SUMPRODUCT(--ISNUMBER(SEARCH("a",E1:E5)))
+SUMPRODUCT(DATE(2024,C1:C3,1))
+SUMPRODUCT(YEAR(C1:C3*1000))
+SUMPRODUCT(1/COUNTIF(C1:C10,C1:C10))
+SUMPRODUCT(--ISBLANK(H1:H5))
+SUMPRODUCT(LEN(CONCATENATE(E1:E3,"!")))
+# Broadcasting: a column against a row is the outer product; where a shorter
+# array runs out the element is #N/A.
+SUMPRODUCT(MOD(C3:C5,TRANSPOSE(C2:C3)))
+SUMPRODUCT(C1:C2+TRANSPOSE(D1:D3))
+SUMPRODUCT(ISNA(IF(F1:F3,C1:C2,0))*1)
+SUMPRODUCT(C1:C3*C1:C2)  @differs: Excel pads the shorter array with #N/A and SUMPRODUCT propagates it; LibreOffice truncates to the common size and answers 5
+# AND/OR skip text and blanks inside a reference; text typed as an argument
+# is #VALUE!, and a range with no logical at all is #VALUE!.
+AND(E1:F1)
+OR(E1:E5,F2)
+AND(C1:C3,E1:E5)
+AND(H1:H5,TRUE)
+AND(E1:E5)
+OR(H1:H5)
+AND("abc",TRUE)
+OR("abc",TRUE)
+OR(C1:C10>5)  @differs: outside an array formula LibreOffice implicitly intersects the comparison (#VALUE! off rows 1-10, the cell rows agree); dynamic-array Excel passes the whole array, as Microsoft documents OR over an array
+AND(C1:C10>0)  @differs: outside an array formula LibreOffice implicitly intersects the comparison (#VALUE! off rows 1-10, the cell rows agree); dynamic-array Excel passes the whole array, as Microsoft documents OR over an array
+
+# XL-FEAT-132: small differences from Excel.
+IMSQRT("1+i")
+IMEXP("1+i")
+IMLN("3+4i")
+SEQUENCE(0)  @since-lo: 24.8
+PERCENTRANK(C1:C10,1.9,1)
+PERCENTRANK.INC(C1:C10,1.9,1)
+PERCENTRANK.INC(C1:C10,1.63,2)
+LEN(CONCAT(REPT("a",32767),"b"))  @differs: Microsoft: past 32,767 characters CONCAT returns #VALUE!; LibreOffice has no cell limit and answers 32768
+LEN(TEXTJOIN(",",TRUE,REPT("a",20000),REPT("b",20000)))  @differs: Microsoft: past 32,767 characters TEXTJOIN returns #VALUE!; LibreOffice has no cell limit and answers 40001
+ROWS(A$1:A5)
+ROWS(A1:A$5)
+COLUMNS($A1:C1)

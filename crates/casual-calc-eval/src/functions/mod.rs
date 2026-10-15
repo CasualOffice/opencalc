@@ -19,6 +19,7 @@ mod datetime;
 mod engineering;
 mod financial;
 mod info;
+mod lift;
 mod lookup;
 mod math;
 mod matrix;
@@ -32,6 +33,8 @@ pub(crate) use datetime::*;
 pub(crate) use engineering::*;
 pub(crate) use financial::*;
 pub(crate) use info::*;
+#[cfg(test)]
+pub(crate) use lift::lifted_functions;
 pub(crate) use lookup::*;
 pub(crate) use math::*;
 pub(crate) use matrix::*;
@@ -772,7 +775,20 @@ pub const FUNCTIONS: &[(&str, &str)] = &[
 ];
 
 /// Dispatch a function call by (upper-cased) name.
+///
+/// A function with a scalar parameter handed an array is lifted over it first
+/// (the `lift` module) — `MOD(C1:C10,4)` is ten calls — and otherwise called
+/// as written.
 pub fn call_function(ev: &mut Evaluator<'_>, sheet: usize, name: &str, args: &[Expr]) -> Value {
+    if let Some(lifted) = lift::call_lifted(ev, sheet, name, args) {
+        return lifted;
+    }
+    dispatch(ev, sheet, name, args)
+}
+
+/// The function body for `name`, with no lifting — what a lifted call runs
+/// once per element.
+pub(crate) fn dispatch(ev: &mut Evaluator<'_>, sheet: usize, name: &str, args: &[Expr]) -> Value {
     match name {
         "SUM" => match flatten_numbers(ev, sheet, args) {
             Ok(ns) => Value::Number(ns.iter().sum()),
@@ -1497,9 +1513,10 @@ fn if_elementwise(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr], condition
     } else {
         Value::Bool(false)
     };
-    let Some((rows, cols)) = crate::value::broadcast_shape(&[condition, &then, &otherwise]) else {
-        return Value::Error(ErrorValue::Value);
-    };
+    let (rows, cols) = crate::value::broadcast_shape(&[condition, &then, &otherwise]);
+    if let Err(e) = checked_array_size(rows, cols) {
+        return Value::Error(e);
+    }
     let mut cells = Vec::with_capacity(rows * cols);
     for r in 0..rows {
         for c in 0..cols {
@@ -1526,48 +1543,44 @@ pub(crate) fn eval_iferror(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) 
 }
 
 /// `AND`/`OR`. `require_all` true means `AND` (every truthy), false means `OR`.
+///
+/// The same coercion as [`eval_xor`] — Microsoft documents the three
+/// identically: text and blanks inside a reference or an array are ignored,
+/// text typed as an argument must read as a logical, and no logical anywhere
+/// is `#VALUE!`. AND/OR used to coerce every cell, so one label in a range
+/// made the whole answer `#VALUE!` (`XL-FEAT-131`).
 pub(crate) fn eval_and_or(
     ev: &mut Evaluator<'_>,
     sheet: usize,
     args: &[Expr],
     require_all: bool,
 ) -> Value {
-    let mut any = false;
     let mut acc = require_all;
-    for arg in args {
-        for value in flatten_values(ev, sheet, arg) {
-            // Ignore blanks (matches Excel's treatment of empty cells in ranges).
-            if matches!(value, Value::Empty) {
-                continue;
-            }
-            let b = match value.as_bool() {
-                Ok(b) => b,
-                Err(e) => return Value::Error(e),
-            };
-            any = true;
-            if require_all {
-                acc = acc && b;
-            } else {
-                acc = acc || b;
-            }
+    let seen = for_each_logical(ev, sheet, args, |b| {
+        if require_all {
+            acc &= b;
+        } else {
+            acc |= b;
         }
+    });
+    match seen {
+        Ok(true) => Value::Bool(acc),
+        Ok(false) => Value::Error(ErrorValue::Value),
+        Err(e) => Value::Error(e),
     }
-    if !any {
-        return Value::Error(ErrorValue::Value);
-    }
-    Value::Bool(acc)
 }
 
-/// `XOR(logical1, …)` — TRUE when an odd number of the arguments are TRUE.
-///
-/// The coercion is Excel's for the logical functions, and it depends on how a
-/// value arrives: text written as an argument must read as a logical or the
-/// answer is `#VALUE!`, while text (and blanks) inside a reference or an array
-/// are skipped. No logical anywhere is `#VALUE!` too, not FALSE — there was
-/// nothing to count.
-pub(crate) fn eval_xor(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -> Value {
+/// Feed every logical among `args` to `f`, by the logical functions' rule:
+/// text and blanks inside a reference or an array are skipped, while a value
+/// written as an argument must read as a logical. `Ok(false)` when there was
+/// none to feed; the first error otherwise stops the walk.
+fn for_each_logical(
+    ev: &mut Evaluator<'_>,
+    sheet: usize,
+    args: &[Expr],
+    mut f: impl FnMut(bool),
+) -> Result<bool, ErrorValue> {
     let mut seen = false;
-    let mut odd = false;
     let mut count = |v: &Value, from_block: bool| -> Result<(), ErrorValue> {
         let truth = match v {
             Value::Bool(b) => *b,
@@ -1580,30 +1593,41 @@ pub(crate) fn eval_xor(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -> V
             other => other.as_bool()?,
         };
         seen = true;
-        odd ^= truth;
+        f(truth);
         Ok(())
     };
     for arg in args {
-        let result = match arg {
+        match arg {
             // A reference, even to one cell, is a reference: its text is skipped.
             Expr::Reference(_) | Expr::Range(..) | Expr::StructuredRef { .. } => {
                 flatten_values(ev, sheet, arg)
                     .iter()
-                    .try_for_each(|v| count(v, true))
+                    .try_for_each(|v| count(v, true))?;
             }
+            // Anything else is read whole, so `OR(C1:C10>5)` tests ten cells
+            // rather than the corner one.
             _ => match ev.eval_expr_array(sheet, arg) {
-                Value::Array { cells, .. } => cells.iter().try_for_each(|v| count(v, true)),
-                v => count(&v, false),
+                Value::Array { cells, .. } => cells.iter().try_for_each(|v| count(v, true))?,
+                v => count(&v, false)?,
             },
-        };
-        if let Err(e) = result {
-            return Value::Error(e);
         }
     }
-    if seen {
-        Value::Bool(odd)
-    } else {
-        Value::Error(ErrorValue::Value)
+    Ok(seen)
+}
+
+/// `XOR(logical1, …)` — TRUE when an odd number of the arguments are TRUE.
+///
+/// The coercion is Excel's for the logical functions, and it depends on how a
+/// value arrives: text written as an argument must read as a logical or the
+/// answer is `#VALUE!`, while text (and blanks) inside a reference or an array
+/// are skipped. No logical anywhere is `#VALUE!` too, not FALSE — there was
+/// nothing to count.
+pub(crate) fn eval_xor(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -> Value {
+    let mut odd = false;
+    match for_each_logical(ev, sheet, args, |b| odd ^= b) {
+        Ok(true) => Value::Bool(odd),
+        Ok(false) => Value::Error(ErrorValue::Value),
+        Err(e) => Value::Error(e),
     }
 }
 
@@ -1701,6 +1725,19 @@ pub(crate) fn eval_round(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) ->
     Value::Number((value * factor).round() / factor)
 }
 
+/// Whether `text` is longer than a cell may hold ([`MAX_TEXT_CHARS`]).
+///
+/// Cheap while the text is short — a UTF-8 string has at least as many bytes
+/// as characters, so only one past the limit in bytes is counted — which lets
+/// a joining loop ask after every piece and stop as soon as it is over,
+/// rather than build a string the size of a column of long texts first.
+pub(crate) fn exceeds_text_limit(text: &str) -> bool {
+    text.len() > MAX_TEXT_CHARS && text.chars().count() > MAX_TEXT_CHARS
+}
+
+/// `CONCAT` and `CONCATENATE`. A result longer than a cell may hold is
+/// `#VALUE!`, as Microsoft documents for both, and as `REPT` already was
+/// (`XL-FEAT-132`).
 pub(crate) fn eval_concat(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -> Value {
     let mut out = String::new();
     for arg in args {
@@ -1708,6 +1745,9 @@ pub(crate) fn eval_concat(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -
             match value.as_text() {
                 Ok(s) => out.push_str(&s),
                 Err(e) => return Value::Error(e),
+            }
+            if exceeds_text_limit(&out) {
+                return Value::Error(ErrorValue::Value);
             }
         }
     }

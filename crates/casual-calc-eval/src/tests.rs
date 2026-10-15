@@ -3124,6 +3124,7 @@ fn every_dispatched_function_is_in_the_catalog() {
         include_str!("functions/engineering.rs"),
         include_str!("functions/financial.rs"),
         include_str!("functions/info.rs"),
+        include_str!("functions/lift.rs"),
         include_str!("functions/lookup.rs"),
         include_str!("functions/math.rs"),
         include_str!("functions/matrix.rs"),

@@ -1266,3 +1266,530 @@ fn trimrange_drops_blank_edges() {
     error("TRIMRANGE(Z1:Z9)", ErrorValue::Calc);
     error("TRIMRANGE(C1:D2,4)", ErrorValue::Value);
 }
+
+// --- XL-FEAT-131: scalar functions lift over arrays --------------------------
+
+/// Every function the engine lifts element-wise, each with a call shape and
+/// the fixture column it is lifted over (`#` is the lifted argument).
+///
+/// Microsoft: when a function that expects a single value is handed an array
+/// or a range, it is evaluated for each value and returns an array (dynamic
+/// arrays and spilled array behaviour). Every entry is a function whose
+/// documented parameter is a single value, for which Excel does that.
+pub(crate) const LIFTED: &[(&str, char)] = &[
+    // Maths, over G (2.5, -3.5, 0, 1e10 — signs, zero and a large value,
+    // which is where the domain errors are).
+    ("ABS(#)", 'G'),
+    ("SIGN(#)", 'G'),
+    ("INT(#)", 'G'),
+    ("TRUNC(#,1)", 'G'),
+    ("ROUND(#,1)", 'G'),
+    ("ROUNDUP(#,0)", 'G'),
+    ("ROUNDDOWN(#,0)", 'G'),
+    ("MOD(#,4)", 'G'),
+    ("POWER(#,2)", 'G'),
+    ("SQRT(#)", 'G'),
+    ("EXP(#)", 'G'),
+    ("SIN(#)", 'G'),
+    ("COS(#)", 'G'),
+    ("TAN(#)", 'G'),
+    ("ASIN(#)", 'G'),
+    ("ACOS(#)", 'G'),
+    ("ATAN(#)", 'G'),
+    ("SINH(#)", 'G'),
+    ("COSH(#)", 'G'),
+    ("TANH(#)", 'G'),
+    ("ASINH(#)", 'G'),
+    ("ACOSH(#)", 'G'),
+    ("ATANH(#)", 'G'),
+    ("ATAN2(#,1)", 'G'),
+    ("ACOT(#)", 'G'),
+    ("ACOTH(#)", 'G'),
+    ("COT(#)", 'G'),
+    ("COTH(#)", 'G'),
+    ("CSC(#)", 'G'),
+    ("CSCH(#)", 'G'),
+    ("SEC(#)", 'G'),
+    ("SECH(#)", 'G'),
+    ("DEGREES(#)", 'G'),
+    ("RADIANS(#)", 'G'),
+    ("LN(#)", 'G'),
+    ("LOG(#,10)", 'G'),
+    ("LOG10(#)", 'G'),
+    ("SQRTPI(#)", 'G'),
+    ("EVEN(#)", 'G'),
+    ("ODD(#)", 'G'),
+    ("CEILING(#,1)", 'G'),
+    ("FLOOR(#,1)", 'G'),
+    ("MROUND(#,2)", 'G'),
+    ("QUOTIENT(#,2)", 'G'),
+    ("FACT(#)", 'C'),
+    ("FACTDOUBLE(#)", 'C'),
+    ("COMBIN(10,#)", 'C'),
+    ("COMBINA(#,2)", 'C'),
+    ("PERMUT(10,#)", 'C'),
+    ("CEILING.MATH(#)", 'G'),
+    ("FLOOR.MATH(#)", 'G'),
+    ("CEILING.PRECISE(#)", 'G'),
+    ("FLOOR.PRECISE(#)", 'G'),
+    ("ISO.CEILING(#)", 'G'),
+    ("BASE(#,2)", 'D'),
+    ("DECIMAL(#,10)", 'H'),
+    ("ROMAN(#)", 'D'),
+    // Text, over E (words) or H (numeric-looking text and a blank).
+    ("LEN(#)", 'E'),
+    ("UPPER(#)", 'E'),
+    ("LOWER(#)", 'E'),
+    ("PROPER(#)", 'E'),
+    ("TRIM(#)", 'E'),
+    ("CLEAN(#)", 'E'),
+    ("LEFT(#,2)", 'E'),
+    ("RIGHT(#,2)", 'E'),
+    ("MID(#,2,2)", 'E'),
+    ("REPT(#,2)", 'E'),
+    ("SUBSTITUTE(#,\"a\",\"x\")", 'E'),
+    ("REPLACE(#,1,1,\"Z\")", 'E'),
+    ("FIND(\"a\",#)", 'E'),
+    ("SEARCH(\"A\",#)", 'E'),
+    ("EXACT(#,\"beta\")", 'E'),
+    ("CODE(#)", 'E'),
+    ("UNICODE(#)", 'E'),
+    ("CHAR(#+64)", 'C'),
+    ("UNICHAR(#+64)", 'C'),
+    ("CONCATENATE(#,\"!\")", 'E'),
+    ("VALUE(#)", 'H'),
+    ("NUMBERVALUE(#)", 'H'),
+    ("TEXT(#,\"0.0\")", 'G'),
+    ("FIXED(#,1)", 'G'),
+    // Dates and times, over C (1..4) — and over computed arrays, not only
+    // ranges: `#*1000` is an array before the function sees it.
+    ("DATE(2024,#,1)", 'C'),
+    ("TIME(#,30,0)", 'C'),
+    ("YEAR(#*1000)", 'C'),
+    ("MONTH(#*100)", 'C'),
+    ("DAY(#*10)", 'C'),
+    ("HOUR(#/7)", 'C'),
+    ("MINUTE(#/7)", 'C'),
+    ("SECOND(#/7)", 'C'),
+    ("WEEKDAY(#)", 'C'),
+    ("WEEKNUM(#*30)", 'C'),
+    ("ISOWEEKNUM(#*30)", 'C'),
+    ("EDATE(45000,#)", 'C'),
+    ("EOMONTH(45000,#)", 'C'),
+    ("DAYS(45000,#)", 'C'),
+    // Information and logic, over H (text, numbers-as-text, a blank).
+    ("ISNUMBER(#)", 'G'),
+    ("ISTEXT(#)", 'H'),
+    ("ISBLANK(#)", 'H'),
+    ("ISERROR(VALUE(#))", 'H'),
+    ("ISERR(VALUE(#))", 'H'),
+    ("ISNA(#)", 'H'),
+    ("ISLOGICAL(#)", 'F'),
+    ("ISNONTEXT(#)", 'H'),
+    ("ISEVEN(#)", 'C'),
+    ("ISODD(#)", 'C'),
+    ("NOT(#)", 'F'),
+    // The criteria lifts; the range does not. `COUNTIF(r, r)` is how a
+    // spreadsheet counts each value's occurrences.
+    ("COUNTIF(C1:C10,\">\"&#)", 'C'),
+    ("SUMIF(C1:C10,\"<\"&#)", 'C'),
+    ("AVERAGEIF(C1:C10,\"<=\"&#)", 'C'),
+];
+
+/// Functions that must never lift, whichever way the table grows: each reads
+/// a range whole, inspects the reference rather than its value, is lazy in an
+/// argument, or shapes an array.
+const NEVER_LIFTED: &[&str] = &[
+    "SUM",
+    "SUMPRODUCT",
+    "PRODUCT",
+    "AVERAGE",
+    "MIN",
+    "MAX",
+    "COUNT",
+    "COUNTA",
+    "INDEX",
+    "MATCH",
+    "XMATCH",
+    "VLOOKUP",
+    "HLOOKUP",
+    "XLOOKUP",
+    "LOOKUP",
+    "ROWS",
+    "COLUMNS",
+    "ROW",
+    "COLUMN",
+    "ISREF",
+    "ISFORMULA",
+    "FORMULATEXT",
+    "CELL",
+    "OFFSET",
+    "INDIRECT",
+    "IF",
+    "IFS",
+    "IFERROR",
+    "IFNA",
+    "CHOOSE",
+    "SWITCH",
+    "AND",
+    "OR",
+    "XOR",
+    "CONCAT",
+    "TEXTJOIN",
+    "N",
+    "T",
+    "SUBTOTAL",
+    "AGGREGATE",
+    "COUNTIFS",
+    "SUMIFS",
+    "TRANSPOSE",
+    "SEQUENCE",
+    "FILTER",
+    "SORT",
+    "UNIQUE",
+    "RAND",
+    "RANDBETWEEN",
+];
+
+#[test]
+fn the_lift_table_is_what_the_tests_say() {
+    let name = |template: &str| template[..template.find('(').unwrap()].to_owned();
+    let tested: std::collections::BTreeSet<String> = LIFTED.iter().map(|(t, _)| name(t)).collect();
+    let table: Vec<&str> = crate::functions::lifted_functions().collect();
+    // Sorted, because it is binary-searched.
+    let mut sorted = table.clone();
+    sorted.sort_unstable();
+    assert_eq!(table, sorted, "the lift table must stay alphabetical");
+    let table: std::collections::BTreeSet<String> = table.iter().map(|s| (*s).to_owned()).collect();
+    assert_eq!(
+        table, tested,
+        "every lifted function is exercised by the property test, and only those"
+    );
+    for f in &table {
+        assert!(crate::functions::is_builtin(f), "{f} is not a builtin");
+    }
+    for f in NEVER_LIFTED {
+        assert!(!table.contains(*f), "{f} must not lift");
+    }
+}
+
+#[test]
+fn lifting_composes() {
+    // Nested lifts, a LET-bound array, a single-cell range.
+    spills(
+        "ROUND(SQRT(C1:C3),2)",
+        |_, _| {},
+        &[&["1"], &["1.41"], &["1.73"]],
+    );
+    num("LET(x,C1:C3,SUMPRODUCT(MOD(x,2)))", 2.0);
+    num("ABS(G2:G2)", 3.5);
+    // Each value's count of occurrences, the unique-count idiom.
+    num("SUMPRODUCT(1/COUNTIF(C1:C10,C1:C10))", 10.0);
+    // A scalar argument that is not a literal still evaluates once and is
+    // passed through: no array anywhere means no array out.
+    num("ROUND(SUM(C1:C3)/7,2)", 0.86);
+    // An error argument broadcasts like any value.
+    spills("MOD(C1:C2,1/0)", |_, _| {}, &[&["#DIV/0!"], &["#DIV/0!"]]);
+}
+
+/// Functions that take a range or an array **as such** — reducing it,
+/// searching it or measuring it — and therefore must not be lifted: `SUM`
+/// over a column is one total, not ten. Each is checked to still answer its
+/// one value.
+const NOT_LIFTED: &[(&str, f64)] = &[
+    ("SUM(C1:C4)", 10.0),
+    ("SUMPRODUCT(C1:C4,D1:D4)", 300.0),
+    ("INDEX(C1:C10,3)", 3.0),
+    ("MATCH(3,C1:C10,0)", 3.0),
+    ("COUNTIF(C1:C10,\">5\")", 5.0),
+    ("SUMIF(C1:C10,\">5\")", 40.0),
+    ("ROWS(C1:C4)", 4.0),
+    ("COLUMNS(C1:D4)", 2.0),
+    ("AVERAGE(C1:C4)", 2.5),
+    ("MAX(C1:C4)", 4.0),
+    ("COUNTA(E1:E5)", 5.0),
+    ("LEN(CONCAT(E1:E2))", 9.0),
+    ("LEN(TEXTJOIN(\",\",TRUE,E1:E2))", 10.0),
+    ("VLOOKUP(3,C1:D10,2,FALSE)", 30.0),
+];
+
+#[test]
+fn scalar_functions_lift_element_wise_over_a_range() {
+    // The property, for every lifted function: element k of F(range) is
+    // F(the k-th cell). Expected values are the function's own answer on a
+    // single cell — the scalar path, which the rest of this file pins to
+    // Microsoft and LibreOffice — so this is a test of lifting, not of F.
+    let mut failures = Vec::new();
+    for (template, col) in LIFTED {
+        let lifted = template.replace('#', &format!("{col}1:{col}4"));
+        let (wb, rows) = eval(&format!("ROWS({lifted})"));
+        if rows != CellValue::Number(4.0) {
+            failures.push(format!("ROWS({lifted}) = {}", show(&wb, &rows)));
+            continue;
+        }
+        for k in 1..=4u32 {
+            let (wb_l, got) = eval(&format!("INDEX({lifted},{k})"));
+            let single = template.replace('#', &format!("{col}{k}"));
+            let (wb_s, want) = eval(&single);
+            let (got, want) = (show(&wb_l, &got), show(&wb_s, &want));
+            if got != want {
+                failures.push(format!("INDEX({lifted},{k}) = {got}, {single} = {want}"));
+            }
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "{} lifting failures:\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
+}
+
+#[test]
+fn range_taking_functions_are_not_lifted() {
+    for (formula, expected) in NOT_LIFTED {
+        num(formula, *expected);
+    }
+}
+
+#[test]
+fn a_lifted_function_spills_from_a_cell() {
+    // MS: `=MOD(C1:C10,4)` in one cell spills ten results.
+    spills(
+        "MOD(C1:C10,4)",
+        |_, _| {},
+        &[
+            &["1"],
+            &["2"],
+            &["3"],
+            &["0"],
+            &["1"],
+            &["2"],
+            &["3"],
+            &["0"],
+            &["1"],
+            &["2"],
+        ],
+    );
+    spills(
+        "UPPER(E1:E3)",
+        |_, _| {},
+        &[&["\"ALPHA\""], &["\"BETA\""], &["\"GAMMA\""]],
+    );
+    spills("ROUND(G1:G2,0)", |_, _| {}, &[&["3"], &["-4"]]);
+    // CONCATENATE is the scalar one, so it lifts; CONCAT takes ranges and
+    // joins them.
+    spills(
+        "CONCATENATE(E1:E2,\"!\")",
+        |_, _| {},
+        &[&["\"alpha!\""], &["\"beta!\""]],
+    );
+}
+
+#[test]
+fn lifted_arguments_broadcast_as_excel_does() {
+    // A column against a row is the outer product: 3×1 with 1×2 is 3×2.
+    spills(
+        "MOD(C3:C5,TRANSPOSE(C2:C3))",
+        |_, _| {},
+        &[&["1", "0"], &["0", "1"], &["1", "2"]],
+    );
+    // A single value repeats against every element.
+    spills(
+        "DATE(2024,C1:C3,1)",
+        |_, _| {},
+        &[&["45292"], &["45323"], &["45352"]],
+    );
+    // Two columns of different lengths pair positionally, and where the
+    // shorter has run out the element is #N/A.
+    spills(
+        "POWER(C1:C3,C1:C2)",
+        |_, _| {},
+        &[&["1"], &["4"], &["#N/A"]],
+    );
+    // 2×2 against 3×1: the 3×1 repeats across, and the row the 2×2 lacks is
+    // #N/A.
+    spills(
+        "POWER(C1:D2,C1:C3)",
+        |_, _| {},
+        &[&["1", "10"], &["4", "400"], &["#N/A", "#N/A"]],
+    );
+    // Errors stay in their element.
+    spills(
+        "SQRT(G1:G3)",
+        |_, _| {},
+        &[&["1.5811388300841898"], &["#NUM!"], &["0"]],
+    );
+    // And lifted results feed array-consuming functions.
+    num("SUMPRODUCT(MOD(C1:C10,4))", 15.0);
+    num("SUM(LEN(E1:E5))", 26.0);
+    num("SUMPRODUCT(--ISNUMBER(SEARCH(\"a\",E1:E5)))", 4.0);
+}
+
+#[test]
+fn binary_operators_broadcast_by_the_same_rule() {
+    // One broadcast rule for operators, IF and lifted functions: the outer
+    // product, and #N/A where a shorter array runs out.
+    spills(
+        "C1:C2+TRANSPOSE(D1:D3)",
+        |_, _| {},
+        &[&["11", "21", "31"], &["12", "22", "32"]],
+    );
+    spills("C1:C3*C1:C2", |_, _| {}, &[&["1"], &["4"], &["#N/A"]]);
+    spills("IF(F1:F3,C1:C2,0)", |_, _| {}, &[&["1"], &["0"], &["#N/A"]]);
+}
+
+#[test]
+fn a_lifted_result_is_bounded_like_every_array() {
+    // 2,000 × 2,000 is four million elements, past the engine's two-million
+    // budget: #NUM!, not an allocation the size of the request.
+    error(
+        "ROWS(MOD(SEQUENCE(2000),SEQUENCE(1,2000)))",
+        ErrorValue::Num,
+    );
+    error("ROWS(SEQUENCE(2000)+SEQUENCE(1,2000))", ErrorValue::Num);
+    // ...while one inside the budget is fine.
+    num("ROWS(MOD(SEQUENCE(1000),SEQUENCE(1,1000)))", 1000.0);
+}
+
+#[test]
+fn and_or_skip_text_and_blanks_inside_a_reference() {
+    // MS (AND/OR): "If an array or reference argument contains text or empty
+    // cells, those values are ignored." E1 is text, F1 TRUE.
+    boolean("AND(E1:F1)", true);
+    boolean("OR(E1:E5,F2)", false);
+    boolean("AND(C1:C3,E1:E5)", true);
+    boolean("OR(E1:E5,F1:F5)", true);
+    boolean("AND(H1:H5,TRUE)", true); // H is all text and a blank
+    // A range holding no logical values at all is #VALUE!.
+    error("AND(E1:E5)", ErrorValue::Value);
+    error("OR(H1:H5)", ErrorValue::Value);
+    // Text typed as an argument is not skipped: it must read as a logical.
+    error("AND(\"abc\",TRUE)", ErrorValue::Value);
+    error("OR(\"abc\",TRUE)", ErrorValue::Value);
+    boolean("AND(\"TRUE\",TRUE)", true);
+    // A computed array is read whole — OR(C1:C10>5) is not just C1>5.
+    boolean("OR(C1:C10>5)", true);
+    boolean("AND(C1:C10>5)", false);
+    boolean("AND(C1:C10>0)", true);
+    // Errors propagate.
+    error("AND(TRUE,1/0)", ErrorValue::Div0);
+}
+
+// --- XL-FEAT-132: small differences from Excel -------------------------------
+
+#[test]
+fn isformula_reads_the_referenced_sheet() {
+    // MS: ISFORMULA "checks whether there is a reference to a cell that
+    // contains a formula" — the referenced cell, on its own sheet. It read
+    // the formula's own sheet at the same address.
+    let run = |formula: &str| {
+        let (mut wb, sheet) = fixture();
+        let mut other = Sheet::new(SheetId(Id::from_parts(2, 2)), "Other");
+        // Other!B5 holds a formula and S!B5 does not; S!B6 does, Other!B6
+        // does not.
+        put_formula(&mut wb, &mut other, (4, 1), "C1+1");
+        let mut first = sheet;
+        put_formula(&mut wb, &mut first, (5, 1), "C1+2");
+        put_formula(&mut wb, &mut first, AT, formula);
+        wb.sheets.push(first);
+        wb.sheets.push(other);
+        recalculate(&mut wb);
+        let v = cell(&wb, AT.0, AT.1);
+        show(&wb, &v)
+    };
+    assert_eq!(run("ISFORMULA(Other!B5)"), "TRUE");
+    assert_eq!(run("ISFORMULA(Other!B6)"), "FALSE");
+    assert_eq!(run("ISFORMULA(B6)"), "TRUE");
+    assert_eq!(run("ISFORMULA(Nowhere!B5)"), "#REF!");
+}
+
+#[test]
+fn subtotal_skips_cells_that_are_subtotals() {
+    // MS: "If there are other subtotals within ref1, ref2,… (or nested
+    // subtotals), these nested subtotals are ignored to avoid double
+    // counting." A3 and A5 are subtotals of A1:A2; the total of A1:A5 is
+    // 1 + 2 + 4.
+    let setup = |wb: &mut Workbook, sheet: &mut Sheet| {
+        put_number(sheet, (0, 0), 1.0);
+        put_number(sheet, (1, 0), 2.0);
+        put_formula(wb, sheet, (2, 0), "SUBTOTAL(9,A1:A2)");
+        put_number(sheet, (3, 0), 4.0);
+        put_formula(wb, sheet, (4, 0), "AGGREGATE(9,0,A1:A2)*1");
+    };
+    let read = |f: &str| {
+        let (wb, v) = eval_in(f, setup);
+        show(&wb, &v)
+    };
+    assert_eq!(read("SUBTOTAL(9,A1:A5)"), "7");
+    assert_eq!(read("SUBTOTAL(109,A1:A5)"), "7");
+    assert_eq!(read("SUBTOTAL(2,A1:A5)"), "3");
+    assert_eq!(read("SUBTOTAL(2,A3)"), "0");
+    assert_eq!(read("SUBTOTAL(2,A4)"), "1");
+    // A plain SUM still counts them: the rule is SUBTOTAL's.
+    assert_eq!(read("SUM(A1:A5)"), "13");
+}
+
+#[test]
+fn complex_results_print_fifteen_significant_digits() {
+    // MS, each function's documented example, as Excel prints it.
+    text("IMSQRT(\"1+i\")", "1.09868411346781+0.455089860562227i");
+    text("IMEXP(\"1+i\")", "1.46869393991589+2.28735528717884i");
+    text("IMLN(\"3+4i\")", "1.6094379124341+0.927295218001612i");
+    // Exact results are untouched.
+    text("IMDIV(\"-238+240i\",\"10+24i\")", "5+12i");
+    text("COMPLEX(0.1+0.2,1)", "0.3+i");
+}
+
+#[test]
+fn an_empty_sequence_is_calc() {
+    // Excel: a function that would return an empty array is #CALC!.
+    error("SEQUENCE(0)", ErrorValue::Calc);
+    error("SEQUENCE(1,0)", ErrorValue::Calc);
+    error("SEQUENCE(0.5)", ErrorValue::Calc);
+}
+
+#[test]
+fn percentrank_truncates_without_losing_a_digit_to_rounding() {
+    // 1.9 sits 0.9 of the way from 1 to 2 over nine steps: exactly 0.1, which
+    // floating point computes as 0.09999999999999999. Truncating that to one
+    // digit gave 0. LO: 0.1 (and PERCENTRANK.EXC already had the fuzz).
+    num("PERCENTRANK(C1:C10,1.9,1)", 0.1);
+    num("PERCENTRANK.INC(C1:C10,1.9,1)", 0.1);
+    num("PERCENTRANK.INC(C1:C10,1.63,2)", 0.07);
+    num("PERCENTRANK.INC(C1:C10,1.45,3)", 0.05);
+    // Truncation itself is kept: 0.0333… is 0.033, not 0.034.
+    num("PERCENTRANK.INC(C1:C10,1.3)", 0.033);
+}
+
+#[test]
+fn concat_and_textjoin_refuse_text_longer_than_a_cell() {
+    // MS: "If the resulting string exceeds 32767 characters (cell limit),
+    // CONCAT returns the #VALUE! error." TEXTJOIN documents the same.
+    num("LEN(CONCAT(REPT(\"a\",32767)))", 32767.0);
+    error("CONCAT(REPT(\"a\",32767),\"b\")", ErrorValue::Value);
+    error(
+        "CONCATENATE(REPT(\"a\",20000),REPT(\"b\",20000))",
+        ErrorValue::Value,
+    );
+    error(
+        "TEXTJOIN(\",\",TRUE,REPT(\"a\",20000),REPT(\"b\",20000))",
+        ErrorValue::Value,
+    );
+    num(
+        "LEN(TEXTJOIN(\",\",TRUE,REPT(\"a\",16383),REPT(\"b\",16383)))",
+        32767.0,
+    );
+}
+
+#[test]
+fn rows_and_columns_measure_a_mixed_reference() {
+    // The formula sits on row 20: a range with one end anchored and one
+    // relative must be resolved before it is measured.
+    num("ROWS(A$1:A5)", 5.0);
+    num("ROWS(A1:A$5)", 5.0);
+    num("COLUMNS($A1:C1)", 3.0);
+    num("COLUMNS(A1:$C1)", 3.0);
+    num("ROWS($A$1:$A$5)", 5.0);
+    num("ROWS(A1:A5)", 5.0);
+}

@@ -50,6 +50,16 @@ const FORMULA_COL: u32 = 0;
 const CSV_FILTER: &str =
     "csv:Text - txt - csv (StarCalc):44,34,76,1,,0,false,true,true,false,false,-1,false,true";
 
+/// The formula oracle's export: the same, but **raw values**, not as shown
+/// (token 9 `false`). With recalculation forced (XL-FEAT-134) LibreOffice
+/// infers a display format for a formula's result — currency for `PMT`, a
+/// date for `DATE`, a percentage for `RATE` — in this machine's locale
+/// (`₹188.71`, `15/03/24`), which made equal answers disagree. The corpus
+/// compares values; the ODS oracle, which compares documents' own displayed
+/// text, keeps [`CSV_FILTER`].
+const RAW_CSV_FILTER: &str =
+    "csv:Text - txt - csv (StarCalc):44,34,76,1,,0,false,true,false,false,false,-1,false,true";
+
 /// How far apart two numbers may be and still count as agreeing, relative to
 /// the larger. LibreOffice exports about fourteen significant digits; this is
 /// two orders looser than that and many orders tighter than a real defect.
@@ -276,6 +286,7 @@ fn validate_package(args: &[String]) -> Result<Report, String> {
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned())?;
 
     let profile = dir.join("profile");
+    recalculating_profile(&profile)?;
     let result = Command::new(&soffice)
         .arg(format!(
             "-env:UserInstallation=file://{}",
@@ -805,6 +816,34 @@ struct Oracle {
     values: BTreeMap<u32, String>,
 }
 
+/// Prepare a LibreOffice user profile that **recalculates every formula on
+/// load** (XL-FEAT-134).
+///
+/// LibreOffice's default for an `.xlsx` (and an `.ods`) it did not write is to
+/// trust the file's cached results: a formula whose cached value is a number
+/// or a logical is shown as cached, and only cached errors and text are
+/// recalculated. The oracle writes our own results as the cache, so for every
+/// numeric and boolean line it compared our value with itself — `ROWS(A$1:A5)`
+/// "agreed" at 27. `OOXMLRecalcMode`/`ODFRecalcMode` = 0 is "always
+/// recalculate". The locale is pinned to `en-US` so every machine — this
+/// laptop's `en-IN`, CI's runner — prints the same dates and numbers.
+fn recalculating_profile(profile: &Path) -> Result<(), String> {
+    let user = profile.join("user");
+    std::fs::create_dir_all(&user).map_err(|e| format!("profile: {e}"))?;
+    std::fs::write(
+        user.join("registrymodifications.xcu"),
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<oor:items xmlns:oor="http://openoffice.org/2001/registry" xmlns:xs="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+<item oor:path="/org.openoffice.Office.Calc/Formula/Load"><prop oor:name="OOXMLRecalcMode" oor:op="fuse"><value>0</value></prop></item>
+<item oor:path="/org.openoffice.Office.Calc/Formula/Load"><prop oor:name="ODFRecalcMode" oor:op="fuse"><value>0</value></prop></item>
+<item oor:path="/org.openoffice.Setup/L10N"><prop oor:name="ooSetupSystemLocale" oor:op="fuse"><value>en-US</value></prop></item>
+<item oor:path="/org.openoffice.Setup/L10N"><prop oor:name="ooLocale" oor:op="fuse"><value>en-US</value></prop></item>
+</oor:items>
+"#,
+    )
+    .map_err(|e| format!("profile settings: {e}"))
+}
+
 fn run_oracle(soffice: &str, book: &Path, dir: &Path) -> Result<Oracle, String> {
     let version = Command::new(soffice)
         .arg("--version")
@@ -816,6 +855,7 @@ fn run_oracle(soffice: &str, book: &Path, dir: &Path) -> Result<Oracle, String> 
     // interactive LibreOffice the developer happens to have open — which
     // otherwise fails with an unhelpful "javaldx" or simply hangs.
     let profile = dir.join("profile");
+    recalculating_profile(&profile)?;
     let status = Command::new(soffice)
         .arg(format!(
             "-env:UserInstallation=file://{}",
@@ -823,7 +863,7 @@ fn run_oracle(soffice: &str, book: &Path, dir: &Path) -> Result<Oracle, String> 
         ))
         .arg("--headless")
         .arg("--convert-to")
-        .arg(CSV_FILTER)
+        .arg(RAW_CSV_FILTER)
         .arg("--outdir")
         .arg(dir)
         .arg(book)
@@ -911,10 +951,73 @@ fn agrees(ours: &str, theirs: &str) -> bool {
     if ours == theirs {
         return true;
     }
-    match (parse_number(ours), parse_number(theirs)) {
+    match (parse_number(ours), oracle_number(theirs)) {
         (Some(a), Some(b)) => close(a, b),
         _ => false,
     }
+}
+
+/// A value as LibreOffice prints it even in a raw export, read back as the
+/// number it is (XL-FEAT-134): a percentage (`10%`), a US date
+/// (`03/15/2024`, the profile pins `en-US`) or a time (`13:30:00`). A plain
+/// number is read as it is. Anything else is not a number.
+fn oracle_number(s: &str) -> Option<f64> {
+    let t = s.trim();
+    if let Some(n) = parse_number(t) {
+        return Some(n);
+    }
+    if let Some(p) = t.strip_suffix('%') {
+        return parse_number(p).map(|v| v / 100.0);
+    }
+    let (date, time) = match t.split_once(' ') {
+        Some((d, tm)) if d.contains('/') => (Some(d), Some(tm)),
+        Some(_) if t.contains(':') => (None, Some(t)),
+        Some(_) => return None,
+        None if t.contains('/') => (Some(t), None),
+        None if t.contains(':') => (None, Some(t)),
+        None => return None,
+    };
+    let mut serial = 0.0;
+    if let Some(d) = date {
+        let mut parts = d.split('/');
+        let m: i64 = parts.next()?.parse().ok()?;
+        let day: i64 = parts.next()?.parse().ok()?;
+        let y: i64 = parts.next()?.parse().ok()?;
+        if parts.next().is_some() || !(1..=12).contains(&m) || !(1..=31).contains(&day) {
+            return None;
+        }
+        serial += excel_serial(y, m, day)? as f64;
+    }
+    if let Some(tm) = time {
+        // en-US prints `01:30:00 PM`; the date half, if any, was split off above.
+        let (clock, pm) = match tm.rsplit_once(' ') {
+            Some((c, "PM")) => (c, Some(true)),
+            Some((c, "AM")) => (c, Some(false)),
+            _ => (tm, None),
+        };
+        let mut parts = clock.split(':');
+        let mut h: f64 = parts.next()?.parse().ok()?;
+        if let Some(pm) = pm {
+            h = h % 12.0 + if pm { 12.0 } else { 0.0 };
+        }
+        let mi: f64 = parts.next()?.parse().ok()?;
+        let sec: f64 = parts.next().map_or(Some(0.0), |x| x.parse().ok())?;
+        serial += (h * 3600.0 + mi * 60.0 + sec) / 86400.0;
+    }
+    Some(serial)
+}
+
+/// Days since 1899-12-30, Excel's serial for a date from 1900-03-01 on.
+fn excel_serial(y: i64, m: i64, d: i64) -> Option<i64> {
+    // Days from the civil epoch (Howard Hinnant's algorithm).
+    let y2 = if m <= 2 { y - 1 } else { y };
+    let era = y2.div_euclid(400);
+    let yoe = y2 - era * 400;
+    let mp = (m + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe - 719_468; // days since 1970-01-01
+    Some(days + 25_569)
 }
 
 /// Whether a rendered value is an error, in either implementation's spelling.
@@ -1176,6 +1279,7 @@ fn oracle_grid(
 ) -> Result<BTreeMap<(u32, u32), String>, String> {
     std::fs::create_dir_all(dir).map_err(|e| format!("temp dir: {e}"))?;
     let profile = dir.join("profile");
+    recalculating_profile(&profile)?;
     let status = Command::new(soffice)
         .arg(format!(
             "-env:UserInstallation=file://{}",
@@ -1278,6 +1382,30 @@ fn csv_grid(text: &str) -> Vec<Vec<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn libreoffices_printed_values_read_back_as_numbers() {
+        assert_eq!(oracle_number("10%"), Some(0.1));
+        assert_eq!(
+            oracle_number("0.618341316125397%"),
+            Some(0.006_183_413_161_253_97)
+        );
+        assert_eq!(oracle_number("03/15/2024"), Some(45366.0));
+        assert_eq!(oracle_number("01/15/2024"), Some(45306.0));
+        assert_eq!(oracle_number("13:30:00"), Some(0.5625));
+        assert_eq!(oracle_number("01:30:00 PM"), Some(0.5625));
+        assert_eq!(oracle_number("12:00:00 AM"), Some(0.0));
+        assert_eq!(oracle_number("03/15/2024 13:30:00"), Some(45366.5625));
+        assert_eq!(oracle_number("42"), Some(42.0));
+        assert_eq!(
+            oracle_number("15/03/2024"),
+            None,
+            "a day-first date is not read as a US one"
+        );
+        assert_eq!(oracle_number("abc"), None);
+        assert!(agrees("45366", "03/15/2024"));
+        assert!(!agrees("45367", "03/15/2024"));
+    }
 
     #[test]
     fn a_line_carries_its_minimum_libreoffice_and_its_reason() {

@@ -145,39 +145,46 @@ impl Value {
         }
     }
 
-    /// The element at `(r, c)` of a broadcast: a scalar (or a single-element
-    /// array) pairs with every position.
+    /// The element at `(r, c)` of a broadcast, by Excel's rule: a single row
+    /// repeats down, a single column repeats across (so a scalar pairs with
+    /// every position), and a position past the end of a longer axis is
+    /// `#N/A` — the array has nothing there.
     pub(crate) fn broadcast_at(&self, r: usize, c: usize) -> Value {
         match self {
-            Value::Array { rows, cols, cells } => cells
-                .get((r % *rows) * *cols + (c % *cols))
-                .cloned()
-                .unwrap_or(Value::Empty),
+            Value::Array { rows, cols, cells } => {
+                let pick = |i: usize, n: usize| match n {
+                    1 => Some(0),
+                    _ if i < n => Some(i),
+                    _ => None,
+                };
+                match (pick(r, *rows), pick(c, *cols)) {
+                    (Some(rr), Some(cc)) => {
+                        cells.get(rr * *cols + cc).cloned().unwrap_or(Value::Empty)
+                    }
+                    _ => Value::Error(ErrorValue::Na),
+                }
+            }
             other => other.clone(),
         }
     }
 }
 
-/// The shape an element-wise operation over `values` produces, or `None` when
-/// two of them are arrays of different shapes.
+/// The shape an element-wise operation over `values` produces: the most rows
+/// of any of them by the most columns.
 ///
-/// One rule for every lifted operation — binary operators and `IF` alike — so
-/// they cannot disagree about what lines up with what. A single value pairs
-/// with every element; two blocks pair positionally and must agree, because
-/// guessing how to line up a 3×1 against a 1×4 produces a plausible answer to
-/// a question nobody asked.
-pub(crate) fn broadcast_shape(values: &[&Value]) -> Option<(usize, usize)> {
-    let mut block: Option<(usize, usize)> = None;
-    for v in values {
+/// One rule for every lifted operation — binary operators, `IF` and the
+/// lifted functions alike — so they cannot disagree about what lines up with
+/// what. It is Excel's (and LibreOffice's): `{1;2}+{10,20,30}` is the 2×3
+/// outer sum, and `{1;2;3}*{1;2}` is three rows whose last is `#N/A`
+/// ([`Value::broadcast_at`]). It used to refuse any two blocks of different
+/// shapes with `#VALUE!`, which no spreadsheet does (`XL-FEAT-131`).
+///
+/// The caller bounds the result with `checked_array_size` before allocating.
+pub(crate) fn broadcast_shape(values: &[&Value]) -> (usize, usize) {
+    values.iter().fold((1, 1), |(rows, cols), v| {
         let (r, c) = v.shape();
-        if r * c > 1 {
-            match block {
-                Some(b) if b != (r, c) => return None,
-                _ => block = Some((r, c)),
-            }
-        }
-    }
-    Some(block.unwrap_or((1, 1)))
+        (rows.max(r), cols.max(c))
+    })
 }
 
 /// Read a stored cell value into a runtime [`Value`], resolving interned strings.

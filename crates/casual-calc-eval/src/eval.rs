@@ -397,6 +397,30 @@ impl<'a> Evaluator<'a> {
         }
     }
 
+    /// How many names are bound in the current scope — the mark to return to
+    /// with [`Self::unbind_to`].
+    pub(crate) fn scope_len(&self) -> usize {
+        self.scope.len()
+    }
+
+    /// Bind `name` to an already-computed value, innermost, as `LET` does.
+    pub(crate) fn bind(&mut self, name: String, value: Value) {
+        self.scope.push((name, value));
+    }
+
+    /// Replace the value of the binding at `index` (from [`Self::scope_len`]
+    /// before it was pushed).
+    pub(crate) fn rebind(&mut self, index: usize, value: Value) {
+        if let Some(slot) = self.scope.get_mut(index) {
+            slot.1 = value;
+        }
+    }
+
+    /// Drop every binding made since the scope was `mark` long.
+    pub(crate) fn unbind_to(&mut self, mark: usize) {
+        self.scope.truncate(mark);
+    }
+
     /// The cell whose formula is being evaluated, as an origin.
     ///
     /// `current` has tracked this since `ROW()` and `COLUMN()` needed it — a
@@ -650,13 +674,15 @@ impl<'a> Evaluator<'a> {
 
     /// Apply a binary operator element-wise across arrays.
     ///
-    /// A scalar operand pairs with every element; two arrays pair positionally
-    /// and must agree in shape, because guessing how to line up a 3×1 against a
-    /// 1×4 produces a plausible answer to a question nobody asked.
+    /// A scalar operand pairs with every element; arrays broadcast by
+    /// `value::broadcast_shape`'s rule, which is Excel's — a 3×1 against a
+    /// 1×4 is the 3×4 outer product, and where a shorter array runs out the
+    /// element is `#N/A`. The result is bounded before it is built.
     fn broadcast_binary(&mut self, op: BinaryOp, lv: &Value, rv: &Value) -> Value {
-        let Some((rows, cols)) = crate::value::broadcast_shape(&[lv, rv]) else {
-            return Value::Error(ErrorValue::Value);
-        };
+        let (rows, cols) = crate::value::broadcast_shape(&[lv, rv]);
+        if let Err(e) = crate::functions::checked_array_size(rows, cols) {
+            return Value::Error(e);
+        }
         let mut cells = Vec::with_capacity(rows * cols);
         for r in 0..rows {
             for c in 0..cols {
