@@ -41,6 +41,8 @@ pub fn session_read_only() -> bool {
 /// but an edit that reaches the session is refused whatever the UI is showing.
 #[wasm_bindgen]
 pub fn session_set_read_only(on: bool) {
+    // Remembered for every session installed after this one, too.
+    crate::HOST_READ_ONLY.with(|c| c.set(on));
     SESSION.with(|cell| {
         if let Some(session) = cell.borrow_mut().as_mut() {
             session.config_mut().read_only = on;
@@ -425,4 +427,26 @@ pub fn session_goal_seek(
         ))
     })
     .unwrap_or_else(|| Err(JsError::new("no session")))
+}
+
+#[cfg(test)]
+mod read_only_is_the_hosts {
+    use super::*;
+
+    /// Read-only is the **host's** setting, not one session's: opening a file
+    /// or starting a new workbook installs a new session, and that used to
+    /// come up editable. A viewer that loaded a document with `openBytes`
+    /// therefore accepted edits (found with MACRO-02). Every session the host
+    /// installs inherits it, as the clock already does.
+    #[test]
+    fn a_new_session_keeps_the_hosts_read_only() {
+        crate::io::session_new();
+        session_set_read_only(true);
+        assert!(session_read_only());
+        crate::io::session_new();
+        assert!(session_read_only(), "a new session came up editable");
+        session_set_read_only(false);
+        crate::io::session_new();
+        assert!(!session_read_only(), "releasing read-only must also carry");
+    }
 }
