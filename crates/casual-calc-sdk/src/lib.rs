@@ -2798,6 +2798,11 @@ fn recalc_plan(op: &Operation) -> RecalcPlan {
         | Operation::SetColumnWidth { .. }
         | Operation::SetRowHeight { .. }
         | Operation::SetTabColor { .. } => RecalcPlan::Skip,
+        // A macro is not evaluated by the calc engine — it runs only when the
+        // person chooses Run. When custom functions start to run (`MACRO-04`)
+        // a change to their sources changes what formulas compute, and this
+        // becomes `Full` for that list.
+        Operation::SetMacros(_) => RecalcPlan::Skip,
         // Most of this bundle is presentation, but two of its fields are read
         // by the evaluator: `SUBTOTAL`'s 101–111 codes and `AGGREGATE` skip
         // hidden rows, and `Sheet::is_row_hidden` is the union of the
@@ -2904,6 +2909,10 @@ fn delimited_loss(workbook: &Workbook, sheet_index: usize) -> CompatibilityRepor
 
     gone("other sheets", workbook.sheets.len().saturating_sub(1));
     gone("defined names", workbook.defined_names.len());
+    gone(
+        "macros",
+        workbook.macros.macros.len() + workbook.macros.custom_functions.len(),
+    );
 
     let Some(sheet) = workbook.sheets.get(sheet_index) else {
         return report;

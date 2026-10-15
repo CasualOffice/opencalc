@@ -590,6 +590,11 @@ pub fn plan(live: &mut Workbook, snapshot: &Workbook) -> RestoreReport {
     if live.defined_names != snapshot.defined_names {
         ops.push(Operation::SetDefinedNames(snapshot.defined_names.clone()));
     }
+    // The macros are document content like the names (`MACRO-02`): restoring a
+    // version brings back the macros it had.
+    if live.macros != snapshot.macros {
+        ops.push(Operation::SetMacros(snapshot.macros.clone()));
+    }
     unexpressed_workbook_fields(live, snapshot, &carried, &mut unexpressed);
 
     RestoreReport {

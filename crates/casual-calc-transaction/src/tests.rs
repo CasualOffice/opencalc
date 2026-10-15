@@ -2683,6 +2683,133 @@ fn a_commented_defined_name_crosses_the_wire_and_lands_whole() {
     assert_eq!(receiver.defined_names, names);
 }
 
+// --- Macros travel as an operation (MACRO-02) --------------------------------
+
+fn a_library(names: &[&str]) -> casual_calc_model::MacroLibrary {
+    casual_calc_model::MacroLibrary {
+        macros: names
+            .iter()
+            .map(|n| casual_calc_model::Macro {
+                guid: format!("g-{n}"),
+                name: (*n).to_owned(),
+                source: format!("Api.GetActiveSheet().GetRange(\"A1\").SetValue(\"{n}\");"),
+                autostart: *n == "auto",
+            })
+            .collect(),
+        custom_functions: vec![casual_calc_model::CustomFunctionSource {
+            guid: "cf".to_owned(),
+            name: "Function 1".to_owned(),
+            source: "Api.AddCustomFunction(function F(){return 1;});".to_owned(),
+        }],
+    }
+}
+
+/// **A macro library on the wire is a protocol change** (`MACRO-02`).
+///
+/// `SetMacros` is a new `Operation` variant — the loud break: a protocol-9
+/// peer cannot read the tag and refuses the whole batch, mid-session, on the
+/// first macro edit. And `MacroLibrary` is a whole-list replace under
+/// `deny_unknown_fields`, `COL-65`'s shape exactly. So the version moves, the
+/// mismatch is refused at the handshake, and the key set is pinned here so the
+/// next field added to a macro moves it again.
+#[test]
+fn a_macro_library_on_the_wire_is_a_protocol_change() {
+    let op = Operation::SetMacros(a_library(&["auto"]));
+    let value = serde_json::to_value(&op).expect("serialises");
+    let object = value.as_object().unwrap();
+    assert_eq!(
+        object.keys().collect::<Vec<_>>(),
+        ["setMacros"],
+        "the tag a protocol-9 peer has never heard of"
+    );
+    let library = &value["setMacros"];
+    let mut keys: Vec<String> = library.as_object().unwrap().keys().cloned().collect();
+    keys.extend(
+        library["macros"][0]
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(|k| format!("macros.{k}")),
+    );
+    keys.extend(
+        library["customFunctions"][0]
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(|k| format!("customFunctions.{k}")),
+    );
+    keys.sort();
+    assert_eq!(
+        keys,
+        [
+            "customFunctions",
+            "customFunctions.guid",
+            "customFunctions.name",
+            "customFunctions.source",
+            "macros",
+            "macros.autostart",
+            "macros.guid",
+            "macros.name",
+            "macros.source",
+        ],
+        "the keys a macro library can carry have changed. It is deny_unknown_fields \
+         and a whole-list replace: move PROTOCOL_VERSION (currently {}) and update this list.",
+        crate::protocol::PROTOCOL_VERSION,
+    );
+
+    #[allow(clippy::assertions_on_constants)]
+    let moved = crate::protocol::PROTOCOL_VERSION > 9;
+    assert!(
+        moved,
+        "Operation gained SetMacros, a tag a protocol-9 peer cannot read — its whole \
+         batch fails to parse mid-session. Move PROTOCOL_VERSION (currently {}) so the \
+         mismatch is refused at the handshake.",
+        crate::protocol::PROTOCOL_VERSION,
+    );
+}
+
+/// `SetMacros` applies, inverts to the previous library (so undo travels as an
+/// ordinary edit), and crosses the wire whole.
+#[test]
+fn set_macros_applies_inverts_and_crosses_the_wire() {
+    use crate::wire::WireOperation;
+
+    let mut wb = workbook();
+    let library = a_library(&["auto", "tidy"]);
+    let inverse = apply(&mut wb, Operation::SetMacros(library.clone())).unwrap();
+    assert_eq!(wb.macros, library);
+    assert_eq!(
+        inverse,
+        Operation::SetMacros(casual_calc_model::MacroLibrary::default())
+    );
+    apply(&mut wb, inverse).unwrap();
+    assert!(wb.macros.is_empty(), "undo takes the macros back");
+
+    let sender = workbook();
+    let wire = WireOperation::of(Operation::SetMacros(library.clone()), &sender);
+    let json = serde_json::to_string(&wire).expect("serialises");
+    let back: WireOperation = serde_json::from_str(&json).expect("reads back");
+    let mut receiver = workbook();
+    let op = back.localise(&mut receiver);
+    apply(&mut receiver, op).expect("applies");
+    assert_eq!(
+        receiver.macros, library,
+        "the receiver holds the same macros"
+    );
+}
+
+/// A library over its bounds is refused by `apply` — the one place every
+/// path reaches, a peer's operation included — and changes nothing.
+#[test]
+fn an_oversized_macro_library_is_refused_by_apply() {
+    let mut wb = workbook();
+    let mut library = a_library(&["a"]);
+    library.macros[0].source = "x".repeat(casual_calc_model::MAX_MACRO_SOURCE_BYTES + 1);
+    let err = apply(&mut wb, Operation::SetMacros(library)).unwrap_err();
+    assert_eq!(err.code(), "OC-TXN-0002");
+    assert!(wb.macros.is_empty());
+}
+
 // --- Defined names move with what they point at (FID-24) ---------------------
 
 mod defined_names_shift {

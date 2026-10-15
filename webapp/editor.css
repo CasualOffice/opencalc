@@ -2528,6 +2528,49 @@ html, .editor-body { overscroll-behavior: none; }
 .oc-nm-row:focus-visible { outline: 2px solid var(--oc-accent-color); outline-offset: -2px; }
 .oc-nm-row [data-col="refers"], .oc-nm-row [data-col="value"] { font-family: var(--oc-mono-font-family); }
 .oc-nm-empty { padding: 8px; }
+
+/* Macros window (MACRO-02): the list beside the editor, inside the shared
+   560px frame. */
+.oc-modal-box:has(.oc-mw) { width: min(92vw, 560px); }
+.oc-mw { display: flex; flex-direction: column; gap: 6px; }
+.oc-mw-bar { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
+.oc-mw-bar .oc-btn { min-width: 0; padding: 0 12px; }
+.oc-mw-split { display: grid; grid-template-columns: 150px minmax(0, 1fr); gap: 8px; }
+.oc-mw-list {
+  height: 260px; overflow: auto; border: 1px solid var(--oc-control-border-color); border-radius: 6px;
+  background: var(--oc-background-color); font-size: 12px;
+}
+.oc-mw-row { display: flex; align-items: center; gap: 6px; padding: 4px 8px; cursor: default; color: var(--oc-text-color); }
+.oc-mw-row:hover { background: var(--oc-surface-color); }
+.oc-mw-row.on { background: var(--oc-accent-soft); }
+.oc-mw-row:focus-visible { outline: 2px solid var(--oc-accent-color); outline-offset: -2px; }
+.oc-mw-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.oc-mw-tag { flex: 0 0 auto; font-size: 10.5px; color: var(--oc-muted-text-color); }
+.oc-mw-rename-input { width: 100%; min-height: 24px !important; font-size: 12px !important; }
+.oc-mw-empty { padding: 8px; }
+.oc-mw-pane { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.oc-mw-editor {
+  display: flex; height: 220px; border: 1px solid var(--oc-control-border-color); border-radius: 6px;
+  background: var(--oc-background-color); overflow: hidden;
+}
+.oc-mw-editor:focus-within { border-color: var(--oc-accent-color); box-shadow: 0 0 0 2px var(--oc-accent-ring); }
+.oc-mw-gutter {
+  flex: 0 0 auto; min-width: 28px; padding: 8px 6px 8px 4px; overflow: hidden; text-align: right;
+  font-family: var(--oc-mono-font-family); font-size: 12px; line-height: 18px;
+  color: var(--oc-muted-text-color); background: var(--oc-surface-color); user-select: none;
+}
+.oc-mw-gutter .bad { color: var(--oc-danger-color); font-weight: 600; }
+.oc-modal-box textarea.oc-mw-code {
+  flex: 1; min-width: 0; height: 100%; margin: 0; padding: 8px; resize: none; border: 0; border-radius: 0;
+  font-family: var(--oc-mono-font-family); font-size: 12px; line-height: 18px; white-space: pre; tab-size: 4;
+  box-shadow: none;
+}
+.oc-modal-box textarea.oc-mw-code:focus-visible { box-shadow: none; }
+.oc-mw-auto { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--oc-text-color); }
+.oc-mw-auto[hidden] { display: none; }
+.oc-mw-result { font-size: 12px; line-height: 1.4; color: var(--oc-muted-text-color); overflow-wrap: anywhere; }
+.oc-mw-result.bad { color: var(--oc-danger-color); }
+.oc-mw-result[hidden] { display: none; }
 /* New Name / Edit Name (XL-UX-022): Excel's label column beside its fields. */
 .oc-name-form { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 10px 12px; align-items: center; }
 .oc-name-form .oc-form-label { align-self: start; padding-top: 7px; }

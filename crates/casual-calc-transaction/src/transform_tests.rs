@@ -168,6 +168,19 @@ fn candidates(base: &mut Workbook) -> Vec<Operation> {
             },
         ]));
     }
+    // The macro library (`MACRO-02`): one workbook-wide value, positionally
+    // inert, so two of them contend and everything else passes it by.
+    for name in ["Fill", "Tidy"] {
+        ops.push(Operation::SetMacros(casual_calc_model::MacroLibrary {
+            macros: vec![casual_calc_model::Macro {
+                guid: format!("g-{name}"),
+                name: name.to_owned(),
+                source: "Api.GetActiveSheet();".to_owned(),
+                autostart: false,
+            }],
+            custom_functions: Vec::new(),
+        }));
+    }
     for (row, col) in [(0u32, 0u32), (3, 1), (4, 2), (7, 4), (11, 5)] {
         ops.push(Operation::SetCell {
             sheet: 0,

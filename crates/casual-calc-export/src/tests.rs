@@ -5506,3 +5506,186 @@ fn every_defined_name_attribute_survives_import_and_export() {
     let again = import_package(written).unwrap().workbook;
     assert_eq!(again.defined_names, imported.defined_names);
 }
+
+// ---------------------------------------------------------------------------
+// `MACRO-02`: macros saved in the workbook, the way ONLYOFFICE saves them.
+
+/// `xl/jsaProject.bin` as ONLYOFFICE writes it: UTF-8 JSON, reached from the
+/// workbook by a `http://schemas.onlyoffice.com/jsaProject` relationship, the
+/// `.bin` extension declared by a `<Default>` (core `BinaryReaderS.cpp`).
+const JSA: &str = r#"{"macrosArray":[{"guid":"a1","name":"Fill","autostart":true,"value":"(function()\n{\n\tApi.GetActiveSheet().GetRange(\"B2\").SetValue(42);\n})();"},{"guid":"a2","name":"Tidy","autostart":false,"value":"// tidy"}],"current":0,"customFunctions":{"macrosArray":[{"guid":"f1","name":"Function 1","value":"Api.AddCustomFunction(function TWICE(x){return 2*x;});"}]}}"#;
+
+fn onlyoffice_package(jsa: &[u8]) -> Vec<u8> {
+    const CT: &[u8] = br#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="bin" ContentType="application/octet-stream"/></Types>"#;
+    const RELS: &[u8] = br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId9" Type="http://schemas.onlyoffice.com/jsaProject" Target="jsaProject.bin"/></Relationships>"#;
+    zip_parts(&[
+        ("[Content_Types].xml", CT),
+        ("_rels/.rels", ROOT_RELS),
+        ("xl/workbook.xml", WORKBOOK),
+        ("xl/_rels/workbook.xml.rels", RELS),
+        ("xl/sharedStrings.xml", SHARED),
+        ("xl/styles.xml", STYLES),
+        ("xl/worksheets/sheet1.xml", worksheet()),
+        ("xl/jsaProject.bin", jsa),
+    ])
+}
+
+fn has_part(package: &[u8], part: &str) -> bool {
+    zip::ZipArchive::new(Cursor::new(package))
+        .unwrap()
+        .by_name(part)
+        .is_ok()
+}
+
+/// ONLYOFFICE's macros part is read into the model — not merely retained — and
+/// an edited save writes it back where ONLYOFFICE looks for it, so a workbook
+/// moves between the two programs with its macros.
+#[test]
+fn onlyoffice_macros_round_trip_through_xlsx() {
+    let imported = import_package(onlyoffice_package(JSA.as_bytes()))
+        .unwrap()
+        .workbook;
+    let lib = &imported.macros;
+    assert_eq!(
+        lib.macros
+            .iter()
+            .map(|m| m.name.as_str())
+            .collect::<Vec<_>>(),
+        ["Fill", "Tidy"],
+        "the macros are in the model"
+    );
+    assert!(lib.macros[0].autostart && !lib.macros[1].autostart);
+    assert_eq!(lib.custom_functions.len(), 1, "custom functions too");
+    assert!(
+        imported
+            .retained_parts
+            .iter()
+            .all(|p| p.path != "xl/jsaProject.bin"),
+        "modelled, so not also retained: a retained copy would be written beside the fresh one"
+    );
+
+    // Edit the macros and save: the edit is what reaches the file.
+    let mut edited = imported.clone();
+    edited.macros.macros[1].source =
+        "Api.GetActiveSheet().GetRange(\"C3\").SetValue(\"done\");".into();
+    let written = write_workbook(&edited).unwrap();
+    assert!(has_part(&written, "xl/jsaProject.bin"));
+    let rels = xml_of(&written, "xl/_rels/workbook.xml.rels");
+    assert_eq!(
+        rels.matches("http://schemas.onlyoffice.com/jsaProject")
+            .count(),
+        1,
+        "exactly one relationship reaches the part: {rels}"
+    );
+    assert!(rels.contains("Target=\"jsaProject.bin\""), "{rels}");
+    let ct = xml_of(&written, "[Content_Types].xml");
+    assert!(
+        ct.contains("PartName=\"/xl/jsaProject.bin\""),
+        "the part is declared, or Excel calls the package damaged: {ct}"
+    );
+    // ONLYOFFICE reads the part as JSON in its own key names.
+    let part = xml_of(&written, "xl/jsaProject.bin");
+    for key in [
+        "\"macrosArray\"",
+        "\"value\"",
+        "\"autostart\":true",
+        "\"customFunctions\"",
+    ] {
+        assert!(part.contains(key), "{key} missing from {part}");
+    }
+    assert_eq!(
+        casual_calc_model::MacroLibrary::from_jsa_project(part.as_bytes()).unwrap(),
+        edited.macros
+    );
+
+    let back = import_package(written).unwrap().workbook;
+    assert_eq!(
+        back.macros, edited.macros,
+        "import -> edit -> write -> import keeps the macros"
+    );
+}
+
+/// Macros authored here, in a workbook that never had any, reach the file —
+/// and deleting the last one takes the part away again.
+#[test]
+fn macros_authored_here_are_written() {
+    let mut wb = import_package(sample_xlsx()).unwrap().workbook;
+    assert!(wb.macros.is_empty());
+    wb.macros.macros.push(casual_calc_model::Macro {
+        guid: "new".into(),
+        name: "Macro 1".into(),
+        source: "Api.GetActiveSheet().GetRange(\"A1\").SetValue(1);".into(),
+        autostart: false,
+    });
+    let back = import_package(write_workbook(&wb).unwrap())
+        .unwrap()
+        .workbook;
+    assert_eq!(back.macros, wb.macros);
+    let mut none = back.clone();
+    none.macros.macros.clear();
+    let written = write_workbook(&none).unwrap();
+    assert!(!has_part(&written, "xl/jsaProject.bin"));
+    assert!(!xml_of(&written, "xl/_rels/workbook.xml.rels").contains("jsaProject"));
+}
+
+/// The same through a macro-enabled package: the VBA project and the
+/// JavaScript macros are different parts and both survive.
+#[test]
+fn macros_round_trip_through_xlsm_beside_a_vba_project() {
+    const CT: &[u8] = br#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="bin" ContentType="application/octet-stream"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.ms-excel.sheet.macroEnabled.main+xml"/><Override PartName="/xl/vbaProject.bin" ContentType="application/vnd.ms-office.vbaProject"/></Types>"#;
+    const RELS: &[u8] = br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId7" Type="http://schemas.microsoft.com/office/2006/relationships/vbaProject" Target="vbaProject.bin"/><Relationship Id="rId8" Type="http://schemas.onlyoffice.com/jsaProject" Target="jsaProject.bin"/></Relationships>"#;
+    let xlsm = zip_parts(&[
+        ("[Content_Types].xml", CT),
+        ("_rels/.rels", ROOT_RELS),
+        ("xl/workbook.xml", WORKBOOK),
+        ("xl/_rels/workbook.xml.rels", RELS),
+        ("xl/worksheets/sheet1.xml", worksheet()),
+        ("xl/vbaProject.bin", b"\xD0\xCF\x11\xE0vba"),
+        ("xl/jsaProject.bin", JSA.as_bytes()),
+    ]);
+    let wb = import_package(xlsm).unwrap().workbook;
+    assert!(wb.macro_project().is_some(), "the VBA project is carried");
+    assert_eq!(wb.macros.macros.len(), 2, "and the macros are modelled");
+    let written = crate::write_workbook_as(&wb, crate::PackageKind::MacroEnabled).unwrap();
+    let back = import_package(written).unwrap().workbook;
+    assert_eq!(back.macros, wb.macros);
+    assert_eq!(
+        back.macro_project().map(|p| p.bytes.clone()),
+        Some(b"\xD0\xCF\x11\xE0vba".to_vec()),
+        "the VBA project byte for byte"
+    );
+}
+
+/// A macros part this reader cannot parse is not a reason to lose it: it is
+/// retained byte for byte, like any part nothing here models.
+#[test]
+fn an_unreadable_macros_part_is_retained_verbatim() {
+    let wb = import_package(onlyoffice_package(b"{not json"))
+        .unwrap()
+        .workbook;
+    assert!(wb.macros.is_empty());
+    let written = write_workbook(&wb).unwrap();
+    assert_eq!(xml_of(&written, "xl/jsaProject.bin"), "{not json");
+    assert!(xml_of(&written, "xl/_rels/workbook.xml.rels").contains("jsaProject"));
+
+    // Macros written over it replace it whole: one relationship, one
+    // declaration, one part — not the retained copy beside the fresh one.
+    let mut edited = wb.clone();
+    edited.macros.macros.push(casual_calc_model::Macro {
+        guid: "g".into(),
+        name: "New".into(),
+        source: "1;".into(),
+        autostart: false,
+    });
+    let written = write_workbook(&edited).unwrap();
+    let rels = xml_of(&written, "xl/_rels/workbook.xml.rels");
+    assert_eq!(
+        rels.matches("jsaProject").count(),
+        2,
+        "one Type and one Target: {rels}"
+    );
+    let ct = xml_of(&written, "[Content_Types].xml");
+    assert_eq!(ct.matches("/xl/jsaProject.bin").count(), 1, "{ct}");
+    let back = import_package(written).unwrap().workbook;
+    assert_eq!(back.macros, edited.macros);
+}

@@ -28,7 +28,7 @@ export const BUILD =
 // The imports below are what this file still calls; the re-exports keep the
 // module's public surface — `window.opencalcEditor` is this namespace — exactly
 // what it was.
-import { register as registerCommand, setRoot as setCommandRoot } from "./commands.js";
+import { register as registerCommand, run as runRegisteredCommand, setRoot as setCommandRoot } from "./commands.js";
 import { paintList } from "./editor.paintlist.js";
 import {
   applyChart,
@@ -437,6 +437,11 @@ export function reloadVersionsForTest() {
 // undo step. Re-exported so a host — and the Macros window to come — reaches it
 // on `window.opencalcEditor` like every other verb.
 export { MACRO_MAX_OPS, MACRO_TIME_LIMIT_MS, runMacro, runMacroForTest } from "./editor.macros.js";
+// The Macros window and the autostart offer (`MACRO-02`): View ▸ Macros,
+// Developer ▸ Macros and Alt+F8 open the window; a workbook's autostart macros
+// are offered on open and never run without the person choosing Run.
+import { forgetMacroAnswersForTest, offerAutostartMacros, openMacrosWindow } from "./editor.macros-window.js";
+export { forgetMacroAnswersForTest, offerAutostartMacros, openMacrosWindow };
 export {
   autosaveFault,
   breakDraftStoreForTest,
@@ -965,7 +970,15 @@ for (const region of HIDDEN_CHROME) {
 ///                 formula plus two concurrent structural edits, where `COL-46`
 ///                 needed one ordinary insert beside one ordinary formula —
 ///                 which is why one held the feature and the other does not.
-export const CAPABILITIES = ["canOpen", "canSaveAs", "canPrint", "canShare", "ownsFile", "chrome", "readOnly"];
+/// - `canRunMacros` — may the editor offer the workbook's macros (`MACRO-02`):
+///                 the Macros window, Alt+F8, and the offer to run autostart
+///                 macros on open? A macro is code the document brought with
+///                 it, so a host that owns the page decides: `true` in
+///                 `standalone` and `desktop`, `false` in `embedded`, `wopi`
+///                 and `viewer`, and a host turns it on with
+///                 `setCapabilities({ canRunMacros: true })`. Even where it is
+///                 on, nothing runs without the person choosing Run.
+export const CAPABILITIES = ["canOpen", "canSaveAs", "canPrint", "canShare", "canRunMacros", "ownsFile", "chrome", "readOnly"];
 
 const CHROMES = ["web", "native", "embedded"];
 
@@ -973,22 +986,22 @@ const CHROMES = ["web", "native", "embedded"];
 /// preset: reading one tells you what that mode is without chasing a chain.
 const MODE_PRESETS = {
   // Today's editor, and the default. Every permission granted, our own chrome.
-  standalone: { canOpen: true, canSaveAs: true, canPrint: true, canShare: true, ownsFile: false, chrome: "web", readOnly: false },
+  standalone: { canOpen: true, canSaveAs: true, canPrint: true, canShare: true, canRunMacros: true, ownsFile: false, chrome: "web", readOnly: false },
   // The desktop shell. Same document ownership as standalone — the user's own
   // file, opened by the user — but the operating system draws the menu bar.
-  desktop: { canOpen: true, canSaveAs: true, canPrint: true, canShare: true, ownsFile: false, chrome: "native", readOnly: false },
+  desktop: { canOpen: true, canSaveAs: true, canPrint: true, canShare: true, canRunMacros: true, ownsFile: false, chrome: "native", readOnly: false },
   // Inside somebody else's page. The host owns the document *and* the chrome.
-  embedded: { canOpen: false, canSaveAs: false, canPrint: true, canShare: false, ownsFile: true, chrome: "embedded", readOnly: false },
+  embedded: { canOpen: false, canSaveAs: false, canPrint: true, canShare: false, canRunMacros: false, ownsFile: true, chrome: "embedded", readOnly: false },
   // A WOPI frame. The host owns the document — including save and versioning,
   // which is why `canSaveAs` starts false — but the editor **is** the frame and
   // draws its own chrome, the way Office Online does inside a WOPI host. The
   // difference from `embedded` is one axis, which is the point of composing
   // them rather than writing two mode branches.
-  wopi: { canOpen: false, canSaveAs: false, canPrint: true, canShare: false, ownsFile: true, chrome: "web", readOnly: false },
+  wopi: { canOpen: false, canSaveAs: false, canPrint: true, canShare: false, canRunMacros: false, ownsFile: true, chrome: "web", readOnly: false },
   // A published sheet. Read-only, and a copy is still allowed: a viewer that
   // cannot print or export is a screenshot with extra steps, and `READ_ONLY_SAFE`
   // has always let both through.
-  viewer: { canOpen: false, canSaveAs: true, canPrint: true, canShare: false, ownsFile: false, chrome: "web", readOnly: true },
+  viewer: { canOpen: false, canSaveAs: true, canPrint: true, canShare: false, canRunMacros: false, ownsFile: false, chrome: "web", readOnly: true },
 };
 
 export const MODES = Object.keys(MODE_PRESETS);
@@ -1376,6 +1389,8 @@ const CAPABILITY_COMMANDS = {
   // from a script has not been taken away, it has been hidden from the one
   // party who could have declined it.
   canShare: [/^file\.share$/],
+  // The Macros window, by every route (`MACRO-02`).
+  canRunMacros: [/^view\.macros$/, /^developer\.macros$/],
 };
 
 /// Commands that exist in **one chrome only** (`TAURI-009`).
@@ -5062,6 +5077,11 @@ const READ_ONLY_SAFE = [
   // Getting a copy out, and putting it on paper.
   /^file\.download/, /^file\.print$/,
   /^help\./,
+  // Reading the workbook's macros (`MACRO-02`). The window opens without New,
+  // Rename, Delete, Run or Autostart and with the code read-only — and the
+  // engine refuses a macro edit in a read-only session whatever the window
+  // shows.
+  /^view\.macros$/, /^developer\.macros$/,
 ];
 
 // Everything else in `view.` is deliberately absent. Freezing panes, hiding
@@ -6937,6 +6957,9 @@ function registerShellCommands() {
   R("edit.go-to", { label: "Go To…", shortcut: "Ctrl+G", run: () => goToDialog() });
   R("edit.go-to-special", { label: "Go To Special…", run: () => goToSpecialDialog() });
   R("data.goal-seek", { label: "Goal Seek…", run: () => goalSeekDialog() }); // XL-FEAT-032
+  // MACRO-02: ONLYOFFICE's place (View) and Excel's (Developer), one window.
+  R("view.macros", { label: "Macros…", shortcut: "Alt+F8", run: () => openMacrosWindow() });
+  R("developer.macros", { label: "Macros…", shortcut: "Alt+F8", run: () => openMacrosWindow() });
 }
 
 // ---- Insert Function / Function Arguments (Shift+F3, XL-UX-026/027) ---------
@@ -8612,6 +8635,14 @@ function wireEvents() {
     // fell through to starting an edit.
     if (e.altKey && !mod && (e.key === "=" || e.key === "+")) {
       autoSum();
+      e.preventDefault();
+      return;
+    }
+
+    // Alt+F8 — Excel's Macros window (`MACRO-02`). Through the registry, so
+    // the mode's rules decide exactly as they do for the ribbon button.
+    if (e.altKey && !mod && e.key === "F8") {
+      if (!runRegisteredCommand("view.macros")) statusError("macros are not available here");
       e.preventDefault();
       return;
     }

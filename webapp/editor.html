@@ -259,6 +259,12 @@
          the user in the other direction. -->
     <div class="oc-recovery" id="oc-recovery" role="status" hidden></div>
 
+    <!-- Autostart macros (`MACRO-02`, docs/99 §3). Shown when an opened
+         workbook has macros set to run on open, and only to ask: nothing runs
+         until Run is chosen. Not a modal, for the recovery bar's reason — the
+         person can look at the workbook before deciding. -->
+    <div class="oc-recovery oc-macro-bar" id="oc-macro-bar" role="status" hidden></div>
+
     <div class="toolbar" role="toolbar" aria-label="Formatting">
       <div class="tb-group tb-keep">
         <button id="tb-undo" class="tb-btn" disabled title="Undo (Ctrl+Z)" aria-label="Undo">

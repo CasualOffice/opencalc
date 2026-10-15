@@ -21,6 +21,8 @@ const DIALOGS = [
   // Find and Replace (XL-UX-024/025): modeless, but the same frame.
   "edit.find-replace", "edit.replace",
   "data.goal-seek",
+  // The Macros window (MACRO-02).
+  "view.macros",
 ];
 const PANELS = ["data.data-validation", "file.page-setup", "insert.note", "file.version-history", "insert.pivottable"];
 

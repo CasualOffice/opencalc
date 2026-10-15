@@ -52,6 +52,7 @@ mod find;
 mod formula;
 mod history;
 mod io;
+mod macros;
 mod objects;
 mod sheet;
 mod special;
@@ -187,6 +188,16 @@ thread_local! {
     static VOLATILE: core::cell::Cell<(f64, u64)> = const { core::cell::Cell::new((0.0, 0)) };
 }
 
+thread_local! {
+    /// Whether the host has made the editor read-only.
+    ///
+    /// The host's setting, not one session's: every open, new workbook or
+    /// restore installs a fresh session, and each came up editable — a viewer
+    /// that loaded a document with `openBytes` accepted edits. Applied to every
+    /// session installed below, as the clock is.
+    pub(crate) static HOST_READ_ONLY: core::cell::Cell<bool> = const { core::cell::Cell::new(false) };
+}
+
 pub(crate) fn set_session(session: WorkbookSession) {
     let mut session = session;
     let (now, seed) = VOLATILE.with(core::cell::Cell::get);
@@ -194,6 +205,9 @@ pub(crate) fn set_session(session: WorkbookSession) {
         let wb = session.workbook_mut();
         wb.volatile_now = now;
         wb.volatile_seed = seed;
+    }
+    if HOST_READ_ONLY.with(core::cell::Cell::get) {
+        session.config_mut().read_only = true;
     }
     SESSION.with(|cell| *cell.borrow_mut() = Some(session));
 }

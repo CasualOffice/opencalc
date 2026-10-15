@@ -338,6 +338,30 @@ fn retain_unmodelled(
                 continue;
             }
             let target = resolve_part(&source, &rel.target);
+            // ONLYOFFICE's macros part (`MACRO-02`): read into the model rather
+            // than retained, because the writer regenerates it from the model
+            // and a retained copy beside it would be stale the moment a macro
+            // is edited. Only when it parses — a part this reader cannot read
+            // falls through and is retained byte for byte, which loses nothing.
+            if kind == PartKind::Workbook
+                && workbook.macros.is_empty()
+                && rel.rel_type == casual_calc_model::JSA_PROJECT_REL_TYPE
+                && package.contains(&target)
+            {
+                let bytes = package.read_part(&target)?;
+                match casual_calc_model::MacroLibrary::from_jsa_project(&bytes) {
+                    Ok(library) => {
+                        workbook.macros = library;
+                        seen.insert(target);
+                        continue;
+                    }
+                    Err(_) => report.record(
+                        "macros (unreadable ONLYOFFICE macros part, kept as is)",
+                        ModelOutcome::Omitted,
+                        RetentionOutcome::Preserved,
+                    ),
+                }
+            }
             workbook.retained_rels.push(RetainedRel {
                 source: source.clone(),
                 id: rel.id,
