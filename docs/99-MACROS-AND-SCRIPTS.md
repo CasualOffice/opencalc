@@ -180,7 +180,8 @@ security hole. Without consent, §5's "no network" holds unchanged.
   with **Enable Content**, until the tab closes, as Excel's does.
 - Grants are stored under `localStorage["opencalc.network-grants.v1"]`; the
   Trust Center is File ▸ Options ▸ Trust Center ▸ Trust Center Settings… ▸
-  External Content.
+  External Content; a Remove there applies on OK and is forgotten on Cancel,
+  as Excel's Trust Center does.
 
 ## 6. Phases
 

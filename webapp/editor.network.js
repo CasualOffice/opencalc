@@ -591,7 +591,17 @@ function showNextNotice() {
 /// it lists the network grants this device holds, each with Remove.
 export async function openTrustCenter() {
   const { modalFrame } = await import("./editor.dialogs.js");
-  const frame = modalFrame("Trust Center");
+  // Excel's Trust Center applies on OK and forgets on Cancel: a Remove is
+  // staged until then.
+  const staged = new Set();
+  const keyOf = (g) => grantKey(g.doc, g.site, g.hash);
+  const commit = () => {
+    const list = readGrants();
+    const kept = list.filter((g) => !staged.has(keyOf(g)));
+    if (kept.length !== list.length) writeGrants(kept);
+    frame.close();
+  };
+  const frame = modalFrame("Trust Center", { onEnter: commit });
   const wrap = el("div", "oc-tc");
   const nav = el("div", "oc-tc-nav");
   nav.setAttribute("role", "tablist");
@@ -606,7 +616,7 @@ export async function openTrustCenter() {
     page.replaceChildren();
     page.appendChild(el("h3", "oc-tc-heading", "Security settings for network access by macros and custom functions"));
     page.appendChild(el("p", "oc-tc-note", "Sites you allowed a workbook's code to connect to. Kept on this device only; never saved in the workbook or shared."));
-    const grants = listNetworkGrants();
+    const grants = readGrants().filter((g) => !staged.has(keyOf(g)));
     if (!grants.length) {
       const none = el("p", "oc-tc-empty", "No sites are allowed.");
       none.id = "oc-tc-none";
@@ -615,7 +625,7 @@ export async function openTrustCenter() {
     }
     const list = el("div", "oc-tc-list");
     list.id = "oc-tc-grants";
-    grants.forEach((g, i) => {
+    grants.forEach((g) => {
       const item = el("div", "oc-tc-item");
       item.dataset.site = g.site;
       const text = el("div", "oc-tc-item-text");
@@ -623,7 +633,7 @@ export async function openTrustCenter() {
       const by = g.kind === "macro" ? `Macro "${g.who}"` : `Custom function ${g.who}`;
       text.appendChild(el("div", "oc-tc-who", `${by}${g.workbook ? ` in ${g.workbook}` : ""}`));
       const remove = el("button", "oc-btn", "Remove");
-      remove.addEventListener("click", () => { removeNetworkGrant(i); render(); });
+      remove.addEventListener("click", () => { staged.add(keyOf(g)); render(); });
       item.append(text, remove);
       list.appendChild(item);
     });
@@ -632,8 +642,10 @@ export async function openTrustCenter() {
   render();
   const row = el("div", "oc-confirm-actions");
   const ok = el("button", "oc-btn primary", "OK");
-  ok.addEventListener("click", () => frame.close());
-  row.appendChild(ok);
+  ok.addEventListener("click", commit);
+  const cancel = el("button", "oc-btn", "Cancel");
+  cancel.addEventListener("click", () => frame.close());
+  row.append(ok, cancel);
   frame.body.append(wrap, row);
   ok.focus();
 }

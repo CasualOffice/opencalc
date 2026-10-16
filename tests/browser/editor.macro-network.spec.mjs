@@ -669,10 +669,18 @@ test("an opened file keeps its grant across a reload; Trust Center lists it and 
   await expect(page.locator("#oc-modal-title")).toHaveText("Trust Center");
   await expect(page.locator("#oc-tc-external")).toContainText("https://api.example.com");
   await expect(page.locator("#oc-tc-external")).toContainText('Macro "Fetch rates" in rates.xlsx');
+  // As in Excel's Trust Center, nothing changes until OK: Cancel keeps it …
+  expect(await page.locator("#oc-modal .oc-confirm-actions button").allTextContents()).toEqual(["OK", "Cancel"]);
   await page.locator("#oc-tc-grants button", { hasText: "Remove" }).click();
   await expect(page.locator("#oc-tc-none")).toBeVisible();
-  expect(await grants(page)).toEqual([]);
+  expect(await grants(page)).toHaveLength(1);
+  await page.locator("#oc-modal .oc-confirm-actions button", { hasText: "Cancel" }).click();
+  expect(await grants(page)).toHaveLength(1);
+  // … and OK applies it.
+  await page.evaluate(() => window.opencalcEditor.runCommand("file.trust-center"));
+  await page.locator("#oc-tc-grants button", { hasText: "Remove" }).click();
   await page.locator("#oc-modal .oc-confirm-actions button", { hasText: "OK" }).click();
+  expect(await grants(page)).toEqual([]);
   run = startMacro(page, MACRO);
   await expect(notice(page)).toBeVisible({ timeout: 10_000 });
   await page.locator("#oc-net-notice-disable").click();
