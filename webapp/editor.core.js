@@ -443,6 +443,10 @@ export { MACRO_MAX_OPS, MACRO_TIME_LIMIT_MS, runMacro, runMacroForTest } from ".
 import { forgetMacroAnswersForTest, offerAutostartMacros, openMacrosWindow } from "./editor.macros-window.js";
 import { openVbaViewer } from "./editor.vba-viewer.js";
 export { forgetMacroAnswersForTest, offerAutostartMacros, openMacrosWindow };
+// Network access only after the person allows it (`MACRO-13`, docs/99 §5a):
+// the grants this device holds, listed in File ▸ Options ▸ Trust Center.
+import { noteCollabEndpoint, openTrustCenter } from "./editor.network.js";
+export { listNetworkGrants, openTrustCenter, removeNetworkGrant, resetNetworkForTest } from "./editor.network.js";
 // Custom worksheet functions (`MACRO-04`): after every frame, a cheap look at
 // whether the engine is waiting on a custom function's answer, or the
 // workbook's function sources changed, and the sandbox is put to work.
@@ -991,7 +995,17 @@ for (const region of HIDDEN_CHROME) {
 ///                 and `viewer`, and a host turns it on with
 ///                 `setCapabilities({ canRunMacros: true })`. Even where it is
 ///                 on, nothing runs without the person choosing Run.
-export const CAPABILITIES = ["canOpen", "canSaveAs", "canPrint", "canShare", "canRunMacros", "ownsFile", "chrome", "readOnly"];
+/// - `canUseNetwork` — may a workbook's macros and custom functions ask to
+///                 reach the network (`MACRO-13`, docs/99 §5a)? Even where it
+///                 is on, nothing is fetched until the person chooses Enable
+///                 on the Security Notice, and never without `canRunMacros` or
+///                 read-only. `false` refuses every request without a prompt.
+///                 Follows `canRunMacros`: `true` in `standalone` and
+///                 `desktop`, `false` elsewhere.
+/// - `networkAllowlist` — `null`, or the only sites (`"api.example.com"` or
+///                 `"https://api.example.com"`) a workbook may even ask for;
+///                 any other is refused without a prompt.
+export const CAPABILITIES = ["canOpen", "canSaveAs", "canPrint", "canShare", "canRunMacros", "canUseNetwork", "networkAllowlist", "ownsFile", "chrome", "readOnly"];
 
 const CHROMES = ["web", "native", "embedded"];
 
@@ -999,22 +1013,22 @@ const CHROMES = ["web", "native", "embedded"];
 /// preset: reading one tells you what that mode is without chasing a chain.
 const MODE_PRESETS = {
   // Today's editor, and the default. Every permission granted, our own chrome.
-  standalone: { canOpen: true, canSaveAs: true, canPrint: true, canShare: true, canRunMacros: true, ownsFile: false, chrome: "web", readOnly: false },
+  standalone: { canOpen: true, canSaveAs: true, canPrint: true, canShare: true, canRunMacros: true, canUseNetwork: true, networkAllowlist: null, ownsFile: false, chrome: "web", readOnly: false },
   // The desktop shell. Same document ownership as standalone — the user's own
   // file, opened by the user — but the operating system draws the menu bar.
-  desktop: { canOpen: true, canSaveAs: true, canPrint: true, canShare: true, canRunMacros: true, ownsFile: false, chrome: "native", readOnly: false },
+  desktop: { canOpen: true, canSaveAs: true, canPrint: true, canShare: true, canRunMacros: true, canUseNetwork: true, networkAllowlist: null, ownsFile: false, chrome: "native", readOnly: false },
   // Inside somebody else's page. The host owns the document *and* the chrome.
-  embedded: { canOpen: false, canSaveAs: false, canPrint: true, canShare: false, canRunMacros: false, ownsFile: true, chrome: "embedded", readOnly: false },
+  embedded: { canOpen: false, canSaveAs: false, canPrint: true, canShare: false, canRunMacros: false, canUseNetwork: false, networkAllowlist: null, ownsFile: true, chrome: "embedded", readOnly: false },
   // A WOPI frame. The host owns the document — including save and versioning,
   // which is why `canSaveAs` starts false — but the editor **is** the frame and
   // draws its own chrome, the way Office Online does inside a WOPI host. The
   // difference from `embedded` is one axis, which is the point of composing
   // them rather than writing two mode branches.
-  wopi: { canOpen: false, canSaveAs: false, canPrint: true, canShare: false, canRunMacros: false, ownsFile: true, chrome: "web", readOnly: false },
+  wopi: { canOpen: false, canSaveAs: false, canPrint: true, canShare: false, canRunMacros: false, canUseNetwork: false, networkAllowlist: null, ownsFile: true, chrome: "web", readOnly: false },
   // A published sheet. Read-only, and a copy is still allowed: a viewer that
   // cannot print or export is a screenshot with extra steps, and `READ_ONLY_SAFE`
   // has always let both through.
-  viewer: { canOpen: false, canSaveAs: true, canPrint: true, canShare: false, canRunMacros: false, ownsFile: false, chrome: "web", readOnly: true },
+  viewer: { canOpen: false, canSaveAs: true, canPrint: true, canShare: false, canRunMacros: false, canUseNetwork: false, networkAllowlist: null, ownsFile: false, chrome: "web", readOnly: true },
 };
 
 export const MODES = Object.keys(MODE_PRESETS);
@@ -1140,7 +1154,17 @@ export function setCapabilities(partial) {
       capabilityOverrides = {};
     }
     for (const key of CAPABILITIES) {
-      if (partial[key] !== undefined) capabilityOverrides[key] = partial[key];
+      if (partial[key] === undefined) continue;
+      if (key === "networkAllowlist") {
+        // A list the host can no longer change behind our back, or none. A
+        // value that is neither is not a list, and is not read as "no list"
+        // either: it is ignored, so a typo cannot widen the set.
+        const v = partial[key];
+        if (v === null) capabilityOverrides[key] = null;
+        else if (Array.isArray(v)) capabilityOverrides[key] = Object.freeze(v.map((s) => String(s)));
+        continue;
+      }
+      capabilityOverrides[key] = partial[key];
     }
   }
   capabilities = resolveCapabilities();
@@ -5103,6 +5127,9 @@ const READ_ONLY_SAFE = [
   // engine refuses a macro edit in a read-only session whatever the window
   // shows.
   /^view\.macros$/, /^developer\.macros$/,
+  // The Trust Center lists and removes this device's network grants
+  // (`MACRO-13`): settings of this browser, never the workbook's.
+  /^file\.trust-center$/,
 ];
 
 // Everything else in `view.` is deliberately absent. Freezing panes, hiding
@@ -6984,6 +7011,8 @@ function registerShellCommands() {
   // MACRO-05: Excel's Visual Basic (Alt+F11), read-only. Excel shows it for
   // every workbook; one without a VBA project opens Excel's default project.
   R("developer.visual-basic", { label: "Visual Basic", shortcut: "Alt+F11", run: () => openVbaViewer() });
+  // MACRO-13: Excel's File ▸ Options ▸ Trust Center ▸ Trust Center Settings….
+  R("file.trust-center", { label: "Trust Center Settings…", run: () => openTrustCenter() });
 }
 
 // ---- Insert Function / Function Arguments (Shift+F3, XL-UX-026/027) ---------
@@ -11086,6 +11115,9 @@ export async function collaborate({ url, token, document: documentKey, onStatus,
   // it here would prefill it into a DOM input on the next Share dialog. See
   // §Share in `editor.presence.js`.
   setShareDefaults({ url, document: documentKey });
+  // A workbook's code may never reach the collaboration server as this person
+  // (`MACRO-13`).
+  noteCollabEndpoint(url);
   const { collaborate: connect } = await import(`./collab.js?b=${BUILD}`);
   // The one place this sentence is written (`COL-58`). Two files writing one
   // status line is how a status line decays, so the wording lives here and

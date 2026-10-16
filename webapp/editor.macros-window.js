@@ -436,7 +436,7 @@ export function openMacrosWindow() {
     say(`Running ${m.name}…`);
     let res;
     try {
-      res = await runMacro(m.source);
+      res = await runMacro(m.source, { name: m.name, guid: m.guid });
     } finally {
       runBtn.disabled = false;
     }
@@ -505,7 +505,7 @@ async function runAutostart() {
   const autos = library().filter((m) => m.autostart);
   let ran = 0;
   for (const m of autos) {
-    const res = await runMacro(m.source);
+    const res = await runMacro(m.source, { name: m.name, guid: m.guid });
     if (!res.ok) {
       const line = Number(res.error?.line) || 0;
       statusError(`autostart macro "${m.name}" failed${line ? ` at line ${line}` : ""}: ${res.error?.message ?? "error"}`);

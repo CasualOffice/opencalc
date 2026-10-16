@@ -24,6 +24,8 @@ const DIALOGS = [
   "data.goal-seek",
   // The Macros window (MACRO-02).
   "view.macros",
+  // File ▸ Options ▸ Trust Center (MACRO-13).
+  "file.trust-center",
 ];
 const PANELS = ["data.data-validation", "file.page-setup", "insert.note", "file.version-history", "insert.pivottable"];
 

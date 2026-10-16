@@ -43,6 +43,7 @@
 // the editor terminates the worker, which nothing inside it can prevent.
 
 import { MacroError, createApi } from "./macro.api.js";
+import { networkStubs } from "./macro.net-stub.js";
 import { lockdown } from "./macro.sandbox.js";
 
 const BUILD =
@@ -50,17 +51,28 @@ const BUILD =
   new URL(import.meta.url).searchParams.get("v") ||
   "dev";
 
-/// Taken before user code exists; the global is closed below.
+/// Taken before user code exists; the globals are closed below.
 const post = self.postMessage.bind(self);
+const listen = self.addEventListener.bind(self);
+/// What the macro calls `fetch` (`MACRO-13`, docs/99 §5a): a request to the
+/// page, never a network primitive (`macro.net-stub.js`).
+const stubFor = networkStubs(post, listen);
+/// The first promise the macro let reject unhandled — a refused `fetch` it
+/// did not catch, say.
+let unhandled = null;
+listen("unhandledrejection", (ev) => {
+  unhandled ??= ev.reason ?? new MacroError("Error", "a promise was rejected");
+  ev.preventDefault();
+});
 
-/// The source as a function of `Api`. Not strict, because macros written for
-/// ONLYOFFICE are not and some lean on that.
+/// The source as a function of `Api` and `fetch` (the stub). Not strict,
+/// because macros written for ONLYOFFICE are not and some lean on that.
 function compile(source) {
   if (/\bimport\b/.test(source)) {
     throw new MacroError("SandboxViolation", "import is not available to macros (remove the word `import`)");
   }
   // eslint-disable-next-line no-new-func
-  return new Function("Api", source);
+  return new Function("Api", "fetch", source);
 }
 
 /// Where in the macro an error was thrown: `new Function` puts two header
@@ -70,9 +82,12 @@ function lineOf(err) {
   return m ? Math.max(1, Number(m[1]) - 2) : null;
 }
 
-self.onmessage = async (ev) => {
-  // One run per worker; a second message is not a second macro.
-  self.onmessage = null;
+let started = false;
+listen("message", async (ev) => {
+  // One run per worker; a second message is not a second macro, and the
+  // page's network replies are the stub's, not this handler's.
+  if (started || ev.data?.type === "net-reply") return;
+  started = true;
   const { source, snapshot, module, selection, clock, maxOps } = ev.data || {};
   const operations = [];
   const ui = [];
@@ -99,12 +114,29 @@ self.onmessage = async (ev) => {
     const fn = compile(String(source ?? ""));
     lockdown();
     post({ type: "started" });
-    const out = fn.call(undefined, Api);
+    const out = fn.call(undefined, Api, stubFor("macro"));
     if (out && typeof out.then === "function") await out;
+    // A macro written ONLYOFFICE's way wraps itself in a function it does not
+    // return, so `(async function () { await fetch(…); … })()` has handed
+    // back nothing to wait on. The run is over when no request is with the
+    // page and what its replies set off has run (a macrotask drains every
+    // microtask queued before it).
+    for (;;) {
+      await stubFor.idle();
+      await new Promise((r) => setTimeout(r, 0));
+      if (stubFor.pending() === 0) break;
+    }
+    // The browser reports an unhandled rejection from a task it queues at
+    // the end of the microtask checkpoint that left it unhandled; one more
+    // macrotask, queued after that one, has seen it.
+    await new Promise((r) => setTimeout(r, 0));
+    // A request the macro let fail without handling it fails the run, as an
+    // exception would: Disable must not leave half a macro applied.
+    if (unhandled) throw unhandled;
     post({ type: "done", ok: true, operations, ui, selection: ctx.selection });
   } catch (err) {
     const name = (err && err.name) || "Error";
     const message = err && err.message ? String(err.message) : String(err);
     post({ type: "done", ok: false, error: { name, message, line: lineOf(err) }, operations: [], ui: [] });
   }
-};
+});
