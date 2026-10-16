@@ -214,7 +214,7 @@ test("Escape leaves the sizes exactly as they were", async ({ page }) => {
     "focus did not return to the grid").toBe("grid");
 });
 
-test("a size that is not a number is refused in the field, keeping what was typed", async ({ page }) => {
+test("a size that is not a number is refused in a message box, keeping what was typed", async ({ page }) => {
   await bootNoNativeDialogs(page);
   const before = await widthOf(page, 1);
   await askForSize(page, "col", 1, 1);
@@ -223,13 +223,15 @@ test("a size that is not a number is refused in the field, keeping what was type
   await page.locator("#oc-size-px").fill("wide please");
   await page.locator(".oc-modal:not([hidden]) button", { hasText: /^OK$/ }).click();
 
-  // Refused where it was typed, and still open so the typo can be corrected
-  // rather than retyped from the menu.
+  // Refused in Excel's message box over the dialog (XL-UX-168) — not a native
+  // alert — and the dialog stays open so the typo can be corrected rather
+  // than retyped from the menu.
   await expect(openModal(page)).toBeVisible();
-  await expect(page.locator("#oc-size-error")).toBeVisible();
-  // The refusal grows the control cell downwards, and a centred label slides
-  // half an error message down the dialog with it. The label belongs beside
-  // the field in both states.
+  await expect(page.locator("#oc-msgbox-text")).toContainText("wide please");
+  await page.keyboard.press("Enter");
+  await expect(page.locator("#oc-msgbox")).toBeHidden();
+  await expect(page.locator("#oc-size-px")).toBeFocused();
+  // The label stays beside its field after a refusal.
   const drift = await page.evaluate(() => {
     const field = document.querySelector("#oc-size-px").getBoundingClientRect();
     const label = document.querySelector('label[for="oc-size-px"]').getBoundingClientRect();

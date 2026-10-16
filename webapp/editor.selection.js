@@ -30,6 +30,7 @@ import {
   colXAt,
   commandRules,
   confirmModal,
+  messageBox,
   ctx,
   draw,
   editHome,
@@ -1456,8 +1457,8 @@ export function safeLinkUrl(target) {
 function openLinkTarget(target) {
   const url = safeLinkUrl(target);
   if (!url) {
-    // Excel's words for a link it cannot open.
-    statusError("Cannot open the specified file.");
+    // Excel's words for a link it cannot open, in Excel's message box.
+    messageBox("Cannot open the specified file.");
     return false;
   }
   // `noopener` matters: without it the opened page can reach back through
@@ -1469,13 +1470,12 @@ function openLinkTarget(target) {
 /// Select a link's in-document place: a cell, a range or a defined name,
 /// resolved by the engine — the same resolver the Insert Hyperlink dialog
 /// validates with. A place that does not resolve leaves the selection where it
-/// is and says so, in Excel's words; there is no dialog here, so the status
-/// bar carries the message.
+/// is and says so, in Excel's words and Excel's message box (XL-UX-168).
 export function goToLinkLocation(text) {
   let place = null;
   try { place = JSON.parse(wasm.session_resolve_location(state.sheet, text)); } catch {}
   if (!place) {
-    statusError("Reference isn't valid.");
+    messageBox("Reference isn't valid.");
     return false;
   }
   if (place.sheet !== state.sheet) switchSheet(place.sheet);
