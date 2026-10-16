@@ -2005,6 +2005,24 @@ pub fn session_set_clock(now_serial: f64, seed: f64) {
     });
 }
 
+/// [`session_set_clock`] for a session whose values were **already computed
+/// under this clock by the editor's file worker** (`PERF-16`): the same
+/// state, without repeating the full recalculation on the page's thread.
+/// The worker calls `session_set_clock(now, seed)` on what it opened, sends
+/// the result, and the page adopts the same two numbers.
+#[wasm_bindgen]
+pub fn session_adopt_clock(now_serial: f64, seed: f64) {
+    HOST_CLOCK.with(|c| c.set(now_serial.is_finite().then_some(now_serial)));
+    SESSION.with(|cell| {
+        if let Some(session) = cell.borrow_mut().as_mut() {
+            session.adopt_environment(casual_calc_sdk::Environment {
+                now: now_serial,
+                seed: seed as u64,
+            });
+        }
+    });
+}
+
 // `chart_kind_name` and `format_json_number` stood here until `CHT-13`. Both
 // existed only for the resolved-values payload `session_charts` returned, and
 // `chart_kind_name` was a second copy of `chart_kind_token` above — the one

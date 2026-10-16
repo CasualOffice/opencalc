@@ -83,6 +83,43 @@ by the memory-ceiling benchmark; this doc is updated with the measured figures.
 | Incremental recalc (typical edit) | ≤ 5 ms | Small dirty set |
 | Incremental recalc (worst case) | < 50 ms | The T3 hard cap |
 | Full recalc (open large workbook) | bounded & cancellable | Not on the interactive path |
+| Open / save, page-thread share | no frame gap ≥ 50 ms | `PERF-16`, below |
+
+### Open and save off the page's thread (`PERF-16`)
+
+Open and save were one engine call each on the thread that draws the grid —
+933 ms and 700 ms without a frame for a 250,000-cell workbook in Chromium. The
+browser editor now runs both in a dedicated Web Worker (`webapp/file.worker.js`,
+driven by `webapp/editor.files.js`), as `MACRO-01` runs macros:
+
+- **Open.** The worker runs the same `session_open_as` under the same
+  admission bounds and time budget (`SEC-017`), then sends the workbook back
+  as **transfer parts** (`casual_calc_model::transfer`). The page reads one
+  part (≤ 4,096 formulas or cells, ~5 ms) at a time, yielding between them,
+  and installs only after the last: `WorkbookSession::from_opened` builds the
+  session the page-thread open would have built (same report, format,
+  calculation mode and source bytes), through `set_session`, so the host's
+  read-only flag and clock apply as before. A cancelled or failed open leaves
+  the session untouched.
+- **Save.** The page copies the workbook (4 ms at 250,000 cells — this fixes
+  the moment saved; later edits stay dirty) and sends it as parts; the worker
+  installs the copy and runs the ordinary writer. An unedited save of the
+  opened format is the opened bytes and needs no worker.
+- **Why not the snapshot.** The collaboration snapshot carries formulas in
+  absolute form, and reading one in a single call is 128 ms at 250,000 cells
+  on the page's thread. Transfer parts are never persisted and never cross a
+  build (the worker loads the page's own `?b=` wasm), so they carry the
+  in-memory form and are not a protocol; `PROTOCOL_VERSION` is unchanged.
+  The reader is held to the snapshot limits as parts arrive and checks every
+  cell with the rule `Workbook::validate` applies.
+- **Fallback.** No `Worker`, or a worker or engine that fails to load: the
+  page-thread path, unchanged.
+- **What is left on the page.** The first volatile-clock pass on a new session
+  (~24 ms at 250,000 cells, the recalculation graph's first build) runs in its
+  own task before the redraw. Recalculation off the page is `PERF-17`.
+
+Measured (`tests/browser/editor.open-save-worker.spec.mjs`, Chromium, 250,000
+cells): longest frame gap during open 933 → 33 ms, during save 700 → 17 ms.
 
 ## Non-negotiable interactions
 

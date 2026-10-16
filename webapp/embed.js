@@ -612,7 +612,7 @@ class OpenCalcSheet extends HTMLElement {
   /// Open an `.xlsx` (or CSV/TSV/PSV) from bytes.
   async open(bytes, name = "workbook.xlsx") {
     const editor = await this.ready;
-    return editor.openBytes(new Uint8Array(bytes), name);
+    return editor.openBytesAsync(new Uint8Array(bytes), name);
   }
 
   /// The workbook as `.xlsx` bytes.

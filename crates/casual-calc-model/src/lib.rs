@@ -28,6 +28,7 @@ mod sheet;
 mod store;
 mod strings;
 mod style;
+pub mod transfer;
 mod value;
 mod workbook;
 

@@ -1058,6 +1058,25 @@ input.tb-size::placeholder, input.tb-font::placeholder { color: var(--oc-faint-t
    A sibling of the status text, not a child: `.tb-status` is one ellipsised
    line with a `max-width`, so a control inside it is clipped out of reach. */
 .keep-waiting { padding: 3px 9px; font-size: 12px; border-radius: 6px; flex: 0 0 auto; }
+/* Open and save progress (`PERF-16`), where Excel draws it: in the status bar,
+   beside "Opening 'name'" / "Saving 'name'". Created only while a file job
+   runs. `indeterminate` is the stretch where the worker is reading or writing
+   and has no count to report. */
+.file-progress {
+  flex: 0 0 auto; width: 120px; height: 8px; margin: 0 8px;
+  border: 1px solid var(--oc-border-color); background: var(--oc-background-color);
+  position: relative; overflow: hidden;
+}
+.file-progress-fill {
+  position: absolute; inset: 0 auto 0 0; width: 0; background: var(--oc-accent-fill-color);
+}
+.file-progress.indeterminate .file-progress-fill {
+  width: 30%; animation: oc-file-progress 1.2s linear infinite;
+}
+@keyframes oc-file-progress { from { left: -30%; } to { left: 100%; } }
+@media (prefers-reduced-motion: reduce) {
+  .file-progress.indeterminate .file-progress-fill { animation: none; width: 100%; opacity: 0.4; }
+}
 
 .formula-bar {
   /* The tint mirror is absolutely positioned against this box, so it has to be
