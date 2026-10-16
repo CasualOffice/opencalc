@@ -441,7 +441,7 @@ export { MACRO_MAX_OPS, MACRO_TIME_LIMIT_MS, runMacro, runMacroForTest } from ".
 // Developer ▸ Macros and Alt+F8 open the window; a workbook's autostart macros
 // are offered on open and never run without the person choosing Run.
 import { forgetMacroAnswersForTest, offerAutostartMacros, openMacrosWindow } from "./editor.macros-window.js";
-import { hasVbaProject, openVbaViewer } from "./editor.vba-viewer.js";
+import { openVbaViewer } from "./editor.vba-viewer.js";
 export { forgetMacroAnswersForTest, offerAutostartMacros, openMacrosWindow };
 // Custom worksheet functions (`MACRO-04`): after every frame, a cheap look at
 // whether the engine is waiting on a custom function's answer, or the
@@ -6975,9 +6975,9 @@ function registerShellCommands() {
   // MACRO-02: ONLYOFFICE's place (View) and Excel's (Developer), one window.
   R("view.macros", { label: "Macros…", shortcut: "Alt+F8", run: () => openMacrosWindow() });
   R("developer.macros", { label: "Macros…", shortcut: "Alt+F8", run: () => openMacrosWindow() });
-  // MACRO-05: Excel's Visual Basic (Alt+F11), read-only, and present only when
-  // the workbook carries a VBA project to view.
-  R("developer.visual-basic", { label: "Visual Basic", shortcut: "Alt+F11", hidden: () => !hasVbaProject(), run: () => openVbaViewer() });
+  // MACRO-05: Excel's Visual Basic (Alt+F11), read-only. Excel shows it for
+  // every workbook; one without a VBA project opens Excel's default project.
+  R("developer.visual-basic", { label: "Visual Basic", shortcut: "Alt+F11", run: () => openVbaViewer() });
 }
 
 // ---- Insert Function / Function Arguments (Shift+F3, XL-UX-026/027) ---------
@@ -8703,9 +8703,9 @@ function wireEvents() {
     }
 
     // Alt+F11 — Excel's Visual Basic Editor; here the read-only VBA view
-    // (`MACRO-05`), which exists only for a workbook carrying a VBA project.
+    // (`MACRO-05`), for every workbook, as in Excel.
     if (e.altKey && !mod && e.key === "F11") {
-      if (!runRegisteredCommand("developer.visual-basic")) status.textContent = "this workbook has no VBA code";
+      runRegisteredCommand("developer.visual-basic");
       e.preventDefault();
       return;
     }

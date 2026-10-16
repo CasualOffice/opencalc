@@ -32,17 +32,26 @@ const FOLDERS = [
 /// selection does.
 const vbaState = { selected: null };
 
-/// Whether the open workbook has a VBA project to show.
-export function hasVbaProject() {
-  try { return !!wasm.session_has_vba_project(); } catch { return false; }
-}
-
 function project() {
+  let p;
   try {
-    return JSON.parse(wasm.session_vba_modules());
+    p = JSON.parse(wasm.session_vba_modules());
   } catch (e) {
     return { present: false, error: errText(e), modules: [] };
   }
+  return p.present ? p : defaultProject();
+}
+
+/// What Excel's editor shows for a workbook that has never had VBA: the
+/// project "VBAProject" with one document module per sheet, "Sheet1 (Sheet1)"
+/// (code name, then sheet name), and ThisWorkbook, every code window empty.
+/// Nothing is created in the file — the view only.
+function defaultProject() {
+  let names = [];
+  try { names = JSON.parse(wasm.session_sheet_names()); } catch {}
+  const modules = names.map((name, i) => ({ name: `Sheet${i + 1} (${name})`, kind: "document", source: "" }));
+  modules.push({ name: "ThisWorkbook", kind: "document", source: "" });
+  return { present: true, name: "VBAProject", modules };
 }
 
 /// The text the VBA editor shows: it hides the `Attribute VB_…` header lines
@@ -71,7 +80,7 @@ function icon(name) {
 /// Open the Visual Basic window.
 export function openVbaViewer() {
   const p = project();
-  const book = documentName() || "Book1.xlsm";
+  const book = documentName() || "Book1";
   // The VBA editor's own window title; that this is read-only is the note's first word.
   const frame = modalFrame(`Microsoft Visual Basic for Applications - ${book}`, {
     onCancel: () => finish(),

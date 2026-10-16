@@ -168,18 +168,24 @@ test("Copy puts the module's code on the clipboard", async ({ page, context, bro
   await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toContain("Sub Hello()");
 });
 
-test("a workbook without VBA has no Visual Basic, and Alt+F11 opens nothing", async ({ page }) => {
+test("a workbook without VBA still has Visual Basic, and it opens Excel's default project", async ({ page }) => {
+  // Excel shows Developer ▸ Visual Basic for every workbook; Alt+F11 opens the
+  // editor with VBAProject, its sheets as "Sheet1 (Sheet1)" and ThisWorkbook,
+  // all with empty code windows.
   await boot(page);
   await page.locator("#rb-tab-developer").click();
-  await expect(page.locator('#rb-panel-developer [data-cmd="developer.macros"]')).toBeVisible();
-  await expect(visualBasic(page)).toBeHidden();
-  const refused = await page.evaluate(() => {
-    try { window.opencalcEditor.runCommand("developer.visual-basic"); return null; } catch (e) { return String(e.message); }
-  });
-  expect(refused).toMatch(/not available/);
+  await expect(visualBasic(page)).toBeVisible();
   await page.locator("#grid").focus();
   await page.keyboard.press("Alt+F11");
-  await expect(page.locator("#oc-modal")).toBeHidden();
+  await expect(page.locator("#oc-modal")).toBeVisible();
+  await expect(page.locator("#oc-modal-title")).toHaveText(/^Microsoft Visual Basic for Applications - /);
+  await expect(page.locator("#oc-vba-explorer-title")).toHaveText("Project - VBAProject");
+  await expect(page.locator("#oc-vba-tree .oc-vba-project")).toHaveText(/^VBAProject \(.+\)$/);
+  await expect(page.locator("#oc-vba-tree .oc-vba-folder")).toHaveText(["Microsoft Excel Objects"]);
+  await expect(items(page)).toHaveText(["Sheet1 (Sheet1)", "ThisWorkbook"]);
+  await items(page).nth(1).click();
+  await expect(page.locator("#oc-vba-code")).toHaveValue("");
+  await expect(page.locator(".oc-vba-empty")).toHaveCount(0);
 });
 
 test("saving keeps vbaProject.bin byte for byte, viewed and edited", async ({ page }) => {

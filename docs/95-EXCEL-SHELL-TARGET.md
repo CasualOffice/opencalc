@@ -48,10 +48,16 @@ This overrides three earlier decisions:
 5. **One mode, always shown; Escape always returns to Ready on the grid.**
 6. **Defaults need no decision** — a new workbook is blank.
 7. **Nothing that is for us** — no version strings or debug text.
-8. **A dialog's messages about its own input are inline.** Shown beside the
-   input, with the dialog kept open and the text intact — never a message box
-   over a dialog (decided 2026-10-14, XL-UX-147; a deliberate divergence from
-   Excel for one fewer click and no lost place).
+8. **A dialog's messages appear where Excel shows them** — a message box where
+   Excel raises one, inline only where Excel is inline. Owner, 2026-10-17:
+   *"assume it as clone of excel .. in terms of UI as well as UX and user
+   flows"*. This replaces the 2026-10-14 inline decision (XL-UX-147); the
+   inline messages already shipped are converted under XL-UX-168.
+9. **Excel is the specification.** UI, UX and user flows follow Excel; a
+   difference is allowed only where a browser cannot do what Excel does (local
+   files, the file system, OS dialogs) or for our own assets (name, logo,
+   icons, fonts, colour). Each such difference names its limit. Differences
+   already shipped for any other reason are audited under XL-UX-169.
 
 ## Build status (2026-10-14)
 
