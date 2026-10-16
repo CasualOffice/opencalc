@@ -2713,6 +2713,82 @@ mod macro_enabled_sessions {
     }
 }
 
+/// The read-only VBA viewer (`MACRO-05`): a session decodes the project its
+/// workbook carries, and decoding changes nothing about what is saved.
+mod vba_viewer {
+    use crate::{SessionFormat, VbaError, VbaModuleKind, WorkbookSession};
+
+    /// `tests/fixtures/vba-hello.xlsm`, made by the import crate's fixture
+    /// builder and held to it there.
+    const HELLO_XLSM: &[u8] = include_bytes!("../../../tests/fixtures/vba-hello.xlsm");
+
+    fn open() -> WorkbookSession {
+        WorkbookSession::open_as(
+            HELLO_XLSM.to_vec(),
+            SessionFormat::for_extension("xlsm").expect("xlsm"),
+        )
+        .expect("the fixture opens")
+    }
+
+    #[test]
+    fn a_session_decodes_its_vba_project() {
+        let project = open()
+            .vba_project()
+            .expect("the workbook carries a project")
+            .expect("and it decodes");
+        let names: Vec<(&str, VbaModuleKind)> = project
+            .modules
+            .iter()
+            .map(|m| (m.name.as_str(), m.kind))
+            .collect();
+        assert_eq!(
+            names,
+            [
+                ("ThisWorkbook", VbaModuleKind::Document),
+                ("Module1", VbaModuleKind::Standard),
+                ("Class1", VbaModuleKind::Class),
+            ]
+        );
+        assert!(
+            project.modules[1]
+                .source
+                .as_deref()
+                .unwrap()
+                .contains("Sub Hello()")
+        );
+    }
+
+    #[test]
+    fn a_workbook_without_vba_has_no_project() {
+        assert!(WorkbookSession::blank().vba_project().is_none());
+    }
+
+    /// A project that is not one is an error to show, not a reason to fail the
+    /// session.
+    #[test]
+    fn an_unreadable_project_is_a_typed_error() {
+        let mut session = open();
+        let part = session
+            .workbook
+            .retained_parts
+            .iter_mut()
+            .find(|p| p.path == "xl/vbaProject.bin")
+            .unwrap();
+        // Break the compound-file signature.
+        part.bytes[0] = 0;
+        assert_eq!(session.vba_project(), Some(Err(VbaError::NotCompoundFile)));
+    }
+
+    /// Viewing is read-only: after decoding, an untouched save is the file it
+    /// opened, byte for byte.
+    #[test]
+    fn viewing_the_project_leaves_the_save_byte_for_byte() {
+        let session = open();
+        let _ = session.vba_project();
+        assert_eq!(session.save().expect("saves"), HELLO_XLSM);
+    }
+}
+
 /// **The pictures a workbook holds reach the renderer** (`RND-14`).
 ///
 /// `casual-calc-render` grew a picture backend, an `ImageSource` to feed it and

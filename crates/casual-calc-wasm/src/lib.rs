@@ -58,6 +58,7 @@ mod sheet;
 mod special;
 mod structural;
 mod style;
+mod vba;
 mod versions;
 mod view;
 
