@@ -785,3 +785,53 @@ mod save_as_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod untouched_save_tests {
+    use super::{session_open_as, session_save_as};
+    use crate::{session_new, session_set_cell};
+
+    /// Whether the session still holds the file it was opened from.
+    fn keeps_original() -> bool {
+        crate::with_session(casual_calc_sdk::WorkbookSession::is_unmodified).unwrap_or(false)
+    }
+
+    /// `SAVE-14`: an opened workbook that nobody edited saves back as the file
+    /// it came from (P1B-002) — in the editor, which sets the host clock on
+    /// every session it installs and again before every recalculation.
+    ///
+    /// Both did it through `workbook_mut()`, which hands out the right to change
+    /// anything and so gives up the untouched original. The clock is
+    /// configuration, not document content: setting it must not cost the file.
+    ///
+    /// Asserted on the session's own "unmodified" answer at each step, not only
+    /// on bytes: this fixture was written by our own writer, so a rewrite of it
+    /// comes out identical until a volatile value moves — which is how the
+    /// open-time loss stayed invisible to a byte comparison.
+    #[test]
+    fn an_unedited_workbook_keeps_its_original_under_the_host_clock() {
+        session_new();
+        session_set_cell(0, 0, 0, "=TODAY()").unwrap();
+        session_set_cell(0, 1, 0, "kept").unwrap();
+        let original = session_save_as("xlsx").unwrap();
+
+        // The editor sets its clock before anything is opened.
+        crate::calc::session_set_volatile(46_000.5, 7.0);
+        session_open_as("xlsx", &original).unwrap();
+        assert!(
+            keeps_original(),
+            "opening under the host clock gave up the original"
+        );
+
+        // And before each recalculation it asks for.
+        crate::calc::session_set_volatile(46_001.25, 8.0);
+        assert!(keeps_original(), "setting the clock gave up the original");
+        let _ = crate::calc::session_recalculate();
+        assert!(keeps_original(), "a recalculation gave up the original");
+        assert_eq!(
+            session_save_as("xlsx").unwrap(),
+            original,
+            "an unedited workbook did not save back byte for byte"
+        );
+    }
+}

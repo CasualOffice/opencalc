@@ -333,18 +333,23 @@ pub fn session_set_volatile(now: f64, seed: f64) {
         crate::VOLATILE.with(|v| v.set((now, seed as u64)));
     }
     let _ = with_session_mut(|s| {
-        let wb = s.workbook_mut();
+        // Through the SDK, not `workbook_mut()`: the clock is configuration,
+        // and handing out the whole workbook to set it gave up the untouched
+        // original, so an opened file nobody edited no longer saved back byte
+        // for byte after its first recalculation (`SAVE-14`).
+        let current = s.config().environment;
         // A non-finite serial would poison every date formula in the sheet with
         // a value no format can render, so it is refused rather than stored.
-        if now.is_finite() {
-            wb.volatile_now = now;
-        }
+        let now = if now.is_finite() { now } else { current.now };
         // `f64` because a `u64` crosses into JavaScript as a `BigInt`; the seed
         // only has to differ between passes, and 2^53 distinct values is more
         // recalculations than a session performs.
-        if seed.is_finite() && seed >= 0.0 {
-            wb.volatile_seed = seed as u64;
-        }
+        let seed = if seed.is_finite() && seed >= 0.0 {
+            seed as u64
+        } else {
+            current.seed
+        };
+        s.stage_environment(casual_calc_sdk::Environment { now, seed });
         Ok(())
     });
 }

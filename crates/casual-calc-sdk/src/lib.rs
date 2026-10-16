@@ -1047,6 +1047,21 @@ impl WorkbookSession {
     /// Only sound when the values really were computed under `environment`
     /// from this same workbook; anything else is what `set_environment` is
     /// for.
+    /// Set the clock and seed **without recalculating**, for a host that
+    /// recalculates next itself (the editor sets its clock before every pass
+    /// it asks for).
+    ///
+    /// Not an edit, and not a change to the document: the untouched original
+    /// survives it, so an opened file that nobody edited still saves back byte
+    /// for byte (`SAVE-14`). Writing these two fields through
+    /// [`workbook_mut`](Self::workbook_mut) cost the file that guarantee on the
+    /// first recalculation after every open.
+    pub fn stage_environment(&mut self, environment: Environment) {
+        self.config.environment = environment;
+        apply_environment(&mut self.workbook, &self.config);
+        self.stale = true;
+    }
+
     pub fn adopt_environment(&mut self, environment: Environment) {
         self.config.environment = environment;
         apply_environment(&mut self.workbook, &self.config);
