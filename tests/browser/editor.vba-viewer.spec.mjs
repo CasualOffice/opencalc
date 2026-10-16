@@ -69,7 +69,7 @@ async function openViewer(page) {
   await expect(visualBasic(page)).toBeVisible();
   await visualBasic(page).click();
   await expect(page.locator("#oc-modal")).toBeVisible();
-  await expect(page.locator("#oc-modal-title")).toHaveText(/^Microsoft Visual Basic for Applications - .+ \[read-only\]$/);
+  await expect(page.locator("#oc-modal-title")).toHaveText(/^Microsoft Visual Basic for Applications - .+$/);
 }
 
 /// Save, capturing the bytes rather than downloading them (as
@@ -154,7 +154,7 @@ test("Alt+F11 opens it, as in Excel", async ({ page }) => {
   await page.locator("#grid").focus();
   await page.keyboard.press("Alt+F11");
   await expect(page.locator("#oc-modal")).toBeVisible();
-  await expect(page.locator("#oc-modal-title")).toHaveText("Microsoft Visual Basic for Applications - vba-hello.xlsm [read-only]");
+  await expect(page.locator("#oc-modal-title")).toHaveText("Microsoft Visual Basic for Applications - vba-hello.xlsm");
 });
 
 test("Copy puts the module's code on the clipboard", async ({ page, context, browserName }) => {

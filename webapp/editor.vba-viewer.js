@@ -72,7 +72,8 @@ function icon(name) {
 export function openVbaViewer() {
   const p = project();
   const book = documentName() || "Book1.xlsm";
-  const frame = modalFrame(`Microsoft Visual Basic for Applications - ${book} [read-only]`, {
+  // The VBA editor's own window title; that this is read-only is the note's first word.
+  const frame = modalFrame(`Microsoft Visual Basic for Applications - ${book}`, {
     onCancel: () => finish(),
     onKey: (e) => {
       const active = document.activeElement;
