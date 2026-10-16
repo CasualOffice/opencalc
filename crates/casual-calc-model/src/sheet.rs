@@ -837,7 +837,13 @@ pub struct Table {
     /// The whole table including its header and totals rows.
     pub range: CellRange,
     /// Number of header rows: 1 normally, 0 for a headerless table.
-    #[serde(default, skip_serializing_if = "is_one")]
+    ///
+    /// The serde default is **1**, the value whose omission is skipped. It was
+    /// `u32::default()`, 0: a table with a header row — every ordinary one —
+    /// was written without the field and read back as headerless, so a joining
+    /// participant's tables lost their headers. Found by `PERF-16`, whose
+    /// worker open crosses the same serialisation.
+    #[serde(default = "one", skip_serializing_if = "is_one")]
     pub header_row_count: u32,
     /// Number of totals rows: 0 or 1.
     #[serde(default, skip_serializing_if = "is_zero")]
@@ -864,6 +870,11 @@ pub struct Table {
 
 fn is_one(value: &u32) -> bool {
     *value == 1
+}
+
+/// The default [`is_one`] skips: what an omitted count must read back as.
+fn one() -> u32 {
+    1
 }
 
 /// A saved sort, carried verbatim.
