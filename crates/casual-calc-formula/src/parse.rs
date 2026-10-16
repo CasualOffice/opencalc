@@ -265,6 +265,15 @@ impl Parser {
             }
             Some(Token::QuotedSheet(name)) => {
                 self.expect(&Token::Bang)?;
+                // `'Jan 2026:Dec 2026'!B5` — a colon cannot be part of a sheet
+                // name (Excel forbids it), so one inside the quotes is the 3-D
+                // span, written as one quoted pair.
+                if let Some((first, last)) = name.split_once(':') {
+                    if first.is_empty() || last.is_empty() {
+                        return Err(FormulaError::InvalidReference(name));
+                    }
+                    return self.parse_3d(first.to_owned(), last.to_owned());
+                }
                 let word = self.expect_word()?;
                 let reference = self.reference_or_axis(&word, Some(name))?;
                 self.maybe_range(reference)
@@ -279,6 +288,19 @@ impl Parser {
     }
 
     fn parse_word(&mut self, word: String) -> Result<Expr, FormulaError> {
+        // `Sheet1:Sheet3!A1`: two sheet names and a bang. Looked for first,
+        // because `Sheet1` on its own would otherwise be tried as a reference.
+        if self.peek() == Some(&Token::Colon)
+            && matches!(self.tokens.get(self.pos + 1), Some(Token::Word(_)))
+            && self.tokens.get(self.pos + 2) == Some(&Token::Bang)
+        {
+            self.advance();
+            let Some(Token::Word(last)) = self.advance() else {
+                unreachable!("peeked a word")
+            };
+            self.advance();
+            return self.parse_3d(word, last);
+        }
         match self.peek() {
             Some(Token::LParen) => {
                 self.advance();
@@ -321,6 +343,29 @@ impl Parser {
                 None => Ok(Expr::Name(word)),
             },
         }
+    }
+
+    /// The area of a 3-D reference, after `first:last!`: a cell or a range on
+    /// each sheet of the span. The far corner names no sheet of its own.
+    fn parse_3d(&mut self, first: String, last: String) -> Result<Expr, FormulaError> {
+        let word = self.expect_word()?;
+        let corner = self.reference_or_axis(&word, None)?;
+        let (start, end) = match self.maybe_range(corner)? {
+            Expr::Reference(start) => (start, None),
+            Expr::Range(start, end) if end.sheet.is_none() => (start, Some(end)),
+            other => {
+                return Err(FormulaError::InvalidReference(format!(
+                    "{first}:{last}!{other}"
+                )));
+            }
+        };
+        Ok(crate::ast::Reference3d {
+            first,
+            last,
+            start,
+            end,
+        }
+        .into_expr())
     }
 
     /// Wrap `callee` in as many invocations as follow it.

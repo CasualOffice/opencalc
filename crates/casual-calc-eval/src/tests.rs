@@ -5147,3 +5147,90 @@ fn the_implicit_intersection_operator_picks_the_cell_in_line() {
     assert_eq!(value_at(&wb, 1, 4), CellValue::Number(10.0));
     assert_eq!(value_at(&wb, 0, 5), CellValue::Number(10.0));
 }
+
+/// 3-D references (XL-FEAT-017): Excel's functions take the same cells on
+/// every sheet from one tab to another; anywhere else a 3-D reference is
+/// `#VALUE!`. The span is positional, so a sheet inserted between the tabs is
+/// counted and one moved out is not.
+#[test]
+fn three_d_references_aggregate_across_the_span() {
+    let mut wb = Workbook::new(Id::from_parts(1, 1));
+    let mut summary = Sheet::new(SheetId(Id::from_parts(2, 1)), "Summary");
+    let formulas = [
+        "SUM(Jan:Mar!B5)",
+        "AVERAGE(Jan:Mar!B5)",
+        "COUNT(Jan:Mar!B5:B6)",
+        "COUNTA(Jan:Mar!B5:B6)",
+        "MAX(Jan:Mar!B5)",
+        "MIN(Mar:Jan!B5)",
+        "PRODUCT(Jan:Mar!B5)",
+        "SUM(Jan:Mar!B5:B6,100)",
+        "ROWS(VSTACK(Jan:Mar!B5))",
+        "Jan:Mar!B5",
+        "COUNTIF(Jan:Mar!B5,\">0\")",
+        "SUM(Jan:Mar!B5*2)",
+        "SUM(Jan:Nope!B5)",
+    ];
+    for (row, text) in formulas.iter().enumerate() {
+        let at = Origin::at(row as u32, 0);
+        let handle = wb.store_formula_at(parse(text).unwrap(), at);
+        let mut cell = Cell::value(CellValue::Empty);
+        cell.formula = Some(handle);
+        summary.cells.set(CellRef::new(row as u32, 0), cell);
+    }
+    wb.sheets.push(summary);
+    for (i, (name, n)) in [("Jan", 1.0), ("Feb", 2.0), ("Mar", 4.0)]
+        .iter()
+        .enumerate()
+    {
+        let mut sheet = Sheet::new(SheetId(Id::from_parts(10 + i as u64, 1)), *name);
+        sheet
+            .cells
+            .set(CellRef::new(4, 1), Cell::value(CellValue::Number(*n)));
+        let label = wb.intern_string("note");
+        sheet.cells.set(
+            CellRef::new(5, 1),
+            Cell::value(CellValue::InlineString(label)),
+        );
+        wb.sheets.push(sheet);
+    }
+    recalculate(&mut wb);
+    let at = |wb: &Workbook, row: u32| {
+        wb.sheets[0]
+            .cells
+            .get(CellRef::new(row, 0))
+            .map(|c| c.value.clone())
+            .unwrap()
+    };
+    use casual_calc_model::ErrorValue;
+    let n = CellValue::Number;
+    assert_eq!(at(&wb, 0), n(7.0));
+    assert_eq!(at(&wb, 1), n(7.0 / 3.0));
+    assert_eq!(at(&wb, 2), n(3.0));
+    assert_eq!(at(&wb, 3), n(6.0));
+    assert_eq!(at(&wb, 4), n(4.0));
+    assert_eq!(at(&wb, 5), n(1.0));
+    assert_eq!(at(&wb, 6), n(8.0));
+    assert_eq!(at(&wb, 7), n(107.0));
+    assert_eq!(at(&wb, 8), n(3.0));
+    assert_eq!(at(&wb, 9), CellValue::Error(ErrorValue::Value));
+    assert_eq!(at(&wb, 10), CellValue::Error(ErrorValue::Value));
+    assert_eq!(at(&wb, 11), CellValue::Error(ErrorValue::Value));
+    assert_eq!(at(&wb, 12), CellValue::Error(ErrorValue::Ref));
+
+    // A sheet inserted between the endpoints is in the span...
+    let mut extra = Sheet::new(SheetId(Id::from_parts(20, 1)), "Extra");
+    extra
+        .cells
+        .set(CellRef::new(4, 1), Cell::value(CellValue::Number(10.0)));
+    wb.sheets.insert(2, extra);
+    recalculate(&mut wb);
+    assert_eq!(at(&wb, 0), n(17.0));
+    // ...and one moved out of it is not.
+    let moved = wb.sheets.remove(2);
+    wb.sheets.push(moved);
+    let feb = wb.sheets.remove(2);
+    wb.sheets.push(feb);
+    recalculate(&mut wb);
+    assert_eq!(at(&wb, 0), n(5.0));
+}

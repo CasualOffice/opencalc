@@ -2849,6 +2849,7 @@ fn a_new_formula_variant_is_a_protocol_change() {
             Expr::Binary { .. } => "binary",
             Expr::Function { .. } => "function",
             Expr::Array(_) => "array",
+            Expr::Reference3d(_) => "reference3d",
         }
     }
     let parsed = |text: &str| casual_calc_formula::parse(text).expect("parses");
@@ -2868,6 +2869,7 @@ fn a_new_formula_variant_is_a_protocol_change() {
         parsed("1+1"),
         parsed("SUM(1)"),
         parsed("{1,2;3,4}"),
+        parsed("Sheet1:Sheet3!A1"),
     ];
     let mut tags: Vec<&str> = Vec::new();
     for expr in &samples {
@@ -2897,6 +2899,7 @@ fn a_new_formula_variant_is_a_protocol_change() {
             "range",
             "raw",
             "reference",
+            "reference3d",
             "structuredRef",
             "text",
             "unary"
@@ -2909,7 +2912,7 @@ fn a_new_formula_variant_is_a_protocol_change() {
     let moved = crate::protocol::PROTOCOL_VERSION > 11;
     assert!(
         moved,
-        "Expr gained `array`, a tag a protocol-11 peer cannot read. Move PROTOCOL_VERSION \
+        "Expr gained `array` and `reference3d`, tags a protocol-11 peer cannot read. Move PROTOCOL_VERSION \
          (currently {}) so the mismatch is refused at the handshake.",
         crate::protocol::PROTOCOL_VERSION,
     );
@@ -4645,6 +4648,61 @@ fn a_whole_column_reference_follows_a_column_move_and_ignores_a_row_move() {
     )
     .unwrap();
     assert_eq!(formula_text(&wb, 0, 4, 7).as_deref(), Some("SUM(D:D)"));
+}
+
+/// 3-D references across sheet edits (XL-FEAT-017), Microsoft's rules for each
+/// ("Create a 3-D reference to the same cell range on multiple worksheets"):
+/// a sheet deleted between the endpoints leaves the text alone (it is resolved
+/// by position); an endpoint deleted moves one sheet inward, and undo puts it
+/// back; a renamed endpoint is followed; a row edit on one sheet does not move
+/// the reference on all of them.
+#[test]
+fn three_d_references_follow_sheet_edits_as_excel_does() {
+    let mut wb = workbook();
+    for (i, name) in ["Jan", "Feb", "Mar", "Apr"].iter().enumerate() {
+        wb.sheets
+            .push(Sheet::new(SheetId(Id::from_parts(10 + i as u64, 1)), *name));
+    }
+    set_formula(&mut wb, 0, 0, 0, "SUM(Jan:Mar!B5)");
+    let text = |wb: &Workbook| formula_text(wb, 0, 0, 0);
+
+    apply(&mut wb, Operation::RemoveSheet { index: 2 }).unwrap(); // Feb
+    assert_eq!(text(&wb).as_deref(), Some("SUM(Jan:Mar!B5)"));
+
+    let undo = apply(&mut wb, Operation::RemoveSheet { index: 1 }).unwrap(); // Jan
+    // Narrowed to one sheet, it is that sheet's plain reference.
+    assert_eq!(text(&wb).as_deref(), Some("SUM(Mar!B5)"));
+    apply(&mut wb, undo).unwrap();
+    assert_eq!(text(&wb).as_deref(), Some("SUM(Jan:Mar!B5)"));
+    assert_eq!(wb.sheets[1].name, "Jan");
+
+    apply(
+        &mut wb,
+        Operation::RenameSheet {
+            index: 2,
+            name: "March".to_owned(),
+        },
+    )
+    .unwrap();
+    assert_eq!(text(&wb).as_deref(), Some("SUM(Jan:March!B5)"));
+
+    apply(
+        &mut wb,
+        Operation::InsertRows {
+            sheet: 1,
+            at: 0,
+            count: 3,
+        },
+    )
+    .unwrap();
+    assert_eq!(text(&wb).as_deref(), Some("SUM(Jan:March!B5)"));
+
+    // Down to one sheet it is a plain reference, and deleting that sheet is
+    // what deleting any referenced sheet is: the name stays, and reads #REF!.
+    apply(&mut wb, Operation::RemoveSheet { index: 2 }).unwrap(); // March
+    assert_eq!(text(&wb).as_deref(), Some("SUM(Jan!B5)"));
+    apply(&mut wb, Operation::RemoveSheet { index: 1 }).unwrap(); // Jan
+    assert_eq!(text(&wb).as_deref(), Some("SUM(Jan!B5)"));
 }
 
 /// `B2#` and `@B2:B9` are calls in the tree (`ANCHORARRAY`, `SINGLE`), so they

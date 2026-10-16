@@ -79,3 +79,11 @@ for source in values-and-formulas gaps-and-repeats text-edges arrays; do
   mv "$tmp/$source.ods" "$out/$source.ods"
   echo "wrote $out/$source.ods"
 done
+
+# 5. 3-D references (XL-FEAT-017). CSV has one sheet, so this one starts from a
+#    hand-written flat ODF document, `three-d.fods`, committed beside it: four
+#    sheets, the formulas on the first, `[$Jan.B2:$Mar.B2]` spanning the rest
+#    (one of them, `Feb Q1`, needing quotes). LibreOffice computes the answers
+#    on conversion, which is what the oracle compares against.
+"$soffice" --headless --convert-to ods --outdir "$out" "$out/three-d.fods" >/dev/null
+echo "wrote $out/three-d.ods"

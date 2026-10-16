@@ -39,6 +39,7 @@
 
 use std::io::{Cursor, Read, Write};
 
+use casual_calc_formula::stored::Origin;
 use casual_calc_import::{CompatibilityReport, ModelOutcome, RetentionOutcome};
 use casual_calc_model::{Cell, CellRef, CellValue, Id, Sheet, SheetId, Workbook};
 use quick_xml::events::Event;
@@ -719,10 +720,16 @@ fn place(
 
     // A formula is stored once and shared by handle, which is what the model's
     // interning is for — a repeated run of the same formula is one AST.
+    //
+    // **Stored relative to the cell that holds it** (`PERF-11`): the text
+    // names addresses, and the evaluator reads a stored tree as offsets from
+    // its cell. Storing the parsed tree as it came made `[.B2]*[.C2]` in D2
+    // compute E3*F3. A repeated run shares the first cell's relative tree,
+    // the same shape a filled-down column has.
     let handle = has_formula
         .then(|| translate_formula(&p.formula))
         .flatten()
-        .map(|expr| workbook.store_formula(expr));
+        .map(|expr| workbook.store_formula_at(expr, Origin::at(row, col)));
     if has_formula && handle.is_none() {
         // The value survives; the formula does not. Named, because a cell that
         // silently stops recalculating is the worst of the two outcomes.
@@ -850,33 +857,61 @@ fn translate_formula(raw: &str) -> Option<casual_calc_formula::Expr> {
 /// cannot express.
 ///
 /// The shapes: `.A1`, `.$A$1`, `.A1:.B2`, `$Sheet2.A1`, `$'My Sheet'.A1`, and a
-/// qualified range `$Sheet2.A1:.B2` whose far end takes the near end's sheet.
+/// qualified range `$Sheet2.A1:.B2` whose far end takes the near end's sheet,
+/// and a range whose ends name two different sheets — `$Jan.B5:$Mar.B9`, a
+/// 3-D reference (`XL-FEAT-017`).
 ///
-/// Refused rather than approximated: a reference to a deleted sheet (`#REF!`),
-/// a named expression (`$$name`), and a range spanning two different sheets —
-/// which is a 3-D reference this engine does not model, and picking one of the
-/// two sheets would silently point the formula somewhere it never did.
+/// Refused rather than approximated: a reference to a deleted sheet (`#REF!`)
+/// and a named expression (`$$name`).
 fn a1_from_odf(inner: &str) -> Option<String> {
     if inner.contains('#') || inner.starts_with("$$") {
         return None;
     }
     let (first, second) = split_odf_range(inner);
     let (sheet, address) = odf_parts(first)?;
+    if let Some(second) = second {
+        let (far_sheet, far_address) = odf_parts(second)?;
+        // Two ends on two different sheets: a 3-D reference (XL-FEAT-017),
+        // `[$Jan.B5:$Dec.B9]` → `'Jan:Dec'!B5:B9`. Written as one quoted pair,
+        // which the parser takes whether or not either name needs quoting.
+        if let (Some(near), Some(far)) = (&sheet, &far_sheet)
+            && near != far
+        {
+            let pair = format!("{}:{}", unquoted(near), unquoted(far)).replace('\'', "''");
+            // `[$Jan.B5:$Dec.B5]` is how a single cell is spelled.
+            let area = if address == far_address {
+                address.to_owned()
+            } else {
+                format!("{address}:{far_address}")
+            };
+            return Some(format!("'{pair}'!{area}"));
+        }
+        let mut out = String::new();
+        if let Some(name) = &sheet {
+            out.push_str(name);
+            out.push('!');
+        }
+        out.push_str(address);
+        out.push(':');
+        out.push_str(far_address);
+        return Some(out);
+    }
     let mut out = String::new();
     if let Some(name) = &sheet {
         out.push_str(name);
         out.push('!');
     }
     out.push_str(address);
-    if let Some(second) = second {
-        let (far_sheet, far_address) = odf_parts(second)?;
-        if far_sheet.is_some() && far_sheet != sheet {
-            return None; // A 3-D range.
-        }
-        out.push(':');
-        out.push_str(far_address);
-    }
     Some(out)
+}
+
+/// A sheet name as [`odf_parts`] returns it, without A1 quoting:
+/// `'My Sheet'` → `My Sheet`, `'Bob''s'` → `Bob's`.
+fn unquoted(name: &str) -> String {
+    match name.strip_prefix('\'').and_then(|n| n.strip_suffix('\'')) {
+        Some(inner) => inner.replace("''", "'"),
+        None => name.to_owned(),
+    }
 }
 
 /// Split `a:b` on the colon that separates the two ends of a range, ignoring
@@ -1122,7 +1157,7 @@ fn content_xml(workbook: &Workbook) -> String {
             if at.col > next_col {
                 out.push_str(&repeated("table:table-cell", at.col - next_col));
             }
-            out.push_str(&cell_xml(workbook, cell));
+            out.push_str(&cell_xml(workbook, cell, Origin::at(at.row, at.col)));
             next_col = at.col + 1;
         }
         if open_row.is_some() {
@@ -1148,7 +1183,7 @@ fn repeated(element: &str, count: u32) -> String {
     }
 }
 
-fn cell_xml(workbook: &Workbook, cell: &Cell) -> String {
+fn cell_xml(workbook: &Workbook, cell: &Cell, origin: Origin) -> String {
     // **The formula, first.** Without it a saved `.ods` is a table of constants
     // that opens without complaint and shows the right numbers — until somebody
     // changes an input. `None` where this converter cannot express the formula
@@ -1157,7 +1192,7 @@ fn cell_xml(workbook: &Workbook, cell: &Cell) -> String {
     let formula = cell
         .formula
         .and_then(|handle| workbook.formula(handle))
-        .and_then(odf_formula)
+        .and_then(|expr| odf_formula(expr, origin))
         .map(|text| format!(r#" table:formula="{}""#, escape(&text)))
         .unwrap_or_default();
 
@@ -1191,11 +1226,22 @@ fn cell_xml(workbook: &Workbook, cell: &Cell) -> String {
 /// that cannot be written faithfully is **not** approximated. The printed A1
 /// text is walked once — string literals copied through, `,` turned into ODF's
 /// `;`, and every reference wrapped by [`odf_reference`].
-fn odf_formula(expr: &casual_calc_formula::Expr) -> Option<String> {
+fn odf_formula(expr: &casual_calc_formula::Expr, origin: Origin) -> Option<String> {
     if !writable_in_odf(expr) {
         return None;
     }
-    let text = expr.to_string();
+    // A 3-D reference does not survive the text walk below, which finds
+    // references by scanning A1 text and would read `Jan:Dec!B5` as the text
+    // `Jan:` followed by `Dec!B5`. Each one is swapped for a string literal the
+    // walk copies through untouched, then swapped back for its ODF spelling.
+    let mut expr = expr.clone();
+    let mut three_d: Vec<String> = Vec::new();
+    take_3d(&mut expr, &mut three_d, origin)?;
+    // From the cell that holds it: a stored tree's references are offsets.
+    let text = casual_calc_formula::print_at(&expr, origin);
+    if !three_d.is_empty() && text.matches(MARK).count() != 2 * three_d.len() {
+        return None;
+    }
     let chars: Vec<char> = text.chars().collect();
     let spans = casual_calc_formula::reference_spans(&text);
 
@@ -1247,7 +1293,59 @@ fn odf_formula(expr: &casual_calc_formula::Expr) -> Option<String> {
             }
         }
     }
+    for (i, odf) in three_d.iter().enumerate() {
+        out = out.replace(&format!("\"{MARK}{i}{MARK}\""), odf);
+    }
     Some(out)
+}
+
+/// A private-use character no formula of ours prints, bracketing the index of
+/// a 3-D reference while [`odf_formula`] walks the text.
+const MARK: char = '\u{E000}';
+
+/// Replace every 3-D reference in `expr` with a marker literal, pushing its ODF
+/// spelling — `[$Jan.B5:$Dec.B9]` — onto `spans`. `None` for one that resolves
+/// off the sheet.
+fn take_3d(
+    expr: &mut casual_calc_formula::Expr,
+    spans: &mut Vec<String>,
+    origin: Origin,
+) -> Option<()> {
+    use casual_calc_formula::Expr;
+    match expr {
+        Expr::Reference3d(r) => {
+            let start = r.start.at(origin)?;
+            let end = match &r.end {
+                Some(end) => end.at(origin)?,
+                None => start.clone(),
+            };
+            let qualified = |sheet: &str, at: &casual_calc_formula::CellReference| {
+                let mut at = at.clone();
+                at.sheet = Some(sheet.to_owned());
+                // `'My Sheet'!A1` → `$'My Sheet'.A1`: ODF quotes a sheet name
+                // exactly as A1 text does.
+                let text = at.to_string();
+                let (sheet, address) = text.rsplit_once('!').unwrap_or(("", &text));
+                format!("${sheet}.{address}")
+            };
+            spans.push(format!(
+                "[{}:{}]",
+                qualified(&r.first, &start),
+                qualified(&r.last, &end)
+            ));
+            *expr = Expr::Text(format!("{MARK}{}{MARK}", spans.len() - 1));
+            Some(())
+        }
+        Expr::Unary { operand, .. } => take_3d(operand, spans, origin),
+        Expr::Binary { left, right, .. } => {
+            take_3d(left, spans, origin)?;
+            take_3d(right, spans, origin)
+        }
+        Expr::Function { args, .. } | Expr::Call { args, .. } => {
+            args.iter_mut().try_for_each(|a| take_3d(a, spans, origin))
+        }
+        _ => Some(()),
+    }
 }
 
 /// Whether every part of this expression has an ODF form this writer can
@@ -1272,6 +1370,13 @@ fn writable_in_odf(expr: &casual_calc_formula::Expr) -> bool {
         Expr::Reference(r) => !r.col_implicit && !r.row_implicit,
         Expr::Range(a, b) => {
             !a.col_implicit && !a.row_implicit && !b.col_implicit && !b.row_implicit
+        }
+        // `[$Sheet1.A1:$Sheet3.B2]` — a range whose two ends name different
+        // sheets is how OpenFormula writes a 3-D reference (XL-FEAT-017).
+        Expr::Reference3d(r) => {
+            let open =
+                |s: &casual_calc_formula::stored::StoredRef| s.col_implicit || s.row_implicit;
+            !open(&r.start) && !r.end.as_ref().is_some_and(open)
         }
         Expr::Name(_) | Expr::Raw(_) | Expr::StructuredRef { .. } | Expr::Call { .. } => false,
         Expr::Unary { operand, .. } => writable_in_odf(operand),
@@ -1374,7 +1479,7 @@ pub fn export_loss(workbook: &Workbook) -> CompatibilityReport {
         gone("sort state", usize::from(sheet.sort_state.is_some()));
         gone("sheet format", sheet.format_pr.len());
 
-        for (_, cell) in sheet.cells.iter() {
+        for (at, cell) in sheet.cells.iter() {
             if cell.style.is_some() {
                 formatted += 1;
             }
@@ -1386,7 +1491,7 @@ pub fn export_loss(workbook: &Workbook) -> CompatibilityReport {
             if cell
                 .formula
                 .and_then(|handle| workbook.formula(handle))
-                .is_some_and(|expr| odf_formula(expr).is_none())
+                .is_some_and(|expr| odf_formula(expr, Origin::at(at.row, at.col)).is_none())
             {
                 untranslatable += 1;
             }
@@ -1431,6 +1536,7 @@ fn escape(raw: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use casual_calc_formula::stored::ABSOLUTE;
 
     /// **Padding is elements, not text** (`ODS-04`).
     ///
@@ -1943,10 +2049,11 @@ mod tests {
     fn an_untranslatable_reference_is_refused() {
         // A reference to a deleted sheet.
         assert!(translate_formula("of:=[#REF!.A1]").is_none());
-        // Two different sheets in one range is a 3-D reference, which this
-        // engine does not model — pointing it at one of the two would be an
-        // answer nobody asked for.
-        assert!(translate_formula("of:=SUM([$One.A1:$Two.B2])").is_none());
+        // Two different sheets in one range was refused here as a 3-D
+        // reference this engine did not model; since XL-FEAT-017 it is one —
+        // see `three_d_references_map_to_and_from_openformula`.
+        // A named expression is still refused.
+        assert!(translate_formula("of:=[$$Rate]").is_none());
     }
 
     /// Inline arrays (`XL-FEAT-014`): OpenFormula separates columns with `;`
@@ -1958,13 +2065,37 @@ mod tests {
             translate_formula(r#"of:=SUM({1;2|3;4})+COUNTA({"a|b";"c;d"})"#).expect("translates");
         assert_eq!(expr.to_string(), r#"SUM({1,2;3,4})+COUNTA({"a|b","c;d"})"#);
         assert_eq!(
-            odf_formula(&expr).as_deref(),
+            odf_formula(&expr, ABSOLUTE).as_deref(),
             Some(r#"of:=SUM({1;2|3;4})+COUNTA({"a|b";"c;d"})"#)
         );
         let column = casual_calc_formula::parse(r#"{1;-2;"x";TRUE;#N/A}"#).unwrap();
-        let written = odf_formula(&column).expect("writable");
+        let written = odf_formula(&column, ABSOLUTE).expect("writable");
         assert_eq!(written, r#"of:={1|-2|"x"|TRUE|#N/A}"#);
         assert_eq!(translate_formula(&written), Some(column));
+    }
+
+    /// 3-D references (`XL-FEAT-017`): OpenFormula spells one as a range whose
+    /// two ends name different sheets, `[$Jan.B5:$Mar.B9]`. Read and written.
+    #[test]
+    fn three_d_references_map_to_and_from_openformula() {
+        for (odf, a1) in [
+            ("of:=SUM([$Jan.B5:$Mar.B5])", "SUM(Jan:Mar!B5)"),
+            ("of:=SUM([$Jan.B5:$Mar.B9])", "SUM(Jan:Mar!B5:B9)"),
+            (
+                "of:=SUM([$'Jan 2026'.$B$5:$'Bob''s'.$C$9];1)",
+                "SUM('Jan 2026:Bob''s'!$B$5:$C$9,1)",
+            ),
+        ] {
+            let expr = translate_formula(odf).unwrap_or_else(|| panic!("{odf} refused"));
+            assert_eq!(expr.to_string(), a1, "read {odf}");
+            assert_eq!(
+                odf_formula(&expr, ABSOLUTE).as_deref(),
+                Some(odf),
+                "wrote {a1}"
+            );
+        }
+        // Still refused: a reference to a deleted sheet.
+        assert!(translate_formula("of:=SUM([$#REF!.A1:$Two.B2])").is_none());
     }
 
     /// `A1#` and `@x` have no ODF form, so the writer refuses them — and the
@@ -1973,7 +2104,7 @@ mod tests {
     fn spill_and_intersection_operators_are_refused_and_counted() {
         for text in ["SUM(A1#)", "@A1:A3", "1+@B2"] {
             let expr = casual_calc_formula::parse(text).unwrap();
-            assert_eq!(odf_formula(&expr), None, "{text} was written");
+            assert_eq!(odf_formula(&expr, ABSOLUTE), None, "{text} was written");
         }
     }
 
@@ -2018,7 +2149,11 @@ mod tests {
             .and_then(|c| c.formula)
             .and_then(|h| again.formula(h))
             .expect("D4's SUM came back as a constant");
-        assert_eq!(format!("{sum}"), "SUM(D2:D3)");
+        // Printed from D4, the cell holding it: a stored tree is relative.
+        assert_eq!(
+            casual_calc_formula::print_at(sum, Origin::at(3, 3)),
+            "SUM(D2:D3)"
+        );
     }
 
     /// **A formula reaches the file in ODF's own syntax, not this engine's.**
@@ -2028,6 +2163,58 @@ mod tests {
     /// our own reader proves nothing about whether LibreOffice can read what we
     /// wrote. ODF wants the bracketed references, and a file without them opens
     /// there with `#NAME?` in every formula cell.
+    /// **A formula is stored relative to its own cell, and written from it.**
+    ///
+    /// Since `PERF-11` a stored tree's references are offsets from the cell
+    /// holding it, and the evaluator resolves them against that cell. This
+    /// reader stored the parsed tree as it came — the absolute form, offsets
+    /// from A1 — so `=[.B2]*[.C2]` in D2 was evaluated as E3*F3; and this
+    /// writer printed every tree from A1, so `=A1*2` typed into B5 was saved
+    /// as `of:=#REF!*2`. Both directions agreed with each other, which is why
+    /// the round-trip tests passed; neither agreed with the evaluator or with
+    /// an `.xlsx`. Found by XL-FEAT-017's oracle, the first to compute an ODS
+    /// document's formulas rather than read its cached answers.
+    #[test]
+    fn a_formula_is_stored_and_written_relative_to_its_cell() {
+        let (wb, _) = import_ods(REAL).expect("opens");
+        let d2 = wb.sheets[0]
+            .cells
+            .get(CellRef::new(1, 3))
+            .and_then(|c| c.formula)
+            .and_then(|h| wb.formula(h))
+            .expect("D2 has a formula");
+        assert_eq!(
+            casual_calc_formula::print_at(d2, casual_calc_formula::stored::Origin::at(1, 3)),
+            "B2*C2",
+            "D2 read from its own cell"
+        );
+
+        let mut wb = Workbook::new(casual_calc_model::Id::from_parts(1, 1));
+        let mut sheet = casual_calc_model::Sheet::new(
+            casual_calc_model::SheetId(casual_calc_model::Id::from_parts(2, 1)),
+            "S",
+        );
+        let handle = wb.store_formula_at(
+            casual_calc_formula::parse("A1*2+SUM(Jan:Mar!B5)").unwrap(),
+            casual_calc_formula::stored::Origin::at(4, 1),
+        );
+        let mut cell = Cell::value(CellValue::Number(1.0));
+        cell.formula = Some(handle);
+        sheet.cells.set(CellRef::new(4, 1), cell);
+        wb.sheets.push(sheet);
+        let written = export_ods(&wb).expect("writes");
+        let mut zip = zip::ZipArchive::new(Cursor::new(&written[..])).expect("a zip");
+        let mut xml = String::new();
+        zip.by_name("content.xml")
+            .expect("content.xml")
+            .read_to_string(&mut xml)
+            .expect("utf-8");
+        assert!(
+            xml.contains(r#"table:formula="of:=[.A1]*2+SUM([$Jan.B5:$Mar.B5])""#),
+            "B5's formula was not written from B5: {xml}"
+        );
+    }
+
     #[test]
     fn a_written_formula_is_in_odf_syntax() {
         let (original, _) = import_ods(REAL).expect("opens");

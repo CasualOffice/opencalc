@@ -748,3 +748,93 @@ fn the_implicit_intersection_operator_parses_and_prints() {
         assert!(parse(text).is_err(), "{text} parsed: {:?}", parse(text));
     }
 }
+
+/// 3-D references (XL-FEAT-017): the same cell or range on every sheet from
+/// one tab to another. Excel quotes the pair once when either name needs it.
+#[test]
+fn three_d_references_parse_and_print() {
+    for text in [
+        "Sheet1:Sheet3!A1",
+        "SUM(Sheet1:Sheet3!A1)",
+        "SUM(Jan:Dec!B5:B9)",
+        "SUM('Jan 2026:Dec 2026'!B5:B9)",
+        "AVERAGE(Sheet1:Sheet3!$A$1:$B$2,1)",
+        "SUM('Bob''s:Zed'!A1)",
+        "SUM(Sheet1:Sheet3!A:A)",
+        "SUM(Sheet1:Sheet3!2:2)",
+    ] {
+        let expr = parse(text).unwrap_or_else(|e| panic!("{text}: {e}"));
+        assert_eq!(expr.to_string(), text, "round trip");
+    }
+    // One quoted name for the pair, whichever end needed it.
+    assert_eq!(
+        parse("SUM('Jan:Dec 2026'!A1)").unwrap().to_string(),
+        "SUM('Jan:Dec 2026'!A1)"
+    );
+    assert!(format!("{:?}", parse("Sheet1:Sheet3!A1").unwrap()).starts_with("Reference3d"));
+    // A 3-D reference is not a spill anchor, and its far end names no sheet.
+    for text in [
+        "Sheet1:Sheet3!A1#",
+        "Sheet1:Sheet3!A1:Sheet2!B2",
+        "Sheet1:!A1",
+        ":Sheet3!A1",
+    ] {
+        assert!(parse(text).is_err(), "{text} parsed: {:?}", parse(text));
+    }
+}
+
+/// Renaming an endpoint follows it; deleting one moves it one sheet inward,
+/// whichever way round the span was written; deleting the only sheet of a
+/// span leaves `#REF!`. Deleting a sheet *between* the ends changes nothing
+/// in the text — the span is resolved by position.
+#[test]
+fn three_d_endpoints_follow_renames_and_deletions() {
+    use crate::{rename_sheet_references, shrink_3d_span};
+    let mut e = parse("SUM(Jan:Mar!B5)+Jan!A1").unwrap();
+    assert!(rename_sheet_references(&mut e, "jan", "January"));
+    assert_eq!(e.to_string(), "SUM(January:Mar!B5)+January!A1");
+
+    let order = ["Jan", "Feb", "Mar", "Apr"];
+    let shrunk = |text: &str, gone: &str| {
+        let mut e = parse(text).unwrap();
+        let changed = shrink_3d_span(&mut e, gone, &order);
+        (changed, e.to_string())
+    };
+    assert_eq!(
+        shrunk("SUM(Jan:Mar!B5)", "Jan"),
+        (true, "SUM(Feb:Mar!B5)".into())
+    );
+    assert_eq!(
+        shrunk("SUM(Jan:Mar!B5)", "Mar"),
+        (true, "SUM(Jan:Feb!B5)".into())
+    );
+    assert_eq!(
+        shrunk("SUM(Mar:Jan!B5)", "Mar"),
+        (true, "SUM(Feb:Jan!B5)".into())
+    );
+    assert_eq!(
+        shrunk("SUM(Jan:Mar!B5)", "Feb"),
+        (false, "SUM(Jan:Mar!B5)".into())
+    );
+    assert_eq!(
+        shrunk("SUM(Jan:Mar!B5)", "Apr"),
+        (false, "SUM(Jan:Mar!B5)".into())
+    );
+    // Narrowed to one sheet, it is that sheet's plain reference — the form
+    // `Feb:Feb!B5` itself parses to.
+    assert_eq!(
+        shrunk("SUM(Jan:Feb!B5)", "Jan"),
+        (true, "SUM(Feb!B5)".into())
+    );
+    assert_eq!(parse("Feb:FEB!B5:C6").unwrap(), parse("Feb!B5:C6").unwrap());
+    // A one-sheet span can still arrive as a tree (from the wire); deleting
+    // its sheet leaves nothing to refer to.
+    let mut lone = Expr::Reference3d(Box::new(crate::Reference3d {
+        first: "Feb".into(),
+        last: "Feb".into(),
+        start: crate::stored::StoredRef::absolute(&crate::parse_a1("B5").unwrap()),
+        end: None,
+    }));
+    assert!(shrink_3d_span(&mut lone, "Feb", &order));
+    assert_eq!(lone, Expr::Error("#REF!".into()));
+}

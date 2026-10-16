@@ -5794,6 +5794,19 @@ fn array_constants_round_trip_through_xlsx() {
     }
 }
 
+/// A 3-D reference is written as Excel writes it: one quoted pair when either
+/// sheet name needs quoting (XL-FEAT-017).
+#[test]
+fn three_d_references_round_trip_through_xlsx() {
+    for text in [
+        "SUM(Sheet1:Sheet2!B2)",
+        "SUM('Sheet2:Sheet 3'!B2:C3)",
+        "AVERAGE(Sheet1:Sheet2!$A$1:$A$9,Sheet2!A1)",
+    ] {
+        assert_formula_round_trips(text, text);
+    }
+}
+
 /// Excel stores `A1#` as `_xlfn.ANCHORARRAY(A1)` and `@x` as `_xlfn.SINGLE(x)`
 /// (XL-FEAT-015). Both read as the operators and are written back as the calls.
 #[test]

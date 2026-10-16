@@ -515,6 +515,11 @@ fn collect_precedents(
         // recalculate on any change rather than track a dependency that cannot
         // be derived. Conservative, never stale.
         Expr::Raw(_) => *uses_name = true,
+        // A 3-D reference's sheets are whatever sits between its endpoints
+        // *now*: inserting or moving a sheet changes them without any cell
+        // changing. No fixed edge set is right, so it is treated as a name —
+        // recalculated on any change. Conservative, never stale.
+        Expr::Reference3d(_) => *uses_name = true,
         // Nothing there, so nothing to depend on — and an array constant holds
         // constants only.
         Expr::Empty | Expr::Array(_) => {}

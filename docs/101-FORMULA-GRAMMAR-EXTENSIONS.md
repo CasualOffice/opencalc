@@ -92,24 +92,48 @@ accepted by SUM, AVERAGE, AVERAGEA, COUNT, COUNTA, HSTACK, MAX, MAXA, MIN, MINA,
 PRODUCT, STDEV, STDEVA, STDEVP, STDEVPA, VAR, VARA, VARP, VARPA, VSTACK (and the
 `.S`/`.P` forms of STDEV and VAR, which older revisions of the page list).
 
-**AST**: `Expr::Reference3d { first, last, start, end }` — two sheet *names*
-and a stored reference or range with no sheet of its own. Names, not indices:
+**AST**: `Expr::Reference3d(Box<Reference3d>)` — two sheet *names* and a
+stored reference or range with no sheet of its own. Boxed because `Expr` is
+as large as its largest variant and the parser and printer recurse: inline, it
+overflowed the measured nesting and chain bounds on a one-megabyte stack. A span
+whose two ends are the same sheet (`S:S!A1`) **is** the plain reference
+`S!A1` and parses as one — LibreOffice reads it so, and otherwise
+`COUNTIF(S:S!A1:A3,">1")` would be `#VALUE!` where the plain reference works. Names, not indices:
 the span is "whatever sheets sit between the two endpoints", resolved by
 position **at evaluation**, so inserting, moving or deleting a sheet between
 the endpoints needs no rewrite at all — which is Excel's rule for each of those
 cases on the page above. Renaming an endpoint rewrites the name
 (`rename_sheet_references`). Deleting an endpoint moves it one sheet inward;
-deleting the only sheet of the span makes the reference `#REF!`.
+a span narrowed to one sheet becomes that sheet's plain reference (and a plain
+reference to a deleted sheet reads `#REF!`, as any does). The rewrite happens
+inside `RemoveSheet`, derived identically on every replica, and its inverse
+puts each rewritten formula back.
 
 Row and column edits on one sheet do **not** shift a 3-D reference: it names
 the same cells on several sheets, and shifting it for one would move it for all.
 (Not verified against Excel; tracked as a follow-up row.)
 
-Outside the functions above a 3-D reference evaluates to `#VALUE!`.
+Evaluation spreads each 3-D argument into one reference per sheet of the span
+(`SUM(Jan:Mar!B5)` is called as `SUM(Jan!B5,Feb!B5,Mar!B5)`), so every
+listed function keeps its own skipping and error rules unchanged. Any other
+function given one, and a 3-D reference anywhere else, is `#VALUE!` (not
+verified against Excel; LibreOffice agrees for `COUNTIF`). The dependency graph
+treats one as it treats a defined name: recalculated on any change, because the
+sheets in the span change without any cell changing.
 
 **xlsx**: `Sheet1:Sheet3!A1`, quoted as one pair (`'Jan 2026:Dec 2026'!B5`).
 **ODS**: OpenFormula writes `[$Sheet1.A1:$Sheet3.A1]`, which the reader used to
-refuse; it is now mapped to and from `Reference3d`.
+refuse; it is now mapped to and from `Reference3d`. Checked by a four-sheet
+LibreOffice document (`corpus/ods/three-d.ods`) whose answers our evaluator
+reproduces with the cached values cleared.
+
+That check found a defect older than this note: the ODS reader stored each
+formula's tree as parsed (offsets from A1) and the writer printed every tree
+from A1, while since `PERF-11` the evaluator reads a stored tree as offsets
+from its own cell. So `[.B2]*[.C2]` in D2 computed E3*F3, and `=A1*2` typed
+into B5 was saved as `of:=#REF!*2`. Both directions agreed with each other,
+which is why the ODS round-trip tests passed. Fixed on this branch: stored and
+printed at the holding cell.
 
 ## 5. The wire
 

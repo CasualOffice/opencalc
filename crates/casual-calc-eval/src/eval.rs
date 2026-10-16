@@ -358,6 +358,10 @@ impl<'a> Evaluator<'a> {
             Expr::Error(token) => Value::Error(error_from_token(token)),
             Expr::Reference(reference) => self.eval_reference(sheet_index, reference),
             Expr::Range(..) => Value::Error(ErrorValue::Value),
+            // A 3-D reference means something only to the functions Excel lets
+            // take one, which expand it before they are called (see
+            // `expand_3d`). Anywhere else it is `#VALUE!`.
+            Expr::Reference3d(_) => Value::Error(ErrorValue::Value),
             // Preserved text this parser cannot read. `#NAME?` is the honest
             // answer: the reference exists in the file but means nothing here,
             // and inventing a value would be worse than saying so.
@@ -397,6 +401,18 @@ impl<'a> Evaluator<'a> {
             // which happens at the point the value is written rather than here
             // — a lambda passed to MAP must survive being a value first.
             Expr::Function { name, args } if name == "LAMBDA" => self.make_lambda(args),
+            // A 3-D reference as an argument: spread across its sheets for the
+            // functions Excel lets take one, and `#VALUE!` for every other —
+            // `COUNTIF(Jan:Mar!B5,">0")` must not quietly count an error.
+            Expr::Function { name, args }
+                if args.iter().any(|a| matches!(a, Expr::Reference3d(_))) =>
+            {
+                if !accepts_3d(name) {
+                    return Value::Error(ErrorValue::Value);
+                }
+                let expanded = self.expand_3d(args);
+                call_function(self, sheet_index, name, &expanded)
+            }
             Expr::Function { name, args } => {
                 // A defined name bound to a LAMBDA is called like a builtin,
                 // which is the whole point of naming one.
@@ -450,6 +466,45 @@ impl<'a> Evaluator<'a> {
             cols,
             cells,
         }
+    }
+
+    /// The arguments with each 3-D reference spread into one reference per
+    /// sheet of its span, in tab order: `SUM(Jan:Mar!B5)` is called as
+    /// `SUM(Jan!B5,Feb!B5,Mar!B5)`.
+    ///
+    /// Spreading rather than teaching every aggregate a new argument shape is
+    /// what keeps them identical: a 3-D `SUM` *is* the `SUM` of the per-sheet
+    /// references, with the same skipping of text and the same error rules.
+    /// The span is resolved by position here, at evaluation, so a sheet
+    /// inserted or moved between the endpoints is in it and one moved out is
+    /// not. An endpoint that names no sheet is `#REF!`.
+    fn expand_3d(&self, args: &[Expr]) -> Vec<Expr> {
+        let mut out = Vec::with_capacity(args.len());
+        for arg in args {
+            let Expr::Reference3d(r) = arg else {
+                out.push(arg.clone());
+                continue;
+            };
+            let (Some(a), Some(b)) = (
+                self.sheet_index_by_name(&r.first),
+                self.sheet_index_by_name(&r.last),
+            ) else {
+                out.push(Expr::Error("#REF!".to_owned()));
+                continue;
+            };
+            for sheet in &self.workbook.sheets[a.min(b)..=a.max(b)] {
+                let on = |corner: &StoredRef| StoredRef {
+                    sheet: Some(sheet.name.clone()),
+                    ..corner.clone()
+                };
+                // The sheet on the first corner, as the parser puts it.
+                out.push(match &r.end {
+                    Some(end) => Expr::Range(on(&r.start), end.clone()),
+                    None => Expr::Reference(on(&r.start)),
+                });
+            }
+        }
+        out
     }
 
     /// The cell a spill operator's operand names: `A1` in `A1#`, or the cell a
@@ -1034,6 +1089,23 @@ pub(crate) fn defined_name_in_scope<'w>(
         .filter(named)
         .find(|d| d.sheet.is_some() && d.sheet == here)
         .or_else(|| names.iter().filter(named).find(|d| d.sheet.is_none()))
+}
+
+/// The functions Excel accepts a 3-D reference in.
+///
+/// Microsoft's list ("Create a 3-D reference to the same cell range on
+/// multiple worksheets"): SUM, AVERAGE, AVERAGEA, COUNT, COUNTA, HSTACK, MAX,
+/// MAXA, MIN, MINA, PRODUCT, STDEV, STDEVA, STDEVP, STDEVPA, VAR, VARA, VARP,
+/// VARPA, VSTACK. The `.S`/`.P` forms of STDEV and VAR are the same functions
+/// under their 2010 names and are included with them.
+const THREE_D_FUNCTIONS: &[&str] = &[
+    "AVERAGE", "AVERAGEA", "COUNT", "COUNTA", "HSTACK", "MAX", "MAXA", "MIN", "MINA", "PRODUCT",
+    "STDEV", "STDEV.P", "STDEV.S", "STDEVA", "STDEVP", "STDEVPA", "SUM", "VAR", "VAR.P", "VAR.S",
+    "VARA", "VARP", "VARPA", "VSTACK",
+];
+
+fn accepts_3d(name: &str) -> bool {
+    THREE_D_FUNCTIONS.binary_search(&name).is_ok()
 }
 
 fn arithmetic(op: BinaryOp, lv: &Value, rv: &Value) -> Value {

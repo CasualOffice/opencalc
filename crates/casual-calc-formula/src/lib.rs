@@ -9,10 +9,13 @@
 //!
 //! Current subset: literals (number/bool/text/error), A1 cell references with
 //! `$` anchors and sheet qualification (`Sheet2!A1`, `'My Sheet'!B2`), cell
-//! ranges (`A1:B2`), defined names, function calls, unary `+`/`-`/`%`, and the
-//! binary arithmetic/comparison/concat operators with correct precedence.
-//! Deferred: R1C1, full row/column ranges (`A:A`), 3-D refs, structured (table)
-//! references, and union/intersection.
+//! ranges (`A1:B2`), whole columns and rows (`A:A`, `1:1`), 3-D references
+//! (`Sheet1:Sheet3!A1`), array constants (`{1,2;3,4}`), the spill and
+//! implicit-intersection operators (`A1#`, `@A1:A5`), structured (table)
+//! references, defined names, function calls and `LAMBDA` invocation, unary
+//! `+`/`-`/`%`, and the binary arithmetic/comparison/concat operators with
+//! correct precedence. Deferred: R1C1 and the union/intersection operators.
+//! The grammar extensions are designed in `docs/101-FORMULA-GRAMMAR-EXTENSIONS.md`.
 //!
 //! See `docs/40-FORMULA-AND-CALC-ENGINE-ARCHITECTURE.md`.
 
@@ -27,7 +30,7 @@ mod refscan;
 mod rewrite;
 pub mod stored;
 
-pub use ast::{BinaryOp, Expr, UnaryOp};
+pub use ast::{BinaryOp, Expr, Reference3d, UnaryOp};
 pub use error::FormulaError;
 pub use future::{
     FUTURE_FUNCTIONS, is_future_function, qualify_bound_names, qualify_future_functions,
@@ -37,7 +40,7 @@ pub use parse::parse;
 pub use print::print_at;
 pub use reference::{CellReference, MAX_COL, MAX_ROW, column_to_letters, parse_a1, parse_a1_axis};
 pub use refscan::{RefSpan, reference_spans};
-pub use rewrite::{rename_name_references, rename_sheet_references, restore_at};
+pub use rewrite::{rename_name_references, rename_sheet_references, restore_at, shrink_3d_span};
 
 #[cfg(test)]
 mod tests;

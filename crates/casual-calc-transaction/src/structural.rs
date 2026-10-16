@@ -1892,6 +1892,10 @@ fn rewrite_expr(expr: &Expr, ctx: &RewriteCtx) -> Expr {
         // guessing at its references would corrupt what was preserved.
         // An array constant holds constants only: nothing in it to shift.
         Expr::Raw(_) | Expr::Empty | Expr::Array(_) => expr.clone(),
+        // A 3-D reference names the same cells on several sheets, so a row or
+        // column edit on one of them does not move it: shifting it for that
+        // sheet would move it for all the others too.
+        Expr::Reference3d(_) => expr.clone(),
         Expr::Reference(reference) => rewrite_reference(reference, ctx),
         Expr::Range(a, b) => rewrite_range(a, b, ctx),
         Expr::Unary { op, operand } => Expr::Unary {

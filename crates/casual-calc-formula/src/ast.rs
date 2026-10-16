@@ -48,6 +48,50 @@ pub enum BinaryOp {
     GreaterEqual,
 }
 
+/// The payload of [`Expr::Reference3d`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Reference3d {
+    /// The sheet the span starts at, as written.
+    pub first: String,
+    /// The sheet the span ends at, as written.
+    pub last: String,
+    /// The cell, or a range's first corner. Names no sheet of its own.
+    pub start: StoredRef,
+    /// A range's far corner; absent for a single cell.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end: Option<StoredRef>,
+}
+
+impl Reference3d {
+    /// The expression this span is: a 3-D reference, or — when both ends name
+    /// the same sheet — the ordinary reference it amounts to.
+    ///
+    /// `Sheet1:Sheet1!A1` *is* `Sheet1!A1`, and treating it as anything else
+    /// would make it `#VALUE!` in every function outside Excel's 3-D list,
+    /// where the plain reference works. LibreOffice reads it that way (the
+    /// oracle caught `COUNTIF(S:S!C1:C3,">1")` answering 2 there and `#VALUE!`
+    /// here), and a span that a sheet deletion narrows to one sheet comes out
+    /// the same.
+    #[must_use]
+    pub fn into_expr(self) -> Expr {
+        if !self.first.eq_ignore_ascii_case(&self.last) {
+            return Expr::Reference3d(Box::new(self));
+        }
+        let on = |mut corner: StoredRef| {
+            corner.sheet = Some(self.first.clone());
+            corner
+        };
+        // The sheet on the first corner only, which is the shape the parser
+        // gives `Sheet1!A1:B2`: a far corner carrying it too prints as
+        // `Sheet1!A1:Sheet1!B2`, which LibreOffice reads as something else.
+        match self.end.clone() {
+            Some(end) => Expr::Range(on(self.start.clone()), end),
+            None => Expr::Reference(on(self.start.clone())),
+        }
+    }
+}
+
 /// A parsed formula expression.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -77,6 +121,22 @@ pub enum Expr {
     Reference(StoredRef),
     /// A range between two stored references (`A1:B2`).
     Range(StoredRef, StoredRef),
+    /// A 3-D reference: the same cell or range on every sheet from `first` to
+    /// `last` — `Sheet1:Sheet3!A1`, `'Jan 2026:Dec 2026'!B5:B9`
+    /// (`XL-FEAT-017`).
+    ///
+    /// The endpoints are sheet **names**, not positions, and the span is
+    /// resolved by position when the formula is evaluated. That is Excel's
+    /// rule: the reference covers whatever sheets sit between the two tabs, so
+    /// a sheet inserted, moved or deleted between them changes the answer
+    /// without the formula changing. Renaming an endpoint rewrites the name;
+    /// deleting one moves it a sheet inward (`shrink_3d_span`).
+    ///
+    /// Boxed: every `Expr` is as large as its largest variant, and the parser
+    /// is recursive, so an inline payload twice the size of a range made each
+    /// level of `SUM(SUM(…))` cost more stack and overflowed the measured
+    /// nesting bound (`MAX_DEPTH`) on a one-megabyte thread.
+    Reference3d(Box<Reference3d>),
     /// A defined name.
     Name(String),
     /// Calling the result of an expression: `LAMBDA(x, x+1)(5)`.
@@ -196,6 +256,12 @@ impl Expr {
             Expr::Range(a, b) => {
                 a.hash(state);
                 b.hash(state);
+            }
+            Expr::Reference3d(r) => {
+                r.first.hash(state);
+                r.last.hash(state);
+                r.start.hash(state);
+                r.end.hash(state);
             }
             Expr::Call { callee, args } => {
                 callee.hash_into(state);

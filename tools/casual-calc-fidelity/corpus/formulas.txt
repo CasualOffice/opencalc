@@ -654,3 +654,14 @@ SUM(C1#)
 @C1:C10
 @{5,6}  @differs: LibreOffice 26.2 does not implement _xlfn.SINGLE (#NAME?); Microsoft: "If the value is an array, pick the top-left value" (5)
 @C3  @differs: LibreOffice 26.2 does not implement _xlfn.SINGLE (#NAME?); Microsoft: "If the value is a single item, return the item" (3)
+
+# XL-FEAT-017: 3-D references. The corpus has one sheet, `S`, so these are
+# one-sheet spans, which read as the plain reference `S!C1:C3` (LibreOffice
+# reads them so, and it is what keeps COUNTIF working on one). Real spans are
+# in corpus/ods/three-d.ods, four sheets, and its unit test computes them.
+SUM(S:S!C1:C3)
+COUNT(S:S!C1:D2)
+MAX(S:S!D1:D10)
+AVERAGE(S:S!C1:C4)
+S:S!C1
+COUNTIF(S:S!C1:C3,">1")

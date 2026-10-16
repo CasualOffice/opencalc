@@ -12,7 +12,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use casual_calc_formula::{Expr, rename_sheet_references};
+use casual_calc_formula::{Expr, rename_sheet_references, shrink_3d_span};
 use casual_calc_model::{
     AutoFilter, AxisSizing, Cell, CellComment, CellRange, CellRef, CellValue, ChartView,
     ConditionalFormat, DataValidation, DefinedName, Hyperlink, MacroLibrary, PivotTable,
@@ -1142,11 +1142,16 @@ pub fn apply(workbook: &mut Workbook, op: Operation) -> Result<Operation, TxnErr
             // re-inserts the sheet first, so every later index is the one it was.
             let gone = workbook.sheets[index].name.clone();
             let charting = structural::sheets_charting(workbook, &gone);
-            let restores: Vec<Operation> = charting
+            let mut restores: Vec<Operation> = charting
                 .into_iter()
                 .filter(|at| *at != index)
                 .map(|at| structural::snapshot_metadata(workbook, at))
                 .collect();
+            // A 3-D reference ending on this sheet moves its end one sheet
+            // inward, as Excel does (`XL-FEAT-017`). Rewritten before the
+            // removal, at pre-removal indices, for the same reason the chart
+            // snapshots are: that is where the inverse puts them back.
+            restores.extend(shrink_3d_spans_in_formulas(workbook, index));
             let removed = workbook.sheets.remove(index);
             structural::break_series_naming(workbook, &gone);
             let reinsert = Operation::InsertSheet {
@@ -1272,6 +1277,55 @@ fn set_axis_override(axis: &mut AxisSizing, index: u32, size: Option<i64>) -> Op
 /// settled the name at `$C$4` in one order and `$C$3` in the other, because in
 /// the second order the insert no longer recognised the sheet the stale
 /// qualifier still named.
+/// Follow the removal of sheet `index` in every 3-D reference that ends on it,
+/// returning the operations that put each rewritten formula back.
+///
+/// Called while the sheet is still there, so `order` — the tab order the span
+/// is measured in — still holds it, and every index in the returned
+/// operations is a pre-removal one. The removed sheet's own cells are left
+/// alone: they leave with it and come back with it.
+fn shrink_3d_spans_in_formulas(workbook: &mut Workbook, index: usize) -> Vec<Operation> {
+    let gone = workbook.sheets[index].name.clone();
+    let order: Vec<String> = workbook.sheets.iter().map(|s| s.name.clone()).collect();
+    let order: Vec<&str> = order.iter().map(String::as_str).collect();
+    let mut jobs: Vec<(usize, CellRef, Cell, Expr)> = Vec::new();
+    for (idx, sheet) in workbook.sheets.iter().enumerate() {
+        if idx == index {
+            continue;
+        }
+        for (addr, cell) in sheet.cells.iter() {
+            if let Some(handle) = cell.formula
+                && let Some(expr) = workbook.formula(handle)
+            {
+                let mut rewritten = expr.clone();
+                if shrink_3d_span(&mut rewritten, &gone, &order) {
+                    jobs.push((idx, addr, cell.clone(), rewritten));
+                }
+            }
+        }
+    }
+    let mut restores = Vec::with_capacity(jobs.len() + 1);
+    for (idx, addr, previous, expr) in jobs {
+        let mut updated = previous.clone();
+        updated.formula = Some(workbook.store_formula(expr));
+        workbook.sheets[idx].cells.set(addr, updated);
+        restores.push(Operation::SetCell {
+            sheet: idx,
+            at: addr,
+            cell: Some(previous),
+        });
+    }
+    let names_before = workbook.defined_names.clone();
+    let mut names_changed = false;
+    for name in &mut workbook.defined_names {
+        names_changed |= shrink_3d_span(&mut name.formula, &gone, &order);
+    }
+    if names_changed {
+        restores.push(Operation::SetDefinedNames(names_before));
+    }
+    restores
+}
+
 fn rename_sheet_in_formulas(workbook: &mut Workbook, old: &str, new: &str) {
     let mut jobs: Vec<(usize, CellRef, Expr)> = Vec::new();
     for (idx, sheet) in workbook.sheets.iter().enumerate() {

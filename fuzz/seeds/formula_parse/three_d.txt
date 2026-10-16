@@ -1,0 +1,1 @@
+SUM(Jan:Dec!B5)+AVERAGE('Jan 2026:Dec 2026'!$B$5:B9)-COUNT('Bob''s:Zed'!A:A,Sheet1:Sheet3!2:2)

@@ -204,6 +204,8 @@ fn may_be_array(expr: &Expr) -> bool {
         | Expr::Reference(_)
         | Expr::Empty
         | Expr::Raw(_)
+        // `#VALUE!` outside the functions that take one, lifted or not.
+        | Expr::Reference3d(_)
         // A wide structured reference is `#VALUE!` in an array context too;
         // left to the function, as it always was.
         | Expr::StructuredRef { .. } => false,

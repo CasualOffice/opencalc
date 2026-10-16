@@ -160,6 +160,7 @@ impl fmt::Display for At<'_> {
                 f.write_str(":")?;
                 write_ref(f, b, origin)
             }
+            Expr::Reference3d(r) => write_3d(f, r, origin),
             // Verbatim: the point of keeping it is that it goes back out
             // exactly as it came in.
             Expr::Raw(text) => write!(f, "{text}"),
@@ -209,21 +210,7 @@ impl fmt::Display for At<'_> {
                 write_child(f, right, origin, bp(right).0 < rbp)
             }
             // Separators as Excel writes them, in the file and the formula bar.
-            Expr::Array(rows) => {
-                f.write_str("{")?;
-                for (r, row) in rows.iter().enumerate() {
-                    if r > 0 {
-                        f.write_str(";")?;
-                    }
-                    for (c, item) in row.iter().enumerate() {
-                        if c > 0 {
-                            f.write_str(",")?;
-                        }
-                        write!(f, "{}", At(item, origin))?;
-                    }
-                }
-                f.write_str("}")
-            }
+            Expr::Array(rows) => write_array(f, rows, origin),
             // `A1#` and `@x` are function calls in the tree, because that is how
             // the file stores them, and operators on screen, because that is how
             // Excel shows them. Only the shapes the parser builds print as
@@ -252,6 +239,59 @@ impl fmt::Display for At<'_> {
             }
         }
     }
+}
+
+// The two writers below are out of line on purpose. `At::fmt` is the frame
+// that recurses — a 512-term `1+1+…` chain is 512 of them deep — so every
+// local an arm of it declares is paid once per level. Inlined, these two arms
+// grew that frame enough to overflow the one-megabyte stack the chain bound is
+// measured on (`MAX_CHAIN`); a call costs the frame nothing when it is not
+// taken.
+
+/// An array constant, with Excel's separators.
+#[inline(never)]
+fn write_array(f: &mut fmt::Formatter<'_>, rows: &[Vec<Expr>], origin: Origin) -> fmt::Result {
+    f.write_str("{")?;
+    for (r, row) in rows.iter().enumerate() {
+        if r > 0 {
+            f.write_str(";")?;
+        }
+        for (c, item) in row.iter().enumerate() {
+            if c > 0 {
+                f.write_str(",")?;
+            }
+            write!(f, "{}", At(item, origin))?;
+        }
+    }
+    f.write_str("}")
+}
+
+/// A 3-D reference: one quoted pair when either name needs quoting, as Excel
+/// writes it — `'Jan 2026:Dec 2026'!B5`, never `'Jan 2026':'Dec 2026'!B5`.
+#[inline(never)]
+fn write_3d(
+    f: &mut fmt::Formatter<'_>,
+    r: &crate::ast::Reference3d,
+    origin: Origin,
+) -> fmt::Result {
+    let quote = crate::reference::sheet_name_needs_quoting(&r.first)
+        || crate::reference::sheet_name_needs_quoting(&r.last);
+    if quote {
+        write!(
+            f,
+            "'{}:{}'!",
+            r.first.replace('\'', "''"),
+            r.last.replace('\'', "''")
+        )?;
+    } else {
+        write!(f, "{}:{}!", r.first, r.last)?;
+    }
+    write_ref(f, &r.start, origin)?;
+    if let Some(end) = &r.end {
+        f.write_str(":")?;
+        write_ref(f, end, origin)?;
+    }
+    Ok(())
 }
 
 /// Whether `ANCHORARRAY(args)` is one the parser builds from `x#` — one single
