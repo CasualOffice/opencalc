@@ -98,6 +98,7 @@ import {
   wasm,
   wrap,
   holdBlock,
+  caretAnchor,
 } from "./editor.core.js";
 
 export function updateStats() {
@@ -261,6 +262,10 @@ export function refreshFormulaBar() {
   if (active === fInput || active === byId("tb-font") ||
       active === byId("tb-size")) return;
   fInput.value = wasm.session_cell_input(state.sheet, state.sel.row, state.sel.col);
+  // Not being edited, the bar shows a value from its first line — collapsed,
+  // that is the only line it shows, as in Excel. A textarea keeps
+  // the scroll an earlier edit left it with, which would show a later line.
+  fInput.scrollTop = 0;
   // Name what each will do, rather than leaving "Undo" to mean anything. The
   // label is the engine's, so it always matches the operation on the stack.
   for (const [id, can, label, verb, key] of [
@@ -1810,11 +1815,15 @@ export function renderAutocomplete() {
   // sits over the canvas, the formula bar above it, so this is measured in
   // viewport coordinates (the menu is position: fixed) rather than as an offset
   // inside the grid wrapper.
-  const r = (editSurface ?? inline).getBoundingClientRect();
+  //
+  // In the formula bar it opens under the caret's line, at the start of the
+  // word being completed: expanded, the bar is several lines
+  // tall and its bottom-left corner can be far from what is being typed.
+  const a = caretAnchor(editSurface, acState.start);
   acEl.hidden = false;
   const width = acEl.offsetWidth;
-  acEl.style.left = Math.max(4, Math.min(r.left, window.innerWidth - 4 - width)) + "px";
-  acEl.style.top = r.bottom + 2 + "px";
+  acEl.style.left = Math.max(4, Math.min(a.left, window.innerWidth - 4 - width)) + "px";
+  acEl.style.top = a.top + 2 + "px";
 }
 
 export function callAtCaret() {
@@ -1841,7 +1850,8 @@ export function callAtCaret() {
     if (c === "(") {
       // The word immediately before the paren, if any, names the call.
       const name = /([A-Za-z][A-Za-z0-9.]*)$/.exec(upto.slice(0, i));
-      stack.push({ name: name ? name[1].toUpperCase() : null, arg: 0 });
+      // `at` is where the name starts, which is where its hint is anchored.
+      stack.push({ name: name ? name[1].toUpperCase() : null, arg: 0, at: name ? i - name[1].length : i });
     } else if (c === ")") {
       stack.pop();
     } else if (c === "," && stack.length) {
