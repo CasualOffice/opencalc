@@ -1770,6 +1770,80 @@ impl WorkbookSession {
         self.history.clear();
     }
 
+    /// Register the workbook's custom functions (`MACRO-04`), as the host's
+    /// sandboxed registration run reported them, replacing any registered
+    /// before. Every answer is dropped with the functions that gave it, and
+    /// every formula is recalculated: a cell that was `#NAME?` for want of the
+    /// function now asks for it.
+    ///
+    /// Not an edit — nothing is recorded, sent, or made undoable. The registry
+    /// is run-time state, not document content (see
+    /// [`CustomFunctionRuntime`](casual_calc_model::CustomFunctionRuntime)).
+    ///
+    /// # Errors
+    ///
+    /// [`SdkError::Edit`] with the reason when a spec is refused; nothing
+    /// changes then.
+    pub fn set_custom_functions(
+        &mut self,
+        specs: Vec<casual_calc_model::CustomFunctionSpec>,
+    ) -> Result<(), SdkError> {
+        self.workbook
+            .custom
+            .register(specs)
+            .map_err(|e| SdkError::Edit(TxnError::Invariant { reason: e.0 }))?;
+        // The registry decides which names are functions, and whether a call
+        // is volatile — both read by the precedent graph.
+        self.recalc.invalidate();
+        self.recalculate_if_automatic();
+        Ok(())
+    }
+
+    /// Take the custom-function calls recalculation found no answer for, each
+    /// with the ticket to answer it by. Each call is handed out once.
+    pub fn take_custom_calls(&mut self) -> Vec<casual_calc_model::PendingCustomCall> {
+        self.workbook.custom.take_pending()
+    }
+
+    /// Hand back answers to calls from [`take_custom_calls`](Self::take_custom_calls)
+    /// and recalculate the cells that asked, and everything that reads them.
+    /// Returns how many tickets were recognised; an unknown or stale ticket
+    /// (one issued before the functions were registered again) is ignored.
+    ///
+    /// Not an edit, for the reason [`set_custom_functions`](Self::set_custom_functions)
+    /// is not: each client computes its own answers.
+    pub fn set_custom_results(
+        &mut self,
+        results: Vec<(u64, casual_calc_model::CustomValue)>,
+    ) -> usize {
+        let mut cells = Vec::new();
+        for (ticket, value) in results {
+            if let Some((sheet, row, col)) = self.workbook.custom.resolve(ticket, value) {
+                cells.push((sheet, CellRef::new(row, col)));
+            }
+        }
+        let recognised = cells.len();
+        // Cells whose call found the queue full are asked again now there is
+        // room: the answers just taken out of it made some.
+        cells.extend(
+            self.workbook
+                .custom
+                .take_deferred()
+                .into_iter()
+                .map(|(sheet, row, col)| (sheet, CellRef::new(row, col))),
+        );
+        cells.retain(|(sheet, _)| *sheet < self.workbook.sheets.len());
+        if cells.is_empty() {
+            return recognised;
+        }
+        if self.calculation == CalculationMode::Manual {
+            self.stale = true;
+        } else {
+            self.recalc.recalculate(&mut self.workbook, &cells);
+        }
+        recognised
+    }
+
     /// Recompute all formula cells — Excel's Calculate Now, and the only thing
     /// that brings a manual-mode workbook up to date.
     pub fn recalculate(&mut self) {
@@ -2882,6 +2956,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::views::PersonalViews;
 
+#[cfg(test)]
+mod custom_function_tests;
 #[cfg(test)]
 mod tests;
 

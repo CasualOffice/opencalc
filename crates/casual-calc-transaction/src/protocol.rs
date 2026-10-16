@@ -73,7 +73,13 @@ use crate::wire::WireOperation;
 /// library is `deny_unknown_fields` and a whole-list replace, so its key set is
 /// pinned by `a_macro_library_on_the_wire_is_a_protocol_change` exactly as the
 /// defined name's is.
-pub const PROTOCOL_VERSION: u32 = 10;
+///
+/// **11 is `#BUSY!`** (`MACRO-04`). `ErrorValue` gained `Busy`, the value of a
+/// custom function whose answer has not arrived. A cell's value crosses the
+/// wire in `SetValue` (a paste of values copies what a cell shows), so a
+/// protocol-10 peer would refuse the whole batch on the first one. Pinned by
+/// `a_new_error_value_is_a_protocol_change`.
+pub const PROTOCOL_VERSION: u32 = 11;
 
 /// What somebody is typing, before they have decided to keep it.
 ///

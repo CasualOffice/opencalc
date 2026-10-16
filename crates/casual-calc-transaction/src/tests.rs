@@ -2768,6 +2768,60 @@ fn a_macro_library_on_the_wire_is_a_protocol_change() {
     );
 }
 
+/// **An error value is on the wire, so a new one is a protocol change**
+/// (`MACRO-04`). A cell's value crosses in `SetValue` — a paste of values
+/// copies whatever a cell shows, `#BUSY!` included — and `ErrorValue` is a
+/// plain enum: a peer that has never heard of a variant refuses the whole
+/// batch. The tag set is pinned against the version that introduced it.
+#[test]
+fn a_new_error_value_is_a_protocol_change() {
+    use casual_calc_model::{CellRef, CellValue, ErrorValue};
+    let all = [
+        ErrorValue::Ref,
+        ErrorValue::Value,
+        ErrorValue::Div0,
+        ErrorValue::Na,
+        ErrorValue::Name,
+        ErrorValue::Null,
+        ErrorValue::Num,
+        ErrorValue::Spill,
+        ErrorValue::Calc,
+        ErrorValue::Busy,
+    ];
+    let mut tags: Vec<String> = all
+        .iter()
+        .map(|e| {
+            let op = Operation::SetValue {
+                sheet: 0,
+                at: CellRef::new(0, 0),
+                value: CellValue::Error(*e),
+            };
+            serde_json::to_value(&op).expect("serialises")["setValue"]["value"]["error"]
+                .as_str()
+                .expect("an error crosses as its tag")
+                .to_owned()
+        })
+        .collect();
+    tags.sort();
+    assert_eq!(
+        tags,
+        [
+            "Busy", "Calc", "Div0", "Na", "Name", "Null", "Num", "Ref", "Spill", "Value"
+        ],
+        "the error values that cross the wire have changed: move PROTOCOL_VERSION \
+         (currently {}) and update this list.",
+        crate::protocol::PROTOCOL_VERSION,
+    );
+    #[allow(clippy::assertions_on_constants)]
+    let moved = crate::protocol::PROTOCOL_VERSION > 10;
+    assert!(
+        moved,
+        "ErrorValue gained Busy (#BUSY!), a tag a protocol-10 peer cannot read. Move \
+         PROTOCOL_VERSION (currently {}) so the mismatch is refused at the handshake.",
+        crate::protocol::PROTOCOL_VERSION,
+    );
+}
+
 /// `SetMacros` applies, inverts to the previous library (so undo travels as an
 /// ordinary edit), and crosses the wire whole.
 #[test]

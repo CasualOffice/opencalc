@@ -51,6 +51,10 @@ pub struct Evaluator<'a> {
     /// a counter that resets per pass is what makes a recalculation
     /// reproducible from its seed.
     rand_counter: u64,
+    /// Custom-function calls (`MACRO-04`) this evaluation found no answer
+    /// for. The evaluator only reads the workbook, so it collects them here
+    /// and the recalculation hands them to the workbook's runtime afterwards.
+    custom_requests: Vec<casual_calc_model::CustomCallKey>,
 }
 
 impl<'a> Evaluator<'a> {
@@ -66,6 +70,7 @@ impl<'a> Evaluator<'a> {
             scope: Vec::new(),
             depth: 0,
             rand_counter: 0,
+            custom_requests: Vec::new(),
         }
     }
 
@@ -82,6 +87,7 @@ impl<'a> Evaluator<'a> {
             scope: Vec::new(),
             depth: 0,
             rand_counter: 0,
+            custom_requests: Vec::new(),
         }
     }
 
@@ -386,15 +392,32 @@ impl<'a> Evaluator<'a> {
             Expr::Function { name, args } => {
                 // A defined name bound to a LAMBDA is called like a builtin,
                 // which is the whole point of naming one.
-                if !crate::functions::is_builtin(name)
-                    && let Some(body) = self.lambda_named(sheet_index, name)
-                {
-                    return self.apply_lambda(sheet_index, &body, args);
+                if !crate::functions::is_builtin(name) {
+                    if let Some(body) = self.lambda_named(sheet_index, name) {
+                        return self.apply_lambda(sheet_index, &body, args);
+                    }
+                    // A registered custom function (`MACRO-04`). After the
+                    // LAMBDA names, before the `#NAME?` fallback: a built-in
+                    // always wins, so a source cannot redefine `SUM`.
+                    if let Some(spec) = self.workbook.custom.spec(name) {
+                        return crate::custom::call(self, sheet_index, spec, args);
+                    }
                 }
                 call_function(self, sheet_index, name, args)
             }
             Expr::Call { callee, args } => self.eval_call(sheet_index, callee, args),
         }
+    }
+
+    /// Take the custom-function calls this evaluation wanted and found no
+    /// answer for, in the order it met them.
+    pub fn take_custom_requests(&mut self) -> Vec<casual_calc_model::CustomCallKey> {
+        std::mem::take(&mut self.custom_requests)
+    }
+
+    /// Note a call with no answer yet.
+    pub(crate) fn want_custom(&mut self, key: casual_calc_model::CustomCallKey) {
+        self.custom_requests.push(key);
     }
 
     /// How many names are bound in the current scope — the mark to return to

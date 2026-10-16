@@ -1218,6 +1218,12 @@ pub fn apply(workbook: &mut Workbook, op: Operation) -> Result<Operation, TxnErr
                 reason: e.to_string(),
             })?;
             let previous = std::mem::replace(&mut workbook.macros, library);
+            // The custom-function sources may have changed — by this client, a
+            // peer or an undo alike — and the host has to register them again
+            // (`MACRO-04`). Run-time bookkeeping only; not document content.
+            if previous.custom_functions != workbook.macros.custom_functions {
+                workbook.custom.note_library_changed();
+            }
             Ok(Operation::SetMacros(previous))
         }
         Operation::Batch(ops) => {
