@@ -39,6 +39,14 @@ nothing. They are signed with the same secret the target hands the verifier,
 which is the point: the question is not whether a fuzzer can be kept out, it is
 whether anything it builds is **accepted**.
 
+`formula_parse/` is one formula per file for each construct the grammar has
+grown beyond the arithmetic core ([101](../../docs/101-FORMULA-GRAMMAR-EXTENSIONS.md)):
+whole-row references, array constants, the spill and implicit-intersection
+operators, and 3-D references. Each one adds tokens (`{`, `;`, `#`, `@`, a
+digit run read as a row) that a fuzzer mutating `1+1` would take a long time to
+stumble on, and each sits beside an existing token it could be confused with —
+`#` beside the error literals, `;` beside `,`, a row number beside a number.
+
 ## Several producers, and why it matters
 
 A corpus written by one program teaches a fuzzer that program's habits. Every

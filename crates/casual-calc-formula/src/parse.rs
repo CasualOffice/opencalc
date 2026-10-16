@@ -299,13 +299,21 @@ impl Parser {
     /// text and cannot know which cell will hold it.
     /// [`Workbook::store_formula_at`] re-stores it against the cell that does.
     fn maybe_range(&mut self, first: CellReference) -> Result<Expr, FormulaError> {
-        let first = StoredRef::absolute(&first);
         if self.peek() == Some(&Token::Colon) {
             self.advance();
-            let second = StoredRef::absolute(&self.parse_ref_operand()?);
+            let second = self.parse_ref_operand()?;
+            // Both ends must be the same shape: two cells, two columns or two
+            // rows. Excel refuses `A1:3` and `A:B2`, and a mixed range has no
+            // sensible meaning to evaluate (XL-FEAT-016).
+            if (first.row_implicit, first.col_implicit)
+                != (second.row_implicit, second.col_implicit)
+            {
+                return Err(FormulaError::InvalidReference(format!("{first}:{second}")));
+            }
+            let (first, second) = (StoredRef::absolute(&first), StoredRef::absolute(&second));
             Ok(Expr::Range(first, second))
         } else {
-            Ok(Expr::Reference(first))
+            Ok(Expr::Reference(StoredRef::absolute(&first)))
         }
     }
 

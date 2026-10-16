@@ -199,6 +199,16 @@ pub fn tokenize(input: &str) -> Result<Vec<Token>, FormulaError> {
                 tokens.push(Token::Error(error));
                 i = next;
             }
+            // A row number beside a colon is one side of a whole-row reference
+            // (`1:1`, `5:10`, `Sheet1!3:3`), not a number (XL-FEAT-016). Lexed
+            // as a word, as `$1` already is, so the parser treats the two
+            // spellings alike. Only a pure digit run qualifies: `1.5:2` is still
+            // a number and then a syntax error, as in Excel.
+            c if c.is_ascii_digit() && row_beside_colon(&chars, i).is_some() => {
+                let end = row_beside_colon(&chars, i).unwrap_or(i);
+                tokens.push(Token::Word(chars[i..end].iter().collect()));
+                i = end;
+            }
             c if c.is_ascii_digit() || (c == '.' && next_is_digit(&chars, i)) => {
                 let (number, next) = lex_number(&chars, i)?;
                 tokens.push(Token::Number(number));
@@ -216,6 +226,19 @@ pub fn tokenize(input: &str) -> Result<Vec<Token>, FormulaError> {
     }
 
     Ok(tokens)
+}
+
+/// The end of a digit run starting at `start`, when the run is a whole word of
+/// digits touching a colon on either side — a row number in `1:1`.
+fn row_beside_colon(chars: &[char], start: usize) -> Option<usize> {
+    let mut end = start;
+    while end < chars.len() && is_word_char(chars[end]) {
+        end += 1;
+    }
+    let digits = chars[start..end].iter().all(char::is_ascii_digit);
+    let after = chars.get(end) == Some(&':');
+    let before = start > 0 && chars[start - 1] == ':';
+    (digits && (after || before)).then_some(end)
 }
 
 fn next_is_digit(chars: &[char], i: usize) -> bool {

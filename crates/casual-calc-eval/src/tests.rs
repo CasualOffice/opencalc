@@ -2474,6 +2474,27 @@ fn whole_column_and_whole_row_references_evaluate() {
     );
 }
 
+/// `=SUM(1:1)` — the unanchored spelling, which was a parse error while `$1:$1`
+/// worked (XL-FEAT-016) — plus a multi-row span and a sheet-qualified one.
+#[test]
+fn unanchored_whole_row_references_evaluate() {
+    let mut b = Builder::new();
+    b.number((0, 0), 1.0) // A1
+        .number((0, 1), 10.0) // B1
+        .number((1, 2), 100.0) // C2
+        .number((2, 5), 1000.0) // F3
+        .formula((5, 0), "SUM(1:1)") // A6
+        .formula((6, 0), "SUM(1:3)") // A7
+        .formula((7, 0), "SUM(Sheet1!2:2)") // A8
+        .formula((8, 0), "COUNT(2:3)"); // A9
+    let mut wb = b.build();
+    recalculate(&mut wb);
+    assert_eq!(value_at(&wb, 5, 0), CellValue::Number(11.0));
+    assert_eq!(value_at(&wb, 6, 0), CellValue::Number(1111.0));
+    assert_eq!(value_at(&wb, 7, 0), CellValue::Number(100.0));
+    assert_eq!(value_at(&wb, 8, 0), CellValue::Number(2.0));
+}
+
 /// The bounds an open range walks come from the data, not from the sheet's
 /// limits. Without the clamp this test would iterate 1,048,576 rows per
 /// formula and take minutes rather than milliseconds.

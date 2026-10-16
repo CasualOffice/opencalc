@@ -545,3 +545,60 @@ fn power_is_left_associative_as_in_excel() {
     assert_eq!(crate::parse("(2^3)^2").unwrap().to_string(), "2^3^2");
     assert_eq!(crate::parse("2^(3^2)").unwrap().to_string(), "2^(3^2)");
 }
+
+/// Whole-row references read and print exactly as whole columns do
+/// (XL-FEAT-016). Excel: "all cells in row 5" is `5:5`, rows 5 through 10 is
+/// `5:10`. A bare digit run lexes as a number, which is why `1:1` failed while
+/// `$1:$1` — a word, because of the `$` — already worked.
+#[test]
+fn whole_row_references_parse_and_print_like_whole_columns() {
+    for text in [
+        "1:1",
+        "5:10",
+        "$1:$3",
+        "1:$3",
+        "Sheet1!1:1",
+        "Sheet1!$1:$1",
+        "'My Sheet'!2:5",
+        "SUM(1:1)",
+        "SUM(3:3,A:A)",
+        "1048576:1048576",
+    ] {
+        let expr = parse(text).unwrap_or_else(|e| panic!("{text}: {e}"));
+        let Expr::Range(a, b) = first_arg(&expr) else {
+            panic!("{text}: not a range: {expr:?}");
+        };
+        assert!(
+            a.col_implicit && b.col_implicit,
+            "{text}: rows name no column"
+        );
+        assert_eq!(expr.to_string(), text, "round trip");
+    }
+    let Expr::Range(a, b) = parse("5:10").unwrap() else {
+        unreachable!()
+    };
+    assert_eq!((a.row, b.row), (4, 9));
+    assert_eq!((a.col, b.col), (0, i64::from(crate::MAX_COL)));
+    // Row 0 and past the last row are not rows.
+    assert!(parse("0:1").is_err());
+    assert!(parse("1048577:1048577").is_err());
+    // A number is still a number.
+    assert_eq!(parse("1").unwrap(), num(1.0));
+    assert!(matches!(parse("1.5").unwrap(), Expr::Number(_)));
+    assert!(parse("1.5:2").is_err());
+}
+
+/// Excel does not mix the shapes: `A1:3` and `1:A1` are not ranges.
+#[test]
+fn a_range_does_not_mix_a_cell_with_a_whole_row_or_column() {
+    for text in ["A1:3", "3:A1", "A:3", "3:A", "A1:B", "B:A1"] {
+        assert!(parse(text).is_err(), "{text} parsed: {:?}", parse(text));
+    }
+}
+
+fn first_arg(expr: &Expr) -> &Expr {
+    match expr {
+        Expr::Function { args, .. } => first_arg(&args[0]),
+        other => other,
+    }
+}

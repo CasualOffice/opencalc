@@ -616,3 +616,12 @@ LEN(TEXTJOIN(",",TRUE,REPT("a",20000),REPT("b",20000)))  @differs: Microsoft: pa
 ROWS(A$1:A5)
 ROWS(A1:A$5)
 COLUMNS($A1:C1)
+
+# XL-FEAT-016: whole-row references, the twin of `A:A`. (Column A is where the
+# corpus formulas live, so these pick the fixture columns out with INDEX.)
+INDEX(5:5,1,4)
+INDEX(2:3,2,3)
+INDEX($4:$4,1,5)
+ROWS(4:6)
+COLUMNS(1:1)
+ROWS($2:$2)

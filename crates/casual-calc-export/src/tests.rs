@@ -5689,3 +5689,90 @@ fn an_unreadable_macros_part_is_retained_verbatim() {
     let back = import_package(written).unwrap().workbook;
     assert_eq!(back.macros, edited.macros);
 }
+
+// ---------------------------------------------------------------------------
+// The formula grammar rows (XL-FEAT-014..017): what Excel writes into `<f>`
+// must import as a real expression — not `Expr::Raw` — and must be written
+// back in the spelling Excel reads.
+// ---------------------------------------------------------------------------
+
+/// A three-sheet package whose `Sheet1!A1` holds `<f>{formula}</f>`. The other
+/// sheets are there for sheet-qualified and 3-D references.
+fn formula_package(formula: &str) -> Vec<u8> {
+    let escaped = formula
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;");
+    let sheet1 = format!(
+        r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1"><f>{escaped}</f><v>0</v></c></row></sheetData></worksheet>"#
+    );
+    let empty = br#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData/></worksheet>"#;
+    let workbook = br#"<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Sheet1" sheetId="1" r:id="rId1"/><sheet name="Sheet2" sheetId="2" r:id="rId2"/><sheet name="Sheet 3" sheetId="3" r:id="rId3"/></sheets></workbook>"#;
+    let rels = br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet2.xml"/><Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet3.xml"/></Relationships>"#;
+    zip_parts(&[
+        ("[Content_Types].xml", CONTENT_TYPES),
+        ("_rels/.rels", ROOT_RELS),
+        ("xl/workbook.xml", workbook),
+        ("xl/_rels/workbook.xml.rels", rels),
+        ("xl/worksheets/sheet1.xml", sheet1.as_bytes()),
+        ("xl/worksheets/sheet2.xml", empty),
+        ("xl/worksheets/sheet3.xml", empty),
+    ])
+}
+
+/// The `<f>` text of `Sheet1!A1` in a written package, unescaped.
+fn written_formula(package: &[u8]) -> String {
+    let xml = xml_of(package, "xl/worksheets/sheet1.xml");
+    let start = xml.find("<f>").expect("an <f> was written") + 3;
+    let end = start + xml[start..].find("</f>").unwrap();
+    xml[start..end]
+        .replace("&quot;", "\"")
+        .replace("&apos;", "'")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&amp;", "&")
+}
+
+/// Import Excel's `<f>` text, check it became an expression that prints as the
+/// formula bar shows it, write it, and check the file text is Excel's again.
+fn assert_formula_round_trips(file_text: &str, shown: &str) {
+    let workbook = import_package(formula_package(file_text)).unwrap().workbook;
+    let cell = workbook.sheets[0]
+        .cells
+        .get(casual_calc_model::CellRef::new(0, 0))
+        .unwrap();
+    let expr = workbook.formula(cell.formula.unwrap()).unwrap();
+    assert!(
+        !matches!(expr, casual_calc_formula::Expr::Raw(_)),
+        "{file_text}: kept only as raw text"
+    );
+    assert_eq!(
+        casual_calc_formula::print_at(expr, casual_calc_formula::stored::Origin::at(0, 0)),
+        shown,
+        "{file_text}: what the formula bar shows"
+    );
+    let written = write_workbook(&workbook).unwrap();
+    assert_eq!(written_formula(&written), file_text, "written back");
+    let again = import_package(written).unwrap().workbook;
+    let cell = again.sheets[0]
+        .cells
+        .get(casual_calc_model::CellRef::new(0, 0))
+        .unwrap();
+    assert_eq!(
+        again.formula(cell.formula.unwrap()),
+        Some(expr),
+        "fixed point"
+    );
+}
+
+#[test]
+fn whole_row_references_round_trip_through_xlsx() {
+    for text in [
+        "SUM(1:1)",
+        "SUM($2:$4)",
+        "SUM(Sheet2!3:3)",
+        "SUM('Sheet 3'!$1:5)",
+    ] {
+        assert_formula_round_trips(text, text);
+    }
+}

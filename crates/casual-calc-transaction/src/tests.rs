@@ -4554,6 +4554,51 @@ fn a_whole_column_reference_follows_a_column_move_and_ignores_a_row_move() {
     assert_eq!(formula_text(&wb, 0, 4, 7).as_deref(), Some("SUM(D:D)"));
 }
 
+/// The row twin of the test above (XL-FEAT-016): `3:3` follows rows inserted
+/// above it, ignores columns, and is `#REF!` once its row is deleted — what
+/// Excel does with `=SUM(3:3)`.
+#[test]
+fn a_whole_row_reference_shifts_with_rows_and_ignores_columns() {
+    let mut wb = lettered_columns();
+    set_formula(&mut wb, 0, 9, 7, "SUM(3:3)+SUM($4:$5)");
+    let insert_rows = |at| Operation::InsertRows {
+        sheet: 0,
+        at,
+        count: 2,
+    };
+    apply(&mut wb, insert_rows(0)).unwrap();
+    assert_eq!(
+        formula_text(&wb, 0, 11, 7).as_deref(),
+        Some("SUM(5:5)+SUM($6:$7)")
+    );
+    apply(
+        &mut wb,
+        Operation::InsertColumns {
+            sheet: 0,
+            at: 0,
+            count: 3,
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        formula_text(&wb, 0, 11, 10).as_deref(),
+        Some("SUM(5:5)+SUM($6:$7)")
+    );
+    apply(
+        &mut wb,
+        Operation::DeleteRows {
+            sheet: 0,
+            at: 4,
+            count: 1,
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        formula_text(&wb, 0, 10, 10).as_deref(),
+        Some("SUM(#REF!)+SUM($5:$6)")
+    );
+}
+
 // ---------------------------------------------------------------------------
 // `PIV-06`: a column shift under a pivot's source has to renumber its fields.
 // ---------------------------------------------------------------------------
