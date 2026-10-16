@@ -47,6 +47,7 @@ mod calc;
 mod cells;
 mod clipboard;
 mod collab;
+mod custom;
 mod data;
 mod find;
 mod formula;
