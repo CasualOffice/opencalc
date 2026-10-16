@@ -23,7 +23,7 @@ for (const [what, open] of [
     await expect(page.locator("#sheet-ctx")).toBeVisible();
     await page.keyboard.press("Escape");
     await expect(page.locator("#sheet-ctx")).toHaveCount(0);
-    expect(await page.evaluate(() => document.activeElement?.id)).toBe("grid");
+    expect(await page.evaluate(() => window.opencalcEditor.gridHasKeyboard())).toBe(true);
   });
 }
 

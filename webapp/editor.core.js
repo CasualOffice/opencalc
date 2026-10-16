@@ -335,6 +335,7 @@ import {
   parseColor,
   personalFilterForTest,
   personalViewForTest,
+  placeImeHost,
   positionInline,
   refAcceptable,
   refreshFormulaBar,
@@ -2007,8 +2008,32 @@ export let growthRows = [];   // ascending row indices that grow
 export let growthPrefix = [0];
 export let growthTotal = 0;
 export let growthDirty = true;
+// Row → growth in px over `growthBase`, for every candidate row the map covers.
+// The single answer to "how tall is this row": `measure()` draws rows from it
+// and the offsets above are summed from it, so the drawn grid and every
+// position derived from offsets cannot disagree — and since it is built from the
+// whole sheet, never from the window, scrolling cannot change a row's height.
+export let growthByRow = new Map();
+export let growthBase = 20;
+// Rows at or before this index are fully measured. The engine lists candidates
+// in row order and stops at a cap, so a truncated list covers every row before
+// the one it stopped in; past that, `measure()` falls back to the window.
+export let growthCoveredTo = Infinity;
+// The engine's edit counter and sheet when the map was built. Any edit — the
+// editor's own, an undo, a co-editor's, a macro's or an agent's — moves the
+// counter, so the map cannot go stale because some path forgot to say so.
+let growthKey = "";
 
 export function invalidateGrowth() { growthDirty = true; }
+
+/// Rebuild the growth map if the document, sheet or anything else it depends on
+/// has changed since it was built.
+export function syncGrowth() {
+  let key = "";
+  try { key = `${state.sheet}|${wasm ? wasm.session_edits_applied() : 0}`; } catch { /* no session yet */ }
+  if (key !== growthKey) { growthKey = key; growthDirty = true; }
+  if (growthDirty) rebuildGrowth();
+}
 
 // Zoom changes the metrics without changing any memo key, so the memo has to go.
 export function clearHeightMemo() { heightMemo = new Map(); }
@@ -2018,10 +2043,13 @@ export function rebuildGrowth() {
   growthRows = [];
   growthPrefix = [0];
   growthTotal = 0;
+  growthByRow = new Map();
+  growthCoveredTo = Infinity;
   if (!wasm) return;
   let payload;
   try { payload = JSON.parse(wasm.session_autofit_candidates(state.sheet)); } catch { return; }
   const base = payload.default || 20;
+  growthBase = base;
   const extra = new Map();
   // Column widths are looked up once per distinct column, not once per cell: a
   // wrapped column of ten thousand rows is one lookup, not ten thousand.
@@ -2035,6 +2063,11 @@ export function rebuildGrowth() {
     if (needed === null || needed <= base) continue;
     const grow = needed - base;
     if (grow > (extra.get(it.r) || 0)) extra.set(it.r, grow);
+  }
+  growthByRow = extra;
+  if (payload.truncated) {
+    const cells = payload.cells || [];
+    growthCoveredTo = cells.length ? cells[cells.length - 1].r - 1 : -1;
   }
   growthRows = [...extra.keys()].sort((a, b) => a - b);
   let acc = 0;
@@ -2278,14 +2311,27 @@ function measure() {
     flags.forEach((p, k) => { if (p) pinnedRows.add(geo.rowIdx[i] + k); });
     i = j + 1;
   }
-  for (const it of geoItems) {
-    if (!it.t) continue;
-    const ci = geo.colOf.get(it.c), ri = geo.rowOf.get(it.r);
-    if (ci === undefined || ri === undefined) continue;
+  // Heights come from the sheet-wide growth map, never from the cells on
+  // screen: a row's height must not depend on which columns are in view.
+  syncGrowth();
+  for (let i = 0; i < geo.rowIdx.length; i++) {
+    const row = geo.rowIdx[i];
     // A hidden row is 0 px — growing it would make it reappear.
-    if (geo.rowH[ri] <= 0 || pinnedRows.has(it.r)) continue;
-    const needed = neededRowHeight(it, geo.colW[ci]);
-    if (needed !== null && needed > geo.rowH[ri]) geo.rowH[ri] = needed;
+    if (geo.rowH[i] <= 0 || pinnedRows.has(row) || row > growthCoveredTo) continue;
+    const grow = growthByRow.get(row);
+    if (grow && growthBase + grow > geo.rowH[i]) geo.rowH[i] = growthBase + grow;
+  }
+  // Past a truncated map (more candidates than the engine lists — the status
+  // bar already says scrolling may drift there) the window is all there is.
+  if (growthCoveredTo !== Infinity) {
+    for (const it of geoItems) {
+      if (!it.t || it.r <= growthCoveredTo) continue;
+      const ci = geo.colOf.get(it.c), ri = geo.rowOf.get(it.r);
+      if (ci === undefined || ri === undefined) continue;
+      if (geo.rowH[ri] <= 0 || pinnedRows.has(it.r)) continue;
+      const needed = neededRowHeight(it, geo.colW[ci]);
+      if (needed !== null && needed > geo.rowH[ri]) geo.rowH[ri] = needed;
+    }
   }
 
   // Positions: frozen lines from HW/HH, scrolling lines from bodyX0/Y0 − sub.
@@ -3602,6 +3648,7 @@ export function draw() {
   // the grid scrolls or resizes under it (grid-wrap's overflow clips it once the
   // cell leaves the viewport), instead of leaving it parked mid-air.
   if (editSurface === inline) positionInline();
+  else if (imeArmed) placeImeHost();
   updateNameBox();
   updateNumberFormatReadout();
   announceCell();
@@ -6235,6 +6282,76 @@ export function cellsFromClipboardHtml(html) {
 // the same typing that autocompletes in a cell does nothing up there.
 export let editSurface = null;
 
+// --- IME: the grid's keyboard is a text-input client (XL-FEAT-023) -----------
+//
+// A Japanese, Chinese or Korean user selects a cell and types, and in Excel the
+// input method's preedit appears in the cell. Here the grid's keyboard was the
+// `<canvas>`, and **a canvas is not a text-input client**: the browser does not
+// hand its keystrokes to the input method at all. The first romaji letter came
+// through as a raw "n", the printable-key branch opened the editor with an "n"
+// in it, and the composition began one keystroke late — `nにほん`, or for
+// Korean a stray Latin jamo key in front of every entry.
+//
+// No handler on the canvas can repair that: by the time a keydown reaches it
+// the IME has already been bypassed. The element holding focus when the first
+// key goes down has to be one the IME can compose into, and the only one whose
+// composition can also *continue* — through a Korean syllable boundary, a
+// Japanese conversion, without focus moving mid-composition, which an OS input
+// method may abandon — is the editor the text is going to end up in. So while
+// no edit is open, the in-cell editor is armed as the grid's keyboard: a
+// zero-sized `<textarea>` parked on the active cell. Every keystroke it gets is
+// handed to the grid's own key handlers (so every shortcut is unchanged); a
+// composition that starts in it opens the edit in place, and the preedit is
+// already where Excel shows it.
+//
+// The canvas still takes focus first — a click, `canvas.focus()` from any of
+// the hundred places that give the grid back its keyboard — and passes it on.
+// Touch is the exception: focusing a textarea raises a software keyboard, so a
+// tap leaves focus on the canvas exactly as before.
+let imeArmed = false;
+let lastPointerTouch = false;
+/// The keydown currently being answered by the grid on the host's behalf, so
+/// the editing-surface handlers on the same element leave it alone.
+let gridKeyEvent = null;
+
+/// Is this keystroke the input method's? `isComposing` mid-composition;
+/// `keyCode` 229 for the keystroke that starts one (and, on Windows, for every
+/// key an active IME swallows, whatever `key` claims).
+export const imeOwnsKey = (e) => e.isComposing || e.keyCode === 229;
+
+/// Whether the grid holds the keyboard — the canvas, or the IME host on its
+/// behalf. What `document.activeElement === canvas` used to mean.
+export function gridHasKeyboard() {
+  const a = activeEl();
+  return a === canvas || (imeArmed && a === inline && !editSurface);
+}
+
+function armImeHost() {
+  if (!wasm || state.editing || editSurface || !inline || lastPointerTouch) return;
+  if (typeof matchMedia === "function" && matchMedia("(hover: none) and (pointer: coarse)").matches) return;
+  if (!imeArmed) {
+    imeArmed = true;
+    inline.value = "";
+    inline.classList.add("oc-ime-host");
+    inline.style.display = "block";
+    inline.setAttribute("aria-label", canvas.getAttribute("aria-label") || "Spreadsheet grid");
+    inline.setAttribute("aria-describedby", "grid-live");
+    canvas.classList.add("oc-keys");
+  }
+  placeImeHost();
+  inline.focus({ preventScroll: true });
+}
+
+function disarmImeHost() {
+  if (!imeArmed) return;
+  imeArmed = false;
+  inline.classList.remove("oc-ime-host");
+  inline.removeAttribute("aria-label");
+  inline.removeAttribute("aria-describedby");
+  canvas.classList.remove("oc-keys");
+  if (editSurface !== inline) inline.style.display = "none";
+}
+
 /// Tell the desktop shell whether a cell is open for editing (`TAURI-012`).
 ///
 /// **A native menu accelerator is consumed before the webview sees the key.**
@@ -6283,6 +6400,9 @@ let textFieldFocused = false;
 /// An `<input>` with no `type` defaults to text, so the empty string counts.
 function takesTypedText(el) {
   if (!el) return false;
+  // The armed IME host is the grid's keyboard, not a text field: the shell's
+  // clipboard chords must still reach the grid (XL-FEAT-023).
+  if (el === inline && imeArmed && !editSurface) return false;
   if (el.isContentEditable) return true;
   const tag = (el.tagName || "").toLowerCase();
   if (tag === "textarea") return true;
@@ -6438,12 +6558,17 @@ export function beginEdit(surface, initial, caretAtEnd = false) {
   editMode = initial !== undefined ? "Enter" : "Edit";
   refSpans = [];
   editOriginal = wasm.session_cell_input(state.sheet, state.sel.row, state.sel.col);
+  // The idle IME host becomes the editor it already is (XL-FEAT-023).
+  disarmImeHost();
   if (surface === inline) {
     inline.style.display = "block";
     positionInline();
   }
-  if (initial !== undefined) surface.value = initial;
-  else surface.value = editOriginal;
+  // Only when it changes: assigning a textarea's value ends any composition in
+  // progress, and an edit opened *by* a composition starts with the value the
+  // composition is writing into.
+  const opening = initial !== undefined ? initial : editOriginal;
+  if (surface.value !== opening) surface.value = opening;
   // **`preventScroll`, and it is not a nicety.**
   //
   // The grid scrolls *virtually*: the canvas is one screen tall and draws
@@ -6501,7 +6626,10 @@ export function endEdit(refocus = true) {
     if (m) { m.textContent = ""; m.style.display = "none"; }
     surface.classList.remove("tinted");
   }
-  inline.style.display = "none";
+  // `select()`, a sheet switch and a dozen other paths call this with no edit
+  // open. Hiding the armed IME host then would drop focus to `<body>` and the
+  // grid's next keystroke with it (XL-FEAT-023).
+  if (was || !imeArmed) inline.style.display = "none";
   hideAutocomplete();
   hideSignatureTip();
   formulaRefDrag = null;
@@ -7729,8 +7857,10 @@ function wireEvents() {
     // Not while a cell editor or a dialog input has focus — there the browser's
     // own text paste is exactly right.
     const target = e.target;
-    if (target && /^(input|textarea)$/i.test(target.tagName ?? "")) return;
-    if (target?.isContentEditable) return;
+    // The idle IME host is a textarea, and the grid's (XL-FEAT-023).
+    const gridHost = (e.composedPath?.()[0] ?? target) === inline && imeArmed && !editSurface;
+    if (!gridHost && target && /^(input|textarea)$/i.test(target.tagName ?? "")) return;
+    if (!gridHost && target?.isContentEditable) return;
     e.preventDefault();
     void doPaste(e);
   });
@@ -8352,14 +8482,16 @@ function wireEvents() {
       m.style.top = Math.max(4, window.innerHeight - m.offsetHeight - 4) + "px";
     }
   };
-  canvas.addEventListener("keydown", (e) => {
-    if (state.editing) return;
+  const onGridMenuKey = (e) => {
+    if (state.editing) return false;
     const menuKey = e.key === "ContextMenu" || (e.key === "F10" && e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey);
-    if (!menuKey) return;
+    if (!menuKey) return false;
     e.preventDefault();
     e.stopImmediatePropagation();
     keyboardMenu();
-  });
+    return true;
+  };
+  canvas.addEventListener("keydown", onGridMenuKey);
   canvas.addEventListener("contextmenu", (e) => {
     e.preventDefault();
     // A keyboard-raised `contextmenu`: either the echo of a key handled above,
@@ -8717,7 +8849,7 @@ function wireEvents() {
     pinch = null;
   });
 
-  canvas.addEventListener("keydown", async (e) => {
+  const onGridKey = async (e) => {
     if (state.editing) return;
     // Alt+Down is Excel's in-column pick list: the validation dropdown when the
     // cell has one, and otherwise the text already entered in this column.
@@ -9173,15 +9305,77 @@ function wireEvents() {
       default:
         if (e.key.length === 1 && !mod) { startInline(e.key); e.preventDefault(); }
     }
+  };
+  canvas.addEventListener("keydown", onGridKey);
+
+  // --- The IME host (XL-FEAT-023; see `armImeHost`) ---------------------------
+  //
+  // A keystroke the input method owns is nobody else's. Without this the
+  // Enter that confirms a conversion also committed the cell and moved down,
+  // the Escape that discards a preedit also cancelled the edit, and on macOS —
+  // where the keystroke that *starts* a composition arrives as `key: "n"` with
+  // keyCode 229 — the grid opened an edit with a Latin "n" in it before the
+  // composition began. One guard, at the top of the dispatch, for every
+  // handler in the editor: the grid's, the editing surfaces', the dialogs'
+  // (an IME in the Find box has the same Enter), and the document-level
+  // shortcuts. Scoped to this editor's own tree, so an embedding page's
+  // handlers are not this editor's to silence.
+  window.addEventListener("keydown", (e) => {
+    if (!imeOwnsKey(e)) return;
+    if (ocRoot !== document && !e.composedPath().includes(ocRoot)) return;
+    e.stopImmediatePropagation();
+  }, true);
+  // Every route that gives the grid its keyboard ends in `canvas.focus()` or a
+  // click on it; both arrive here and hand focus to the host.
+  canvas.addEventListener("pointerdown", (e) => {
+    lastPointerTouch = e.pointerType === "touch" || e.pointerType === "pen";
+  }, true);
+  canvas.addEventListener("focus", () => { if (!state.editing) armImeHost(); });
+  // Focus leaving for anywhere else disarms it; a window losing focus does
+  // not move `activeElement`, so alt-tabbing away and back keeps it armed.
+  inline.addEventListener("blur", () => {
+    if (!imeArmed) return;
+    setTimeout(() => { if (imeArmed && !editSurface && activeEl() !== inline) disarmImeHost(); }, 0);
   });
+  // While armed, the host's keystrokes are the grid's — the same two handlers,
+  // in the same order, as on the canvas. Registered before the editing
+  // surfaces' own listener, which is told to leave this event alone: the grid
+  // may open an edit while answering it (F2, a printable key), and the edit's
+  // F2 handler must not then toggle the mode of an edit one keystroke old.
+  inline.addEventListener("keydown", (e) => {
+    if (editSurface || !imeArmed) return;
+    gridKeyEvent = e;
+    if (!onGridMenuKey(e)) onGridKey(e);
+  });
+  // A composition that starts on the idle host opens the edit around it.
+  // Nothing is assigned and focus does not move: the preedit is already in
+  // the editor, and the editor is already on the cell.
+  inline.addEventListener("compositionstart", () => {
+    if (!editSurface && imeArmed) beginEdit(inline, inline.value);
+  });
+  // An edit the cell refused (read-only, protected, pivot) leaves whatever the
+  // IME committed in the hidden host; it is not a value and must not become
+  // the start of the next one.
+  inline.addEventListener("compositionend", () => {
+    setTimeout(() => { if (!editSurface && imeArmed) inline.value = ""; }, 0);
+  });
+
   // Both editing surfaces share one set of handlers: the in-cell editor and the
   // formula bar behave identically (autocomplete, Escape reverts, Enter commits
   // and advances, Tab commits and moves right), because they are two views of
   // the same edit session.
   for (const surface of [inline, fInput]) {
-    surface.addEventListener("input", () => {
-      // Typing in the formula bar with no edit open starts one.
-      if (!editSurface) beginEdit(surface, surface.value);
+    surface.addEventListener("input", (e) => {
+      // Typing in the formula bar with no edit open starts one. So does text
+      // that reaches the idle IME host without a keystroke the grid saw — the
+      // emoji panel, dictation — as it starts an edit in Excel.
+      if (!editSurface) {
+        beginEdit(surface, surface.value);
+        if (!editSurface && surface === inline) {
+          if (!e.isComposing) inline.value = "";
+          return;
+        }
+      }
       surface.classList.remove("invalid");
       // Typing anything ends point mode and leaves the reference it built in
       // place — a programmatic value change (insertRef) fires no input event,
@@ -9199,6 +9393,8 @@ function wireEvents() {
     });
     surface.addEventListener("click", () => updateSignatureTip());
     surface.addEventListener("keydown", (e) => {
+      // The grid answered this one on the idle IME host's behalf.
+      if (e === gridKeyEvent) return;
       // Autocomplete navigation takes priority when its menu is open.
       if (acState) {
         if (e.key === "ArrowDown") { acState.idx = (acState.idx + 1) % acState.matches.length; renderAutocomplete(); e.preventDefault(); return; }

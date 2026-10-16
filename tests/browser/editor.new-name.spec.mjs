@@ -62,7 +62,7 @@ test("OK defines the name with its scope and comment", async ({ page }) => {
   expect(await names(page)).toEqual([
     { name: "TaxRate", refersTo: `${q[0]}!$B$2`, sheet: 1, scope: sheets[1], comment: "Standard VAT", hidden: false },
   ]);
-  expect(await page.evaluate(() => document.activeElement?.id)).toBe("grid");
+  expect(await page.evaluate(() => window.opencalcEditor.gridHasKeyboard())).toBe(true);
 });
 
 for (const bad of ["my name", "A1", "R1C1", "1st", "C", "Sales-Tax"]) {

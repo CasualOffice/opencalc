@@ -243,7 +243,7 @@ test("the dialog is modeless: the grid takes clicks while it is open", async ({ 
   await expect(nameBox(page)).not.toHaveValue("A1");
   await expect(modal(page)).toBeVisible();
   // Typing now goes to the grid, not the dialog.
-  expect(await page.evaluate(() => document.activeElement?.id)).toBe("grid");
+  expect(await page.evaluate(() => window.opencalcEditor.gridHasKeyboard())).toBe(true);
 });
 
 test("the title bar drags the dialog", async ({ page }) => {

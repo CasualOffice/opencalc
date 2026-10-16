@@ -1574,6 +1574,27 @@ export function doRedo() {
   draw();
 }
 
+/// Park the idle IME host on the active cell (XL-FEAT-023).
+///
+/// While no edit is open the in-cell editor is still the grid's keyboard, at
+/// zero size (see `armImeHost`). Where it sits is where the operating system
+/// opens its candidate window for the first keystroke of a composition, so it
+/// sits where Excel's does: on the active cell. Two style writes, and only
+/// when the cell moved — `draw()` calls this every frame.
+export function placeImeHost() {
+  const m = mergeAt(state.sel.row, state.sel.col);
+  const row = m ? m.r0 : state.sel.row;
+  const col = m ? m.c0 : state.sel.col;
+  const x = m ? fscreenX(m.c0) : colXAt(col) ?? fscreenX(col);
+  const y = m ? fscreenY(m.r0) : rowYAt(row) ?? fscreenY(row);
+  const f = state.freeze || { fc: 0, fr: 0, bodyX0: HW, bodyY0: HH };
+  const z = state.zoom;
+  const l = Math.max(col < f.fc ? HW : f.bodyX0, x) * z + "px";
+  const t = Math.max(row < f.fr ? HH : f.bodyY0, y) * z + "px";
+  if (inline.style.left !== l) inline.style.left = l;
+  if (inline.style.top !== t) inline.style.top = t;
+}
+
 export function positionInline() {
   const m = mergeAt(state.sel.row, state.sel.col);
   const row = m ? m.r0 : state.sel.row;
