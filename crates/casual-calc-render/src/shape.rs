@@ -153,11 +153,14 @@ mod tests {
         // Not a wish list — a record of what a bundle decision would have to
         // change, so that adding a font is a deliberate act with a size cost
         // rather than something discovered from a screenshot.
+        //
+        // CJK is not in this list: its faces ship as slices a host supplies
+        // (`XL-FEAT-140`), so whether `中` is covered depends on what this
+        // process has registered, which another test in this binary does.
         for (script, ch) in [
             ("Arabic", '\u{0645}'),
             ("Devanagari", '\u{0915}'),
             ("Thai", '\u{0e01}'),
-            ("CJK", '\u{4e2d}'),
         ] {
             assert!(!covered(ch), "{script} is now covered — update ADR-018");
         }

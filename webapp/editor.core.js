@@ -234,6 +234,10 @@ import {
   quadClip,
   refreshTheme,
   registerSuppliedFonts,
+  ensureExportFonts,
+  cjkFontsLoaded,
+  cjkFontsReady,
+  hasCjk,
   runFont,
   runsWidth,
   textWidth,
@@ -300,6 +304,7 @@ import {
   autofillToNeighbour,
   autofitColumn,
   autofitColumnForTest,
+  autofitPendingForTest,
   undoMark,
   widenForEntry,
   autofitRow,
@@ -680,6 +685,10 @@ export {
   quadClip,
   refreshTheme,
   registerSuppliedFonts,
+  ensureExportFonts,
+  cjkFontsLoaded,
+  cjkFontsReady,
+  hasCjk,
   runFont,
   runsWidth,
   textWidth,
@@ -746,6 +755,7 @@ export {
   autofillToNeighbour,
   autofitColumn,
   autofitColumnForTest,
+  autofitPendingForTest,
   undoMark,
   widenForEntry,
   autofitRow,
@@ -7851,6 +7861,11 @@ export function openColumnPickList() {
 /// this repository refuses.
 async function exportPdf() {
   try {
+    // Japanese, Chinese and Korean faces are fetched slices, not compiled in
+    // (`XL-FEAT-140`): hand the engine the ones this sheet's text needs before
+    // it writes the file. Anything still missing is named in `loss` below.
+    status.textContent = "exporting PDF…";
+    await ensureExportFonts(state.sheet);
     const bytes = wasm.session_export_pdf(state.sheet);
     const loss = wasm.session_export_pdf_loss(state.sheet);
     const base = (documentName() || "workbook").replace(/\.[^.]+$/, "");
@@ -11744,6 +11759,15 @@ async function main() {
   // every cell a user looks at with its own faces. This is for `render_png`,
   // where a missing face is a picture full of boxes.
   await registerSuppliedFonts();
+  // Which region's glyphs a Han character in a Latin-font cell is drawn with —
+  // Excel takes it from the system locale; a browser's nearest is its
+  // language. Anything that is not Chinese or Korean keeps the engine's
+  // default, Japanese (`XL-FEAT-140`). `?cjk=sc` overrides, for a deployment
+  // or a test that must not depend on the viewer.
+  try {
+    const asked = new URL(location.href).searchParams.get("cjk");
+    wasm.set_cjk_default_region(asked || navigator.language || "");
+  } catch {}
 
   COL_W = wasm.default_col_px();
   ROW_H = wasm.default_row_px();

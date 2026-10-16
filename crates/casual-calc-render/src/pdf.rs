@@ -13,10 +13,11 @@
 //! it uses `skrifa`, which is already here for the raster backend, for the
 //! metrics and glyph ids, and writes the file itself.
 //!
-//! The cost of that choice is stated rather than hidden, and it is the font: a
-//! face is embedded **whole**, not subset, so a page with one line of Carlito
-//! carries the 628 KB face. Subsetting is a real piece of work (`glyf`/`loca`
-//! rewriting and a `cmap` rebuild) and is deliberately not in this increment.
+//! Faces are embedded as **subsets** (`XL-FEAT-140`, `subset.rs`): the
+//! glyphs a page draws keep their ids and every other outline is emptied, so a
+//! line of Carlito no longer carries the 628 KB face and a CJK slice carries
+//! only the characters on the page. A CFF-flavoured face, which that subsetter
+//! does not read, is still embedded whole.
 //!
 //! # Why it is a backend and not an exporter
 //!
@@ -193,9 +194,68 @@ struct Face {
 #[derive(Default)]
 struct Faces {
     faces: Vec<Face>,
+    /// What the text asked for and could not get — see [`GlyphReport`].
+    glyphs: GlyphReport,
+}
+
+/// How many distinct characters a [`GlyphReport`] lists, per list. A sheet
+/// can hold millions of distinct characters only adversarially; the count
+/// past the cap is still kept, so nothing is under-reported, only unlisted.
+pub const MAX_REPORTED_CHARS: usize = 65_536;
+
+/// The text half of an export's report (`XL-FEAT-140`).
+///
+/// - `undrawn`: characters no loaded face could draw, so the page shows a gap
+///   where they are. Never silent: the SDK names them in the compatibility
+///   report.
+/// - `wanted`: CJK characters, by the variant that should draw them, whose
+///   slice is not loaded — what a host fetches (and registers) before
+///   exporting again. Some may have been drawn by a stand-in meanwhile.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct GlyphReport {
+    /// Distinct characters drawn as nothing, at most [`MAX_REPORTED_CHARS`].
+    pub undrawn: std::collections::BTreeSet<char>,
+    /// How many distinct characters were drawn as nothing, listed or not.
+    pub undrawn_total: usize,
+    /// Characters per wanted CJK variant, at most [`MAX_REPORTED_CHARS`] in all.
+    pub wanted: BTreeMap<casual_calc_text::cjk::Variant, std::collections::BTreeSet<char>>,
+    wanted_count: usize,
+}
+
+impl GlyphReport {
+    /// Whether every character was drawn by the face meant for it.
+    #[must_use]
+    pub fn is_complete(&self) -> bool {
+        self.undrawn_total == 0 && self.wanted.is_empty()
+    }
+
+    fn account(&mut self, ch: char, r: &fonts::Resolved) {
+        if r.face.is_none() && !ch.is_whitespace() && !ch.is_control() {
+            if self.undrawn.len() < MAX_REPORTED_CHARS {
+                if self.undrawn.insert(ch) {
+                    self.undrawn_total += 1;
+                }
+            } else if !self.undrawn.contains(&ch) {
+                // Past the cap the set no longer tells new from seen, so the
+                // total may count a repeat; over-counting is the safe side.
+                self.undrawn_total += 1;
+            }
+        }
+        if let Some(v) = r.wanted
+            && !ch.is_whitespace()
+            && self.wanted_count < MAX_REPORTED_CHARS
+            && self.wanted.entry(v).or_default().insert(ch)
+        {
+            self.wanted_count += 1;
+        }
+    }
 }
 
 impl Faces {
+    fn account(&mut self, ch: char, r: &fonts::Resolved) {
+        self.glyphs.account(ch, r);
+    }
+
     /// The resource index for a face, inserting it if it is new.
     fn index(&mut self, bytes: &'static [u8]) -> usize {
         if let Some(i) = self.faces.iter().position(|f| {
@@ -332,6 +392,7 @@ pub fn write_pdf(
         format!("<< /Type /Catalog /Pages {pages_id} 0 R >>").into_bytes(),
     );
 
+    report.glyphs = std::mem::take(&mut faces.glyphs);
     Ok((objects.finish(catalog, info), report))
 }
 
@@ -503,11 +564,26 @@ fn write_faces(objects: &mut Objects, faces: &Faces) -> Vec<usize> {
         let to_thousandths = |v: f32| (f64::from(v) * 1000.0 / upem).round();
         let glyph_metrics = font.glyph_metrics(Size::unscaled(), LocationRef::default());
 
-        let base = format!("OCF{index}");
-        let file_id = objects.stream(
-            format!("/Length1 {}", face.bytes.len()).as_bytes(),
-            face.bytes,
-        );
+        // Only the glyphs the pages draw (`XL-FEAT-140`). A CJK slice is a
+        // few hundred glyphs and Carlito three thousand; a cell uses a dozen.
+        // Glyph ids are kept, so nothing else in the document changes. A face
+        // the subsetter cannot read (CFF) is embedded whole, as before. The
+        // `XXXXXX+` prefix is the specification's mark of a subset (§9.6.4),
+        // derived from the index so the bytes stay deterministic.
+        let subset = crate::subset::subset(face.bytes, face.used.keys().copied());
+        let program: &[u8] = subset.as_deref().unwrap_or(face.bytes);
+        let base = if subset.is_some() {
+            let mut tag = String::new();
+            let mut n = index;
+            for _ in 0..6 {
+                tag.push(char::from(b'A' + (n % 26) as u8));
+                n /= 26;
+            }
+            format!("{tag}+OCF{index}")
+        } else {
+            format!("OCF{index}")
+        };
+        let file_id = objects.stream(format!("/Length1 {}", program.len()).as_bytes(), program);
 
         let bounds = metrics.bounds.unwrap_or(skrifa::metrics::BoundingBox {
             x_min: 0.0,
@@ -1029,6 +1105,9 @@ struct Run {
     glyphs: Vec<Glyph>,
     /// The run's total advance, in twips at the requested size.
     advance: f64,
+    /// Drawn emboldened: fill and stroke, for bold asked of a CJK face that
+    /// ships no bold (`XL-FEAT-140`).
+    synthetic: bool,
     /// What the run says, when the glyphs cannot say it themselves.
     ///
     /// `Some` for a shaped run, and written as `/ActualText`. A shaper joins,
@@ -1119,10 +1198,22 @@ fn shape(
     size: f64,
     faces: &mut Faces,
 ) -> Option<Shaped> {
-    let primary = fonts::face_bytes_for(font_name, bold, italic);
+    let chooser = fonts::TextFaces::new(font_name, bold, italic, content);
+    let primary = chooser.primary();
     let font = FontRef::new(primary).ok()?;
     let metrics = font.metrics(Size::unscaled(), LocationRef::default());
     let upem = f64::from(metrics.units_per_em.max(1));
+
+    // One decision per character, shared with the raster backend and with
+    // `advance_width` (`XL-FEAT-140`): which face draws it, and — for East
+    // Asian text — which slice the host should supply if it is not loaded.
+    let resolved: Vec<(char, fonts::Resolved)> = content
+        .chars()
+        .map(|ch| (ch, chooser.resolve(ch)))
+        .collect();
+    for (ch, r) in &resolved {
+        faces.account(*ch, r);
+    }
 
     // The shaper first, on exactly the terms the raster backend uses it: one
     // face for the whole run, `crate::single_face_for` deciding which. Same
@@ -1131,7 +1222,7 @@ fn shape(
     // the PNG shaped it. Arabic drawn per `char` is not slightly wrong: the
     // letters do not join and the word runs backwards.
     #[cfg(feature = "shaping")]
-    if let Some(bytes) = crate::single_face_for(content, font_name, bold, italic)
+    if let Some((bytes, synthetic)) = crate::single_face_for(&resolved)
         && let Some(placed) = crate::shape::run(bytes, content, size as f32)
         && !placed.is_empty()
     {
@@ -1195,6 +1286,7 @@ fn shape(
                 // Only when the glyphs cannot say it themselves; a run that
                 // maps one-to-one already does, through `ToUnicode`.
                 actual_text: naive.is_none().then(|| content.to_owned()),
+                synthetic,
             }],
             total: advance,
             ascent,
@@ -1202,17 +1294,33 @@ fn shape(
         });
     }
 
-    // No single face covers the run — a Latin word beside a Hebrew one, where
-    // the bundled families split the coverage. Shaping is defined against one
-    // face, so this is the per-`char` path, and it is the same one the raster
-    // backend falls back to for the same reason.
+    // No single face covers the run — a Latin word beside a Hebrew one, or
+    // beside Japanese, where the faces split the coverage. Shaping is defined
+    // against one face, so this is the per-`char` path, and it is the same one
+    // the raster backend falls back to for the same reason.
     let mut runs: Vec<Run> = Vec::new();
-    for ch in content.chars() {
-        let (bytes, gid, advance) = match resolve(primary, &font, ch, bold, italic) {
-            Some(resolved) => resolved,
-            // Nothing covers it. The raster backend advances by zero and draws
-            // nothing; matching that keeps the two runs the same width.
-            None => continue,
+    for (ch, r) in &resolved {
+        let Some((bytes, gid, advance)) = resolve(*ch, r) else {
+            // Nothing loaded draws it. A CJK character keeps its one-em gap,
+            // as the raster backend and the measurement do, so the line is
+            // the width the cell was sized for; anything else advances by
+            // zero. Either way the character is in the report.
+            let gap = casual_calc_text::char_advance(r, *ch, size as f32);
+            if gap > 0.0 {
+                // Its own run, so the glyph after it starts a new text
+                // position rather than closing up against the one before.
+                match runs.last_mut() {
+                    Some(run) if run.face == usize::MAX => run.advance += f64::from(gap),
+                    _ => runs.push(Run {
+                        face: usize::MAX,
+                        glyphs: Vec::new(),
+                        advance: f64::from(gap),
+                        actual_text: None,
+                        synthetic: false,
+                    }),
+                }
+            }
+            continue;
         };
         let index = faces.index(bytes);
         let advance = advance / upem_of(bytes, upem) * size;
@@ -1223,7 +1331,7 @@ fn shape(
             text: ch.to_string(),
         };
         match runs.last_mut() {
-            Some(run) if run.face == index => {
+            Some(run) if run.face == index && run.synthetic == r.synthetic_bold => {
                 run.glyphs.push(glyph);
                 run.advance += advance;
             }
@@ -1232,10 +1340,11 @@ fn shape(
                 glyphs: vec![glyph],
                 advance,
                 actual_text: None,
+                synthetic: r.synthetic_bold,
             }),
         }
     }
-    if runs.is_empty() {
+    if runs.iter().all(|r| r.glyphs.is_empty()) {
         return None;
     }
     Some(Shaped {
@@ -1292,6 +1401,20 @@ fn write_runs(
         if let Some(text) = &run.actual_text {
             let _ = writeln!(out, "/Span {} BDC", actual_text_dict(text));
         }
+        if run.synthetic {
+            // Fill and stroke (`2 Tr`) in the fill colour: the outline grows
+            // by half the line width on every side, which is how Windows
+            // draws a bold it has no face for. Inside `q`/`Q`, because the
+            // rendering mode is graphics state and outlives `ET`.
+            let _ = writeln!(
+                out,
+                "q 2 Tr {} w {} {} {} RG",
+                num(size * f64::from(crate::SYNTHETIC_BOLD_EM)),
+                num(r),
+                num(g),
+                num(b)
+            );
+        }
         let _ = writeln!(
             out,
             "BT /F{} {} Tf {} {} {} rg 1 0 0 -1 {} {} Tm",
@@ -1343,6 +1466,9 @@ fn write_runs(
         }
         flush_tj(out, &mut array);
         out.push_str("ET\n");
+        if run.synthetic {
+            out.push_str("Q\n");
+        }
         if run.actual_text.is_some() {
             out.push_str("EMC\n");
         }
@@ -1481,28 +1607,14 @@ fn upem_of(bytes: &[u8], fallback: f64) -> f64 {
         .unwrap_or(fallback)
 }
 
-/// The face, glyph id and unscaled advance for one character: the requested
-/// face when it covers it, otherwise the coverage fallback.
-fn resolve<'a>(
-    primary_bytes: &'static [u8],
-    primary: &FontRef<'a>,
-    ch: char,
-    bold: bool,
-    italic: bool,
-) -> Option<(&'static [u8], u32, f64)> {
-    let unscaled = Size::unscaled();
-    let loc = LocationRef::default();
-    if let Some(gid) = primary.charmap().map(ch) {
-        let advance = primary.glyph_metrics(unscaled, loc).advance_width(gid);
-        return Some((
-            primary_bytes,
-            gid.to_u32(),
-            f64::from(advance.unwrap_or(0.0)),
-        ));
-    }
-    let bytes = fonts::coverage_face_bytes(ch, bold, italic)?;
+/// The face, glyph id and unscaled advance for one character, in the face
+/// [`fonts::TextFaces`] resolved it to.
+fn resolve(ch: char, resolved: &fonts::Resolved) -> Option<(&'static [u8], u32, f64)> {
+    let bytes = resolved.face?;
     let font = FontRef::new(bytes).ok()?;
     let gid = font.charmap().map(ch)?;
-    let advance = font.glyph_metrics(unscaled, loc).advance_width(gid);
+    let advance = font
+        .glyph_metrics(Size::unscaled(), LocationRef::default())
+        .advance_width(gid);
     Some((bytes, gid.to_u32(), f64::from(advance.unwrap_or(0.0))))
 }

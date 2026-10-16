@@ -23,6 +23,8 @@ import {
   canvas,
   capabilityForbids,
   cellFont,
+  cjkFontsLoaded,
+  cjkFontsReady,
   cellPx,
   cellRef,
   colName,
@@ -724,8 +726,12 @@ export function allRanges() {
   return state.ranges.concat([effectiveRange()]);
 }
 
-export function autofitColumn(col) {
+export function autofitColumn(col, again = false) {
   const b = usedBounds();
+  // Text whose CJK face is still downloading is measured with a stand-in
+  // face. Collected, so the column is fitted again once the real face is in
+  // (`XL-FEAT-140`) — without that an early autofit is a permanent mis-fit.
+  const pending = [];
   const items = JSON.parse(wasm.session_cells(state.sheet, 0, col, b.rows - 1, col));
   // Read fresh rather than trusting `sheetMerges`, which is refreshed on draw:
   // autofit can run against a sheet edited since the last one.
@@ -742,6 +748,7 @@ export function autofitColumn(col) {
     // apportion them.
     if (spansColumns(it.r)) continue;
     ctx.font = cellFont(it);
+    if (!again && !cjkFontsReady(ctx.font, String(it.t))) pending.push([ctx.font, String(it.t)]);
     const flat = ctx.measureText(String(it.t)).width;
     // Rotated text needs *less* width, not more: what the column has to hold is
     // the run projected onto the horizontal axis. Sizing to the flat width
@@ -765,6 +772,25 @@ export function autofitColumn(col) {
   try { wasm.session_set_col_width(state.sheet, col, Math.ceil(maxw) + 14); }
   catch (e) { statusError(errText(e)); }
   draw();
+  if (pending.length) {
+    // Fit again when the faces arrive — but only if nothing has touched the
+    // column since: a width the user dragged in the meantime is theirs.
+    const sheet = state.sheet;
+    const set = wasm.session_col_width(sheet, col);
+    autofitPending.add(sheet + ":" + col);
+    void Promise.all(pending.map(([font, text]) => cjkFontsLoaded(font, text))).then(() => {
+      autofitPending.delete(sheet + ":" + col);
+      if (state.sheet === sheet && wasm.session_col_width(sheet, col) === set) autofitColumn(col, true);
+    });
+  }
+}
+
+/// Columns whose autofit is waiting on a CJK face, for the browser gate.
+const autofitPending = new Set();
+
+/// Whether an autofit is still waiting on a font to re-measure.
+export function autofitPendingForTest() {
+  return autofitPending.size;
 }
 
 /// Columns this editor widened on entry, as `"sheet:col"` → the width it set.

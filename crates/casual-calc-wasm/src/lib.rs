@@ -50,6 +50,7 @@ mod collab;
 mod custom;
 mod data;
 mod find;
+mod fonts;
 mod formula;
 mod history;
 mod io;

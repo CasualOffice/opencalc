@@ -145,6 +145,11 @@ pub struct ImageReport {
     pub drawn: u32,
     /// The ones that were not, named and reasoned, in first-seen order.
     pub undrawn: Vec<UndrawnImage>,
+    /// The text the same render could not draw in the face meant for it
+    /// (`XL-FEAT-140`). Filled by the PDF writer; carried here because this is
+    /// the report every render already returns, and a second return value
+    /// would be a second thing for a caller to forget to read.
+    pub glyphs: crate::pdf::GlyphReport,
 }
 
 impl ImageReport {
