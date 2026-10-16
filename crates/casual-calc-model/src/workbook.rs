@@ -8,6 +8,7 @@ use casual_calc_formula::stored::{ABSOLUTE, Origin};
 use serde::{Deserialize, Serialize};
 
 use crate::author::AuthorTable;
+use crate::cell::Cell;
 use crate::custom_functions::CustomFunctionRuntime;
 use crate::defined_name::DefinedName;
 use crate::error::ModelError;
@@ -805,7 +806,7 @@ impl Workbook {
     /// the arena, and a workbook deserialised without this would intern nothing
     /// and start appending again, silently. Called wherever a `Workbook` is
     /// constructed other than by `new`.
-    fn reindex_formulas(&mut self) {
+    pub(crate) fn reindex_formulas(&mut self) {
         self.formula_index.clear();
         for (i, expr) in self.formulas.iter().enumerate() {
             self.formula_index
@@ -855,8 +856,46 @@ impl Workbook {
         self.formulas.get(handle.0 as usize)
     }
 
+    /// The invariants one cell must keep against the workbook around it: every
+    /// string, formula and style it names exists.
+    ///
+    /// Split out of [`validate`](Self::validate) so that a workbook assembled
+    /// cell by cell ([`crate::transfer`]) checks each cell **with the same
+    /// rules** as it arrives, rather than walking every cell again at the end —
+    /// a second walk is the main-thread cost the transfer exists to spread.
+    pub(crate) fn validate_cell(&self, cell: &Cell) -> Result<(), ModelError> {
+        if let CellValue::SharedString(id) | CellValue::InlineString(id) = cell.value
+            && !self.strings.contains(id)
+        {
+            return Err(ModelError::Invariant("dangling string reference"));
+        }
+        if let Some(handle) = cell.formula
+            && self.formula(handle).is_none()
+        {
+            return Err(ModelError::Invariant("dangling formula handle"));
+        }
+        if let Some(style) = cell.style
+            && !self.styles.contains(style)
+        {
+            return Err(ModelError::Invariant("dangling style reference"));
+        }
+        Ok(())
+    }
+
     /// Validate model invariants: known schema version and unique sheet ids.
     pub fn validate(&self) -> Result<(), ModelError> {
+        self.validate_shape()?;
+        for sheet in &self.sheets {
+            for (_, cell) in sheet.cells.iter() {
+                self.validate_cell(cell)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Every invariant [`validate`](Self::validate) checks **except** the
+    /// per-cell ones, which [`validate_cell`](Self::validate_cell) holds.
+    pub(crate) fn validate_shape(&self) -> Result<(), ModelError> {
         if self.schema_version != SCHEMA_VERSION {
             return Err(ModelError::Invariant("unsupported schema version"));
         }
@@ -864,23 +903,6 @@ impl Workbook {
         for sheet in &self.sheets {
             if !seen.insert(sheet.id) {
                 return Err(ModelError::Invariant("duplicate sheet id"));
-            }
-            for (_, cell) in sheet.cells.iter() {
-                if let CellValue::SharedString(id) | CellValue::InlineString(id) = cell.value
-                    && !self.strings.contains(id)
-                {
-                    return Err(ModelError::Invariant("dangling string reference"));
-                }
-                if let Some(handle) = cell.formula
-                    && self.formula(handle).is_none()
-                {
-                    return Err(ModelError::Invariant("dangling formula handle"));
-                }
-                if let Some(style) = cell.style
-                    && !self.styles.contains(style)
-                {
-                    return Err(ModelError::Invariant("dangling style reference"));
-                }
             }
         }
         // A snapshot arrives from a host, a resumed session or a cluster peer,

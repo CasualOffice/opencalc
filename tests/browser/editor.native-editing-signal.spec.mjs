@@ -56,6 +56,24 @@ test("focusing a text field outside the grid tells the shell an edit is open", a
   await expect.poll(() => reports(page)).toContain(false);
 });
 
+test("the grid's own keyboard is not a text field", async ({ page }) => {
+  await boot(page);
+
+  // While no edit is open the grid's keys arrive through the idle in-cell
+  // editor, a `<textarea>`, so an input method can compose into it
+  // (XL-FEAT-023). Reporting *that* as typing would release Cmd+C/V/X/A/Z to
+  // a text field with nothing in it, and the desktop build's clipboard chords
+  // would stop reaching the grid.
+  await page.locator("#cell-ref").focus();
+  await expect.poll(() => reports(page)).toContain(true);
+  await page.evaluate(() => { window.__editingReports.length = 0; });
+  await page.locator("#grid").focus();
+  await expect.poll(() => page.evaluate(() => window.opencalcEditor.gridHasKeyboard())).toBe(true);
+  await expect.poll(() => reports(page)).toContain(false);
+  await page.waitForTimeout(150);
+  expect(await reports(page)).not.toContain(true);
+});
+
 test("focusing a control that takes no typing does not", async ({ page }) => {
   await boot(page);
 

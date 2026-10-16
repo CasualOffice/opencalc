@@ -139,6 +139,35 @@ impl CompatibilityReport {
             .collect()
     }
 
+    /// A report holding exactly `entries`, as [`entries`](Self::entries)
+    /// listed them — for handing a report from one engine to another
+    /// (`PERF-16`: the editor opens a file in a worker and installs the result
+    /// on its own thread).
+    ///
+    /// **Not** a replay through [`record_n`](Self::record_n): a report that
+    /// reached the feature cap holds `(overflow)` beside the cap's worth of
+    /// names, and replaying that in sorted order — `(` sorts first — folds a
+    /// different feature into the overflow than the original did. The cap
+    /// still holds: names past it are folded into `(overflow)` here.
+    pub fn from_entries(entries: impl IntoIterator<Item = CompatibilityEntry>) -> Self {
+        let mut report = Self::default();
+        for e in entries {
+            if e.count == 0 {
+                continue;
+            }
+            if report.entries.len() > MAX_REPORT_FEATURES
+                && !report.entries.contains_key(&e.feature)
+            {
+                report.record_n(OVERFLOW_FEATURE, e.model, e.retention, e.count);
+                continue;
+            }
+            report
+                .entries
+                .insert(e.feature, (e.model, e.retention, e.count));
+        }
+        report
+    }
+
     /// Whether every recorded feature was fully `Mapped`.
     pub fn is_clean(&self) -> bool {
         self.entries
@@ -155,6 +184,22 @@ impl CompatibilityReport {
 #[cfg(test)]
 mod bound_tests {
     use super::*;
+
+    /// A report rebuilt from its entries is the same report — including one
+    /// that hit the cap, where replaying through `record_n` is not.
+    #[test]
+    fn from_entries_reproduces_a_capped_report() {
+        let mut report = CompatibilityReport::default();
+        for i in 0..(MAX_REPORT_FEATURES + 40) {
+            report.record(
+                &format!("f{i:05}"),
+                ModelOutcome::Degraded,
+                RetentionOutcome::NotRetained,
+            );
+        }
+        let rebuilt = CompatibilityReport::from_entries(report.entries());
+        assert_eq!(rebuilt.entries(), report.entries());
+    }
 
     /// A file cannot make the report grow without limit.
     ///

@@ -8,7 +8,7 @@
 // cell contents, Find All with its results list, and Find Next walking from the
 // active cell. It is **modeless**, as Excel's is — the grid underneath keeps
 // taking clicks and keys — and what it has to say about the search is said in
-// the dialog, never in a box over it (docs/95 rule 8). The search itself is the
+// Excel's message box over it (docs/95 rule 8, XL-UX-168). The search itself is the
 // engine's `session_find_ex`; Replace All is `session_replace_all_ex`, one
 // undo step. There is no second matcher here.
 
@@ -22,6 +22,7 @@ import {
   ensureVisible,
   errText,
   findState,
+  messageBox,
   invalidateGrowth,
   navBlock,
   select,
@@ -55,8 +56,10 @@ export function navTarget() {
 
 // ---- Find and Replace (XL-UX-024/025) ----------------------------------------
 
-/// Excel's words, verbatim.
-const NOT_FOUND = "We couldn't find what you were looking for.";
+/// Excel's words, verbatim. NOT_FOUND as Microsoft Q&A quotes it
+/// (learn.microsoft.com/en-us/answers/questions/5173659); it had lost its
+/// second sentence here.
+const NOT_FOUND = "We couldn't find what you were looking for. Click Options for more ways to search.";
 const NOTHING_TO_REPLACE = "We couldn't find anything to replace. Click Options for more ways to search.";
 
 /// Find All draws at most this many rows; the count above it is always the
@@ -117,11 +120,12 @@ function goTo(m) {
   updateNameBox();
 }
 
-function say(text) {
-  const m = fr.root?.querySelector("#oc-fr-msg");
-  if (!m) { if (text) status.textContent = text; return; }
-  m.textContent = text || "";
-  m.hidden = !text;
+/// Excel's message box over the dialog (or over the grid, for Shift+F4 with
+/// the dialog closed). OK returns to Find what with its text selected.
+function say(text, icon = "warning") {
+  if (!text) return;
+  const what = fr.root?.isConnected ? fr.root.querySelector("#oc-fr-what") : null;
+  messageBox(text, { icon, field: what });
 }
 
 /// Find Next (dir 1) or Find Previous (dir -1) from the active cell, wrapping.
@@ -148,7 +152,6 @@ export function findStep(dir = 1) {
     if (idx < 0) idx = matches.length - 1;
   }
   findState.idx = idx;
-  say("");
   goTo(matches[idx]);
   return true;
 }
@@ -189,7 +192,6 @@ function findAll() {
     draw();
     return;
   }
-  say("");
   let sheets = [];
   try { sheets = JSON.parse(wasm.session_sheet_names()); } catch {}
   const book = byId("doc-name")?.textContent.trim() || "";
@@ -247,7 +249,8 @@ function replaceAll() {
   const n = edit(() => wasm.session_replace_all_ex(state.sheet, fr.what, fr.with, engineOpts(true)));
   if (n === undefined) return;
   findState.matches = [];
-  say(n > 0 ? `All done. We made ${n} replacement${n === 1 ? "" : "s"}.` : NOTHING_TO_REPLACE);
+  if (n > 0) say(`All done. We made ${n} replacement${n === 1 ? "" : "s"}.`, "info");
+  else say(NOTHING_TO_REPLACE);
   const wrap = fr.root?.querySelector(".oc-fr-results-wrap");
   if (wrap) wrap.hidden = true;
 }
@@ -326,7 +329,7 @@ function buildDialog() {
   const [withLabel, withInput] = field("oc-fr-with", "Replace with:");
   what.value = fr.what;
   withInput.value = fr.with;
-  what.addEventListener("input", () => { fr.what = what.value; say(""); });
+  what.addEventListener("input", () => { fr.what = what.value; });
   withInput.addEventListener("input", () => { fr.with = withInput.value; });
   const fields = el("div", "oc-fr-fields");
   fields.append(whatLabel, what, withLabel, withInput);
@@ -341,7 +344,7 @@ function buildDialog() {
     s.id = id;
     s.className = "oc-form-field";
     s.dataset.items = JSON.stringify(items);
-    s.addEventListener("change", () => { fr[key] = s.value; say(""); });
+    s.addEventListener("change", () => { fr[key] = s.value; });
     return [l, s];
   };
   const [withinL, within] = choice("oc-fr-within", "Within:", [["sheet", "Sheet"], ["workbook", "Workbook"]], "within");
@@ -353,7 +356,7 @@ function buildDialog() {
     c.type = "checkbox";
     c.id = id;
     c.checked = fr[key];
-    c.addEventListener("change", () => { fr[key] = c.checked; say(""); });
+    c.addEventListener("change", () => { fr[key] = c.checked; });
     l.append(c, document.createTextNode(label));
     return l;
   };
@@ -370,10 +373,6 @@ function buildDialog() {
   const optRow = el("div", "oc-fr-options-row");
   optRow.append(optBtn);
 
-  const msg = el("div", "oc-fr-msg");
-  msg.id = "oc-fr-msg";
-  msg.setAttribute("role", "status");
-  msg.hidden = true;
 
   // Footer, in Excel's order. No button is primary: Find Next is the default
   // (Enter), and Excel draws none of them filled.
@@ -413,7 +412,7 @@ function buildDialog() {
   count.setAttribute("role", "status");
   resultsWrap.append(scroller, count);
 
-  root.append(tabs, fields, opts, optRow, msg, actions, resultsWrap);
+  root.append(tabs, fields, opts, optRow, actions, resultsWrap);
   body.appendChild(root);
 
   function sync() {

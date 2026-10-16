@@ -137,6 +137,33 @@ impl CellStore {
         self.cells.remove(&at)
     }
 
+    /// Move the first `n` cells (row-major) out into a store of their own.
+    ///
+    /// For [`crate::transfer`], which hands a sheet over in bounded parts.
+    pub(crate) fn split_first(&mut self, n: usize) -> CellStore {
+        if n >= self.cells.len() {
+            return std::mem::take(self);
+        }
+        let Some(at) = self.cells.keys().nth(n).copied() else {
+            return std::mem::take(self);
+        };
+        let rest = self.cells.split_off(&at);
+        CellStore {
+            cells: std::mem::replace(&mut self.cells, rest),
+        }
+    }
+
+    /// The first and last populated addresses, row-major.
+    pub(crate) fn bounds(&self) -> Option<(CellRef, CellRef)> {
+        Some((*self.cells.keys().next()?, *self.cells.keys().next_back()?))
+    }
+
+    /// Move every cell of `other` into this store; a cell already here at the
+    /// same address is replaced.
+    pub(crate) fn absorb(&mut self, mut other: CellStore) {
+        self.cells.append(&mut other.cells);
+    }
+
     /// Iterate populated cells in deterministic row-major order.
     pub fn iter(&self) -> impl Iterator<Item = (CellRef, &Cell)> {
         self.cells.iter().map(|(r, c)| (*r, c))

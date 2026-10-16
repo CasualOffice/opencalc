@@ -324,7 +324,9 @@ const edit = (page, r, c, v) =>
 const observe = (page) => page.evaluate(() => {
   const vis = (s) => {
     const el = document.querySelector(s);
-    return el && !el.hidden && getComputedStyle(el).display !== "none" ? "shown" : "hidden";
+    // Has a size, too: the idle in-cell editor is rendered at zero size as the
+    // grid's keyboard (XL-FEAT-023), and is only *shown* once an edit opens.
+    return el && !el.hidden && getComputedStyle(el).display !== "none" && el.offsetWidth > 0 ? "shown" : "hidden";
   };
   const a = window.opencalcEditor.wasmApi();
   let cells = "";

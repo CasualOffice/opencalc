@@ -889,6 +889,53 @@ impl WorkbookSession {
         })
     }
 
+    /// A session over a workbook **another engine of this build opened**
+    /// (`PERF-16`): the editor opens a file in a Web Worker and installs what
+    /// the worker read, so the page's thread never runs the import.
+    ///
+    /// The result is the session [`open_as_with`](Self::open_as_with) would
+    /// have built from `source` in `format` under `config`, given that
+    /// `workbook` and `report` are what that open produced — which is why
+    /// nothing is recalculated here (the worker already did, under the same
+    /// configuration) and why the calculation mode is resolved from the file
+    /// exactly as that open resolves it. `source` is kept so an unedited save
+    /// still hands the opened bytes back unchanged (P1B-002). `None` for a
+    /// session that is a **copy** made only to be written (the editor's save in a
+    /// worker): it has no opened file to hand back, so every save runs the
+    /// writer for the format asked.
+    #[must_use]
+    pub fn from_opened(
+        workbook: Workbook,
+        format: SessionFormat,
+        report: CompatibilityReport,
+        source: Option<Vec<u8>>,
+        config: SessionConfig,
+    ) -> Self {
+        let calculation = match format {
+            SessionFormat::Xlsx | SessionFormat::Xlsm => config
+                .calculation
+                .unwrap_or_else(|| file_calculation_mode(&workbook)),
+            SessionFormat::Ods | SessionFormat::Delimited(_) => {
+                config.calculation.unwrap_or_default()
+            }
+        };
+        Self {
+            author: None,
+            calculation,
+            history: History::with_depth(config.undo_depth),
+            workbook,
+            report,
+            config,
+            stale: false,
+            applied: None,
+            recalc: Recalculator::new(),
+            views: PersonalViews::new(),
+            versions: VersionStore::new(),
+            format,
+            source,
+        }
+    }
+
     /// Open delimited text (CSV / TSV / PSV) by its separator byte.
     ///
     /// **The format is remembered**, so [`save`](Self::save) writes the same
@@ -986,6 +1033,24 @@ impl WorkbookSession {
         if self.calculation == CalculationMode::Automatic {
             recalculate(&mut self.workbook);
         } else {
+            self.stale = true;
+        }
+    }
+
+    /// [`set_environment`](Self::set_environment) for a workbook whose values
+    /// **another engine of this build already computed** under `environment`
+    /// (`PERF-16`: the editor's worker opens the file and sets the clock there,
+    /// so the full recalculation that settles the volatile functions runs off
+    /// the page's thread). Leaves the session exactly as `set_environment`
+    /// would have, without repeating the pass.
+    ///
+    /// Only sound when the values really were computed under `environment`
+    /// from this same workbook; anything else is what `set_environment` is
+    /// for.
+    pub fn adopt_environment(&mut self, environment: Environment) {
+        self.config.environment = environment;
+        apply_environment(&mut self.workbook, &self.config);
+        if self.calculation != CalculationMode::Automatic {
             self.stale = true;
         }
     }

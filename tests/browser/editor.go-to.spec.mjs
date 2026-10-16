@@ -46,7 +46,7 @@ test("a typed cell reference goes there", async ({ page }) => {
   await expect(modal(page)).toBeHidden();
   expect(await sel(page)).toEqual({ r0: 4, c0: 2, r1: 4, c1: 2 });
   await expect(page.locator("#cell-ref")).toHaveValue("C5");
-  expect(await page.evaluate(() => document.activeElement?.id)).toBe("grid");
+  expect(await page.evaluate(() => window.opencalcEditor.gridHasKeyboard())).toBe(true);
 });
 
 test("a range, an absolute reference and a defined name are all accepted", async ({ page }) => {
@@ -91,7 +91,11 @@ test("an invalid reference says so and keeps the dialog open", async ({ page }) 
     await reference(page).fill(bad);
     await page.keyboard.press("Enter");
     await expect(modal(page), `${bad} closed the dialog`).toBeVisible();
-    await expect(page.locator("#oc-goto-error")).toHaveText("Reference isn't valid.");
+    // Excel's message box over the dialog (XL-UX-168); OK returns to the box.
+    await expect(page.locator("#oc-msgbox-text")).toHaveText("Reference isn't valid.");
+    await page.keyboard.press("Enter");
+    await expect(page.locator("#oc-msgbox")).toBeHidden();
+    await expect(reference(page)).toBeFocused();
   }
   expect(await sel(page), "an invalid reference moved the selection").toEqual({ r0: 0, c0: 0, r1: 0, c1: 0 });
   // A refused Go To defines nothing either — the name box's habit of turning an

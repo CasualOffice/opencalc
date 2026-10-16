@@ -101,8 +101,12 @@ test("nothing found says so and keeps the selection", async ({ page }) => {
   await openSpecial(page);
   await pick(page, "Formulas");
   await ok(page);
-  await expect(page.locator("#oc-gts-error")).toHaveText("No cells were found.");
+  // Excel's message box over the dialog (XL-UX-168), not a line inside it.
+  await expect(page.locator("#oc-msgbox-text")).toHaveText("No cells were found.");
   expect(await ranges(page)).toEqual([box(0, 0, 2, 0)]);
+  await page.keyboard.press("Enter");
+  await expect(page.locator("#oc-msgbox")).toBeHidden();
+  await expect(page.locator("#oc-modal-title")).toHaveText("Go To Special");
 });
 
 test("Current region and Last cell", async ({ page }) => {

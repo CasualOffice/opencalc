@@ -32,6 +32,7 @@ import {
   colXAt,
   commandRules,
   confirmModal,
+  messageBox,
   ctx,
   draw,
   editHome,
@@ -1482,8 +1483,8 @@ export function safeLinkUrl(target) {
 function openLinkTarget(target) {
   const url = safeLinkUrl(target);
   if (!url) {
-    // Excel's words for a link it cannot open.
-    statusError("Cannot open the specified file.");
+    // Excel's words for a link it cannot open, in Excel's message box.
+    messageBox("Cannot open the specified file.");
     return false;
   }
   // `noopener` matters: without it the opened page can reach back through
@@ -1495,13 +1496,12 @@ function openLinkTarget(target) {
 /// Select a link's in-document place: a cell, a range or a defined name,
 /// resolved by the engine — the same resolver the Insert Hyperlink dialog
 /// validates with. A place that does not resolve leaves the selection where it
-/// is and says so, in Excel's words; there is no dialog here, so the status
-/// bar carries the message.
+/// is and says so, in Excel's words and Excel's message box (XL-UX-168).
 export function goToLinkLocation(text) {
   let place = null;
   try { place = JSON.parse(wasm.session_resolve_location(state.sheet, text)); } catch {}
   if (!place) {
-    statusError("Reference isn't valid.");
+    messageBox("Reference isn't valid.");
     return false;
   }
   if (place.sheet !== state.sheet) switchSheet(place.sheet);
@@ -1598,6 +1598,27 @@ export function doRedo() {
   }
   renderTabs();
   draw();
+}
+
+/// Park the idle IME host on the active cell (XL-FEAT-023).
+///
+/// While no edit is open the in-cell editor is still the grid's keyboard, at
+/// zero size (see `armImeHost`). Where it sits is where the operating system
+/// opens its candidate window for the first keystroke of a composition, so it
+/// sits where Excel's does: on the active cell. Two style writes, and only
+/// when the cell moved — `draw()` calls this every frame.
+export function placeImeHost() {
+  const m = mergeAt(state.sel.row, state.sel.col);
+  const row = m ? m.r0 : state.sel.row;
+  const col = m ? m.c0 : state.sel.col;
+  const x = m ? fscreenX(m.c0) : colXAt(col) ?? fscreenX(col);
+  const y = m ? fscreenY(m.r0) : rowYAt(row) ?? fscreenY(row);
+  const f = state.freeze || { fc: 0, fr: 0, bodyX0: HW, bodyY0: HH };
+  const z = state.zoom;
+  const l = Math.max(col < f.fc ? HW : f.bodyX0, x) * z + "px";
+  const t = Math.max(row < f.fr ? HH : f.bodyY0, y) * z + "px";
+  if (inline.style.left !== l) inline.style.left = l;
+  if (inline.style.top !== t) inline.style.top = t;
 }
 
 export function positionInline() {

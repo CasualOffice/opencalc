@@ -5,7 +5,8 @@
 // **Find and Replace** dialog with Find and Replace tabs, an **Options >>**
 // that reveals labelled controls (Within, Search, Look in, Match case, Match
 // entire cell contents), Find All with a results list, and messages about the
-// search shown in the dialog (docs/95 rule 8: inline, never a box over it).
+// search raised in Excel's message box over the dialog (docs/95 rule 8,
+// XL-UX-168), which hands the focus back to Find what.
 // The dialog is modeless, as Excel's is: the grid stays usable underneath.
 
 import { expect, test } from "@playwright/test";
@@ -29,7 +30,15 @@ async function boot(page) {
 const modal = (page) => page.locator("#oc-modal");
 const what = (page) => page.locator("#oc-fr-what");
 const withField = (page) => page.locator("#oc-fr-with");
-const msg = (page) => page.locator("#oc-fr-msg");
+/// Excel's message box says `text`; OK (Enter) dismisses it and the dialog,
+/// still open, has Find what focused again.
+async function said(page, text) {
+  await expect(page.locator("#oc-msgbox-text")).toHaveText(text);
+  await page.keyboard.press("Enter");
+  await expect(page.locator("#oc-msgbox")).toBeHidden();
+  await expect(page.locator("#oc-fr-what")).toBeFocused();
+}
+const NOT_FOUND = "We couldn't find what you were looking for. Click Options for more ways to search.";
 const btn = (page, name) => page.locator("#oc-modal-body").getByRole("button", { name, exact: true });
 const nameBox = (page) => page.locator("#cell-ref");
 const input = (page, r, c) => page.evaluate(([r, c]) => window.opencalcEditor.wasmApi().session_cell_input(0, r, c), [r, c]);
@@ -127,7 +136,7 @@ test("Look in Values finds what a formula shows, not what it says", async ({ pag
   await page.keyboard.press("Control+f");
   await what(page).fill("5");
   await btn(page, "Find All").click();
-  await expect(msg(page)).toHaveText("We couldn't find what you were looking for.");
+  await said(page, NOT_FOUND);
   await btn(page, "Options >>").click();
   await page.getByLabel("Look in:", { exact: true }).selectOption({ label: "Values" });
   await btn(page, "Find All").click();
@@ -153,15 +162,15 @@ test("Find All lists Book, Sheet, Name, Cell, Value and Formula, and a row selec
   await expect(modal(page)).toBeVisible();
 });
 
-test("nothing found is said inline and the dialog stays open with the text", async ({ page }) => {
+test("nothing found is said in a message box and the dialog stays open with the text", async ({ page }) => {
   await boot(page);
   await page.keyboard.press("Control+f");
   await what(page).fill("durian");
   await btn(page, "Find Next").click();
-  await expect(msg(page)).toHaveText("We couldn't find what you were looking for.");
+  await said(page, NOT_FOUND);
   await expect(modal(page)).toBeVisible();
   await expect(what(page)).toHaveValue("durian");
-  await expect(page.locator(".oc-modal-box")).toHaveCount(1);
+  await expect(page.locator(".oc-modal-box:visible")).toHaveCount(1);
 });
 
 test("Within: Workbook finds a match on another sheet and goes there", async ({ page }) => {
@@ -175,7 +184,7 @@ test("Within: Workbook finds a match on another sheet and goes there", async ({ 
   await page.keyboard.press("Control+f");
   await what(page).fill("kiwi");
   await btn(page, "Find Next").click();
-  await expect(msg(page)).toHaveText("We couldn't find what you were looking for.");
+  await said(page, NOT_FOUND);
   await btn(page, "Options >>").click();
   await page.getByLabel("Within:", { exact: true }).selectOption({ label: "Workbook" });
   await btn(page, "Find Next").click();
@@ -183,13 +192,14 @@ test("Within: Workbook finds a match on another sheet and goes there", async ({ 
   await expect(page.locator("#sheet-tabs .sheet-tab").nth(1)).toHaveClass(/active/);
 });
 
-test("Replace All reports inline and is one undo step", async ({ page }) => {
+test("Replace All reports in a message box and is one undo step", async ({ page }) => {
   await boot(page);
   await page.keyboard.press("Control+h");
   await what(page).fill("apple");
   await withField(page).fill("pear");
   await btn(page, "Replace All").click();
-  await expect(msg(page)).toHaveText("All done. We made 3 replacements.");
+  await expect(page.locator("#oc-msgbox")).toHaveAttribute("data-icon", "info");
+  await said(page, "All done. We made 3 replacements.");
   await expect(modal(page)).toBeVisible();
   expect(await input(page, 0, 0)).toBe("pear");
   expect(await input(page, 0, 2)).toBe("pear pie");
@@ -202,13 +212,13 @@ test("Replace All reports inline and is one undo step", async ({ page }) => {
   expect(await input(page, 2, 0)).toBe("pineapple");
 });
 
-test("Replace with nothing to replace says so inline", async ({ page }) => {
+test("Replace with nothing to replace says so in a message box", async ({ page }) => {
   await boot(page);
   await page.keyboard.press("Control+h");
   await what(page).fill("durian");
   await withField(page).fill("x");
   await btn(page, "Replace All").click();
-  await expect(msg(page)).toHaveText("We couldn't find anything to replace. Click Options for more ways to search.");
+  await said(page, "We couldn't find anything to replace. Click Options for more ways to search.");
 });
 
 test("Replace rewrites the active match and moves to the next", async ({ page }) => {
@@ -233,13 +243,13 @@ test("the dialog is modeless: the grid takes clicks while it is open", async ({ 
   await expect(nameBox(page)).not.toHaveValue("A1");
   await expect(modal(page)).toBeVisible();
   // Typing now goes to the grid, not the dialog.
-  expect(await page.evaluate(() => document.activeElement?.id)).toBe("grid");
+  expect(await page.evaluate(() => window.opencalcEditor.gridHasKeyboard())).toBe(true);
 });
 
 test("the title bar drags the dialog", async ({ page }) => {
   await boot(page);
   await page.keyboard.press("Control+f");
-  const box = page.locator(".oc-modal-box");
+  const box = page.locator("#oc-modal .oc-modal-box");
   const before = await box.boundingBox();
   const title = await page.locator("#oc-modal-title").boundingBox();
   await page.mouse.move(title.x + 20, title.y + 5);

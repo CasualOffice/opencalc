@@ -5,8 +5,8 @@
 // then a Goal Seek Status step reports it; OK keeps it, Cancel puts the input
 // back. The search must not edit the workbook trial by trial — no undo flood,
 // no collaboration traffic — so the answer is committed once, on OK, as one
-// undo step. Refusals are Excel's messages, shown in the dialog (docs/95
-// rule 8).
+// undo step. Refusals are Excel's messages, in Excel's message box over the
+// dialog (docs/95 rule 8, XL-UX-168).
 
 import { expect, test } from "@playwright/test";
 
@@ -116,16 +116,18 @@ for (const [why, set, to, change, message] of [
   ["By changing cell is not a reference", "B1", "2", "nowhere!!", "Reference is not valid."],
   ["a cell on another sheet", "B1", "2", "Sheet2!A1", "Reference must be on the active sheet."],
 ]) {
-  test(`refused inline when ${why}`, async ({ page }) => {
+  test(`refused in a message box when ${why}`, async ({ page }) => {
     await boot(page, SQUARE);
     await page.evaluate(() => window.opencalcEditor.wasmApi().session_add_sheet());
     await openGoalSeek(page);
     await fill(page, set, to, change);
-    await expect(page.locator("#oc-gs-error")).toHaveText(message);
+    await expect(page.locator("#oc-msgbox-text")).toHaveText(message);
+    await page.keyboard.press("Enter");
+    await expect(page.locator("#oc-msgbox")).toBeHidden();
     // Still the Goal Seek dialog, with what was typed, and nothing changed.
     await expect(title(page)).toHaveText("Goal Seek");
     await expect(setCell(page)).toHaveValue(set);
     expect(await input(page, 0, 0)).toBe("1");
-    expect(await page.locator(".oc-modal-box").count()).toBe(1);
+    expect(await page.locator(".oc-modal-box:visible").count()).toBe(1);
   });
 }

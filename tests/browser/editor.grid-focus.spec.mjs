@@ -27,7 +27,11 @@ const selection = (page) =>
 /// **The grid holds the keyboard as soon as the editor is up.**
 test("the grid has keyboard focus on load", async ({ page }) => {
   await boot(page);
-  expect(await focused(page)).toBe("CANVAS#grid");
+  // The grid's keyboard is the idle in-cell editor, not the canvas itself: a
+  // canvas is not a text-input client, and an input method cannot compose
+  // into it (XL-FEAT-023). What matters is that the grid holds the keys.
+  expect(await page.evaluate(() => window.opencalcEditor.gridHasKeyboard())).toBe(true);
+  expect(await focused(page)).toBe("TEXTAREA#inline-edit");
 });
 
 /// The consequence, stated as the user meets it: a shortcut works without

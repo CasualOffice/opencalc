@@ -4530,3 +4530,64 @@ fn typed_text_keeps_its_spaces_as_excel_does() {
     );
     assert_eq!(put(&mut s, 5, ""), "", "an empty entry still clears");
 }
+
+/// `PERF-16`: what the editor's worker produces, installed on the page, is the
+/// session the page's own open and clock would have left — values, report,
+/// format, calculation mode and the untouched-save guarantee.
+#[test]
+fn a_session_opened_elsewhere_is_the_session_opened_here() {
+    let mut s = WorkbookSession::with_sheet();
+    for (row, text) in [(0, "=NOW()"), (1, "=RAND()"), (2, "=A1+A2"), (3, "7")] {
+        let op = s.input_edit(0, CellRef::new(row, 0), text);
+        s.edit(op).unwrap();
+    }
+    let bytes = s.save_as(crate::SessionFormat::Xlsx).unwrap();
+    let env = Environment {
+        now: 46_000.25,
+        seed: 99,
+    };
+
+    // The page's own open, then the clock.
+    let mut here = WorkbookSession::open(bytes.clone()).unwrap();
+    here.set_environment(env);
+
+    // The worker's open and clock, then the page adopting both.
+    let mut worker = WorkbookSession::open(bytes.clone()).unwrap();
+    worker.set_environment(env);
+    // Across the transfer, as the editor carries it: the clock is not
+    // document state and does not cross.
+    let mut writer = casual_calc_model::transfer::TransferWriter::new(worker.workbook().clone());
+    let mut reader = casual_calc_model::transfer::TransferReader::new(Default::default());
+    while let Some(part) = writer.next_part(2).unwrap() {
+        reader.push(&part).unwrap();
+    }
+    let mut there = WorkbookSession::from_opened(
+        reader.finish().unwrap(),
+        worker.format(),
+        worker.compatibility_report().clone(),
+        Some(bytes.clone()),
+        SessionConfig::new(),
+    );
+    there.adopt_environment(env);
+
+    for row in 0..4 {
+        assert_eq!(
+            there.workbook().sheets[0].cells.get(CellRef::new(row, 0)),
+            here.workbook().sheets[0].cells.get(CellRef::new(row, 0)),
+            "row {row}"
+        );
+    }
+    assert_eq!(there.workbook().volatile_now, here.workbook().volatile_now);
+    assert_eq!(there.calculation_mode(), here.calculation_mode());
+    assert_eq!(there.needs_recalculation(), here.needs_recalculation());
+    assert_eq!(
+        there.compatibility_report().entries(),
+        here.compatibility_report().entries()
+    );
+    assert_eq!(there.save().unwrap(), here.save().unwrap());
+    assert_eq!(
+        there.save().unwrap(),
+        bytes,
+        "an untouched save is the file"
+    );
+}

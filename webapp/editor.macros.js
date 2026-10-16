@@ -47,7 +47,7 @@ const START_LIMIT_MS = 30_000;
 /// The engine compiled once and handed to every run's worker, so a run pays an
 /// instantiation rather than a compile of the whole binary.
 let compiled = null;
-function engineModule() {
+export function engineModule() {
   compiled ??= WebAssembly.compileStreaming(
     fetch(new URL(`./pkg/casual_calc_wasm_bg.wasm?b=${BUILD}`, import.meta.url)),
   ).catch((e) => {

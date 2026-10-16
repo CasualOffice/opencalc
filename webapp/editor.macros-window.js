@@ -45,7 +45,8 @@ const INDENT = "    ";
 
 /// Selection and scroll survive closing and reopening, as the Name Manager's do
 /// — which is what lets Delete close the window for its confirmation and come
-/// back to the same place (docs/95 rule 8: no message box over a dialog).
+/// back to the same place. Excel asks over the dialog instead; that is a
+/// difference still to convert (XL-UX-169's audit), not a rule.
 const mwState = { selected: null };
 
 function library() {
@@ -404,8 +405,8 @@ export function openMacrosWindow() {
     const m = selected();
     if (!m) return;
     commitSource();
-    // Closed for the question and reopened after it: no message box over a
-    // dialog (docs/95 rule 8), the Name Manager's pattern.
+    // Closed for the question and reopened after it, the Name Manager's
+    // pattern. Excel asks over the dialog; still to convert (XL-UX-169).
     frame.close();
     const what = m.kind === "function" ? "custom function source" : "macro";
     confirmModal("Macros", `Delete the ${what} "${m.name}"? This can be undone with Undo.`, "Delete").then((yes) => {

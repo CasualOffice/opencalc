@@ -60,6 +60,7 @@ mod sheet;
 mod special;
 mod structural;
 mod style;
+mod transfer;
 mod vba;
 mod versions;
 mod view;
@@ -79,6 +80,7 @@ pub use sheet::*;
 pub use special::*;
 pub use structural::*;
 pub use style::*;
+pub use transfer::*;
 pub use view::*;
 
 thread_local! {
