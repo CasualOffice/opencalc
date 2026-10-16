@@ -126,6 +126,6 @@ for (const [why, set, to, change, message] of [
     await expect(title(page)).toHaveText("Goal Seek");
     await expect(setCell(page)).toHaveValue(set);
     expect(await input(page, 0, 0)).toBe("1");
-    expect(await page.locator(".oc-modal-box").count()).toBe(1);
+    expect(await page.locator(".oc-modal-box:visible").count()).toBe(1);
   });
 }

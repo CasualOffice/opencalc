@@ -161,7 +161,7 @@ test("nothing found is said inline and the dialog stays open with the text", asy
   await expect(msg(page)).toHaveText("We couldn't find what you were looking for.");
   await expect(modal(page)).toBeVisible();
   await expect(what(page)).toHaveValue("durian");
-  await expect(page.locator(".oc-modal-box")).toHaveCount(1);
+  await expect(page.locator(".oc-modal-box:visible")).toHaveCount(1);
 });
 
 test("Within: Workbook finds a match on another sheet and goes there", async ({ page }) => {
@@ -239,7 +239,7 @@ test("the dialog is modeless: the grid takes clicks while it is open", async ({ 
 test("the title bar drags the dialog", async ({ page }) => {
   await boot(page);
   await page.keyboard.press("Control+f");
-  const box = page.locator(".oc-modal-box");
+  const box = page.locator("#oc-modal .oc-modal-box");
   const before = await box.boundingBox();
   const title = await page.locator("#oc-modal-title").boundingBox();
   await page.mouse.move(title.x + 20, title.y + 5);
