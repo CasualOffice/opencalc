@@ -46,7 +46,7 @@ test("a typed cell reference goes there", async ({ page }) => {
   await expect(modal(page)).toBeHidden();
   expect(await sel(page)).toEqual({ r0: 4, c0: 2, r1: 4, c1: 2 });
   await expect(page.locator("#cell-ref")).toHaveValue("C5");
-  expect(await page.evaluate(() => document.activeElement?.id)).toBe("grid");
+  expect(await page.evaluate(() => window.opencalcEditor.gridHasKeyboard())).toBe(true);
 });
 
 test("a range, an absolute reference and a defined name are all accepted", async ({ page }) => {

@@ -123,5 +123,5 @@ test("Escape closes it and gives the grid the keyboard back", async ({ page }) =
   await expect(modal(page)).toBeVisible();
   await page.keyboard.press("Escape");
   await expect(modal(page)).toBeHidden();
-  expect(await page.evaluate(() => document.activeElement?.id)).toBe("grid");
+  expect(await page.evaluate(() => window.opencalcEditor.gridHasKeyboard())).toBe(true);
 });

@@ -1445,6 +1445,9 @@ textarea.panel-field { resize: vertical; min-height: 68px; font-family: inherit;
    which would ring the whole grid every time you click a cell. The ring is for
    keyboard users, so it is gated on the last input being a key. */
 :root[data-kbnav] #grid:focus, :host([data-kbnav]) #grid:focus { outline: 2px solid var(--oc-accent-color); outline-offset: -2px; }
+/* The same ring while the grid's keyboard is the IME host (XL-FEAT-023): the
+   canvas does not have DOM focus then, the grid still has the keys. */
+:root[data-kbnav] #grid.oc-keys, :host([data-kbnav]) #grid.oc-keys { outline: 2px solid var(--oc-accent-color); outline-offset: -2px; }
 /* Announcer for assistive tech — present in the a11y tree, not on screen. */
 .sr-only {
   position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0;
@@ -1463,6 +1466,14 @@ textarea.panel-field { resize: vertical; min-height: 68px; font-family: inherit;
   border: 2px solid var(--oc-accent-color); padding: 1px 4px; margin: 0;
   font-family: inherit; font-size: 13px; background: var(--oc-background-color); color: var(--oc-text-color); outline: none;
   resize: none; overflow: hidden; white-space: pre; line-height: 1.35;
+}
+/* Idle, the in-cell editor is the grid's keyboard so an input method can
+   compose into it (XL-FEAT-023): rendered (an IME will not compose into a
+   `display: none` element), focusable, and zero-sized on the active cell.
+   `beginEdit` drops the class and the editor takes the cell's size. */
+.inline-edit.oc-ime-host {
+  width: 0 !important; height: 0 !important; padding: 0; border: 0;
+  opacity: 0; caret-color: transparent; pointer-events: none;
 }
 
 /* Named cell-style gallery: each chip previews the style it applies. */
