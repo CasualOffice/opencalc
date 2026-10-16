@@ -1861,6 +1861,7 @@ fn parse_error(token: &str) -> Option<ErrorValue> {
         "#NUM!" => ErrorValue::Num,
         "#SPILL!" => ErrorValue::Spill,
         "#CALC!" => ErrorValue::Calc,
+        "#BUSY!" => ErrorValue::Busy,
         _ => return None,
     })
 }

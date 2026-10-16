@@ -974,6 +974,8 @@ fn error_from_token(token: &str) -> ErrorValue {
         "#NULL!" => ErrorValue::Null,
         "#NUM!" => ErrorValue::Num,
         "#SPILL!" => ErrorValue::Spill,
+        "#CALC!" => ErrorValue::Calc,
+        "#BUSY!" => ErrorValue::Busy,
         _ => ErrorValue::Value,
     }
 }

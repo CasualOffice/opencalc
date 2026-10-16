@@ -16,6 +16,7 @@ mod author;
 mod cancel;
 mod cell;
 mod chart;
+mod custom_functions;
 mod defined_name;
 mod error;
 mod ids;
@@ -34,6 +35,12 @@ pub use author::{Author, AuthorId, AuthorTable};
 pub use cancel::{CANCEL_CHECK_INTERVAL, Cancel, CancelFlag, Never, should_check};
 pub use cell::{Cell, CellFlags};
 pub use chart::{ChartGrouping, ChartKind, ChartSeries, ChartView, Emu, ImageView};
+pub use custom_functions::{
+    CustomCallKey, CustomFunctionError, CustomFunctionRuntime, CustomFunctionSpec, CustomParam,
+    CustomValue, MAX_CUSTOM_ARG_CELLS, MAX_CUSTOM_FUNCTIONS, MAX_CUSTOM_PARAMS, MAX_CUSTOM_RESULTS,
+    MAX_CUSTOM_TEXT_CHARS, MAX_PENDING_CUSTOM_CALLS, PendingCustomCall,
+    is_valid_custom_function_name,
+};
 pub use defined_name::{DefinedName, NameAttributes};
 pub use error::ModelError;
 pub use ids::{

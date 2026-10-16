@@ -8,6 +8,7 @@ use casual_calc_formula::stored::{ABSOLUTE, Origin};
 use serde::{Deserialize, Serialize};
 
 use crate::author::AuthorTable;
+use crate::custom_functions::CustomFunctionRuntime;
 use crate::defined_name::DefinedName;
 use crate::error::ModelError;
 use crate::ids::{FormulaHandle, Id, StringId, StyleId};
@@ -423,6 +424,12 @@ pub struct Workbook {
     /// and `SCHEMA_VERSION` does not move.
     #[serde(default, skip_serializing_if = "MacroLibrary::is_empty")]
     pub macros: MacroLibrary,
+    /// The custom functions those sources registered and the answers they
+    /// gave (`MACRO-04`). Environment, like [`Self::volatile_now`]: supplied by
+    /// the host, **never serialised**, and ignored by equality — see
+    /// [`CustomFunctionRuntime`].
+    #[serde(skip)]
+    pub custom: CustomFunctionRuntime,
 }
 
 /// A named cell style: OOXML's `<cellStyle>` entry paired with the
@@ -570,6 +577,7 @@ impl Workbook {
             cell_styles: Vec::new(),
             date1904: false,
             macros: MacroLibrary::default(),
+            custom: CustomFunctionRuntime::default(),
         }
     }
 

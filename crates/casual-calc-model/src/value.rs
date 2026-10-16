@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use crate::ids::StringId;
 
 /// A spreadsheet error value — the calc-visible errors a cell can hold.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ErrorValue {
     /// `#REF!`
     Ref,
@@ -34,6 +34,11 @@ pub enum ErrorValue {
     /// shows the text, which is what it would do for any error it does not
     /// know.
     Calc,
+    /// `#BUSY!` — a custom function (`MACRO-04`) whose answer has not arrived
+    /// yet. Excel's and ONLYOFFICE's value for a call still computing
+    /// (ONLYOFFICE `sdkjs` `cErrorType.busy`). A file saved while a call is in
+    /// flight carries it; a reader that predates it shows the text.
+    Busy,
 }
 
 impl fmt::Display for ErrorValue {
@@ -48,6 +53,7 @@ impl fmt::Display for ErrorValue {
             ErrorValue::Num => "#NUM!",
             ErrorValue::Spill => "#SPILL!",
             ErrorValue::Calc => "#CALC!",
+            ErrorValue::Busy => "#BUSY!",
         };
         f.write_str(token)
     }

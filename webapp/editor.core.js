@@ -1855,6 +1855,7 @@ const ERROR_HELP = {
   "#NULL!": "Two ranges that were intersected don't overlap.",
   "#SPILL!": "A result needs more room than is free.",
   "#CALC!": "The calculation produced nothing — a filter that matched no rows, usually.",
+  "#BUSY!": "A custom function is still computing; the answer appears when it arrives.",
 };
 export let dragPos = null; // latest pointer {px,py} during a selection/fill drag
 let autoRaf = 0; // rAF handle for edge auto-scroll while dragging
