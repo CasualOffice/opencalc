@@ -47,6 +47,7 @@ import {
   qsa,
   readColors,
   rebuildGrowth,
+  syncGrowth,
   refMirrors,
   refSpans,
   rowHAt,
@@ -191,12 +192,13 @@ export function measureRowHeight(it, colWidth) {
       .flatMap((seg) => wrapLines({ ...it, t: seg }, colWidth - 8));
     return lines.length * cellLineH(it) + 6;
   }
-  // Newlines make a cell tall even without wrap, which this did not account
-  // for: `autofitRow` had its own copy of this arithmetic that did, so the two
-  // disagreed about the same cell — and the copy was the one missing rotation.
-  // Both cases live here now.
-  const hard = String(it.t).split("\n").length;
-  if (hard > 1) return hard * cellLineH(it) + 6;
+  // A line break without Wrap Text does not make a row taller: Excel shows such
+  // a cell on one line (the break draws as nothing) and keeps the row's height.
+  // A break shows as a break only when Wrap Text is on — which is why Alt+Enter
+  // turns it on — and that case is the `it.w` branch above. Counting it here
+  // grew rows the sheet-wide growth map never counted, so a row's height
+  // depended on whether this cell was on screen (the owner's recording,
+  // 2026-10-17).
   // A tall font grows its row by the font's own box plus Excel's leading; at the
   // 11 pt default this comes to exactly the default row height, so an ordinary
   // styled row is left alone instead of being inflated by 25%.
@@ -205,7 +207,7 @@ export function measureRowHeight(it, colWidth) {
 }
 
 export function growthBefore(row) {
-  if (growthDirty) rebuildGrowth();
+  syncGrowth();
   if (!growthRows.length) return 0;
   // How many grown rows sit strictly above `row`.
   let lo = 0, hi = growthRows.length;

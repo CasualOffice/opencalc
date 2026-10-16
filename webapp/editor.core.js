@@ -2005,8 +2005,32 @@ export let growthRows = [];   // ascending row indices that grow
 export let growthPrefix = [0];
 export let growthTotal = 0;
 export let growthDirty = true;
+// Row → growth in px over `growthBase`, for every candidate row the map covers.
+// The single answer to "how tall is this row": `measure()` draws rows from it
+// and the offsets above are summed from it, so the drawn grid and every
+// position derived from offsets cannot disagree — and since it is built from the
+// whole sheet, never from the window, scrolling cannot change a row's height.
+export let growthByRow = new Map();
+export let growthBase = 20;
+// Rows at or before this index are fully measured. The engine lists candidates
+// in row order and stops at a cap, so a truncated list covers every row before
+// the one it stopped in; past that, `measure()` falls back to the window.
+export let growthCoveredTo = Infinity;
+// The engine's edit counter and sheet when the map was built. Any edit — the
+// editor's own, an undo, a co-editor's, a macro's or an agent's — moves the
+// counter, so the map cannot go stale because some path forgot to say so.
+let growthKey = "";
 
 export function invalidateGrowth() { growthDirty = true; }
+
+/// Rebuild the growth map if the document, sheet or anything else it depends on
+/// has changed since it was built.
+export function syncGrowth() {
+  let key = "";
+  try { key = `${state.sheet}|${wasm ? wasm.session_edits_applied() : 0}`; } catch { /* no session yet */ }
+  if (key !== growthKey) { growthKey = key; growthDirty = true; }
+  if (growthDirty) rebuildGrowth();
+}
 
 // Zoom changes the metrics without changing any memo key, so the memo has to go.
 export function clearHeightMemo() { heightMemo = new Map(); }
@@ -2016,10 +2040,13 @@ export function rebuildGrowth() {
   growthRows = [];
   growthPrefix = [0];
   growthTotal = 0;
+  growthByRow = new Map();
+  growthCoveredTo = Infinity;
   if (!wasm) return;
   let payload;
   try { payload = JSON.parse(wasm.session_autofit_candidates(state.sheet)); } catch { return; }
   const base = payload.default || 20;
+  growthBase = base;
   const extra = new Map();
   // Column widths are looked up once per distinct column, not once per cell: a
   // wrapped column of ten thousand rows is one lookup, not ten thousand.
@@ -2033,6 +2060,11 @@ export function rebuildGrowth() {
     if (needed === null || needed <= base) continue;
     const grow = needed - base;
     if (grow > (extra.get(it.r) || 0)) extra.set(it.r, grow);
+  }
+  growthByRow = extra;
+  if (payload.truncated) {
+    const cells = payload.cells || [];
+    growthCoveredTo = cells.length ? cells[cells.length - 1].r - 1 : -1;
   }
   growthRows = [...extra.keys()].sort((a, b) => a - b);
   let acc = 0;
@@ -2276,14 +2308,27 @@ function measure() {
     flags.forEach((p, k) => { if (p) pinnedRows.add(geo.rowIdx[i] + k); });
     i = j + 1;
   }
-  for (const it of geoItems) {
-    if (!it.t) continue;
-    const ci = geo.colOf.get(it.c), ri = geo.rowOf.get(it.r);
-    if (ci === undefined || ri === undefined) continue;
+  // Heights come from the sheet-wide growth map, never from the cells on
+  // screen: a row's height must not depend on which columns are in view.
+  syncGrowth();
+  for (let i = 0; i < geo.rowIdx.length; i++) {
+    const row = geo.rowIdx[i];
     // A hidden row is 0 px — growing it would make it reappear.
-    if (geo.rowH[ri] <= 0 || pinnedRows.has(it.r)) continue;
-    const needed = neededRowHeight(it, geo.colW[ci]);
-    if (needed !== null && needed > geo.rowH[ri]) geo.rowH[ri] = needed;
+    if (geo.rowH[i] <= 0 || pinnedRows.has(row) || row > growthCoveredTo) continue;
+    const grow = growthByRow.get(row);
+    if (grow && growthBase + grow > geo.rowH[i]) geo.rowH[i] = growthBase + grow;
+  }
+  // Past a truncated map (more candidates than the engine lists — the status
+  // bar already says scrolling may drift there) the window is all there is.
+  if (growthCoveredTo !== Infinity) {
+    for (const it of geoItems) {
+      if (!it.t || it.r <= growthCoveredTo) continue;
+      const ci = geo.colOf.get(it.c), ri = geo.rowOf.get(it.r);
+      if (ci === undefined || ri === undefined) continue;
+      if (geo.rowH[ri] <= 0 || pinnedRows.has(it.r)) continue;
+      const needed = neededRowHeight(it, geo.colW[ci]);
+      if (needed !== null && needed > geo.rowH[ri]) geo.rowH[ri] = needed;
+    }
   }
 
   // Positions: frozen lines from HW/HH, scrolling lines from bodyX0/Y0 − sub.
