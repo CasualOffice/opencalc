@@ -27,7 +27,7 @@
 //! The reader is held to [`SnapshotLimits`] — bytes and populated cells —
 //! counted as parts arrive, so an oversized transfer is refused before it has
 //! been read, not after. Every cell is checked against the workbook it joins
-//! with [`Workbook::validate_cell`], the rule [`Workbook::validate`] applies,
+//! with `Workbook::validate_cell`, the rule [`Workbook::validate`] applies,
 //! and the rest of `validate` runs at [`TransferReader::finish`]. Parts must
 //! arrive in order and the last one states how many came before it, so a
 //! truncated transfer is refused rather than installed short.
