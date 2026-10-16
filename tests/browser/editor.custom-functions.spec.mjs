@@ -166,7 +166,9 @@ test("a function that never returns is cut off with #VALUE! and the editor stays
   await expect.poll(() => shown(page, 1, 0), { timeout: 10_000 }).toBe("8");
 });
 
-test("a function that reaches for the network is refused by the sandbox", async ({ page }) => {
+// The bare name `fetch` is the page's stub, which asks the person first
+// (`MACRO-13`, `editor.macro-network.spec.mjs`); the global stays refused.
+test("a function that reaches for the global fetch is refused by the sandbox", async ({ page }) => {
   await boot(page);
   await defineFunctions(page, [
     "/**",
@@ -174,7 +176,7 @@ test("a function that reaches for the network is refused by the sandbox", async 
     " * @customfunction",
     " * @returns {any}",
     " */",
-    "async function NET() { const r = await fetch('https://example.com/'); return r.status; }",
+    "async function NET() { const r = await self.fetch('https://example.com/'); return r.status; }",
     "Api.AddCustomFunction(NET);",
   ].join("\n"));
   await typeAt(page, 0, 0, "=NET()");

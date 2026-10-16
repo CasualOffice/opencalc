@@ -228,7 +228,7 @@ export const FILE_RAIL = [
 ];
 
 /// Commands the Options page uses (for the completeness gate).
-export const OPTIONS_COMMANDS = ["view.theme.auto", "view.theme.light", "view.theme.dark", "tools.settings"];
+export const OPTIONS_COMMANDS = ["view.theme.auto", "view.theme.light", "view.theme.dark", "file.trust-center", "tools.settings"];
 
 /// Every command id the model names, for the registry-completeness gate.
 export function modelCommandIds() {

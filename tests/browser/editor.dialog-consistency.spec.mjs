@@ -24,6 +24,8 @@ const DIALOGS = [
   "data.goal-seek",
   // The Macros window (MACRO-02).
   "view.macros",
+  // File ▸ Options ▸ Trust Center (MACRO-13).
+  "file.trust-center",
 ];
 const PANELS = ["data.data-validation", "file.page-setup", "insert.note", "file.version-history", "insert.pivottable"];
 
@@ -32,7 +34,7 @@ const measure = (page, root) => page.evaluate((root) => {
   const r = box.getBoundingClientRect();
   const buttons = [...box.querySelectorAll(".oc-confirm-actions button, .panel-actions button, .hist-actions button")]
     .filter((b) => b.offsetParent);
-  const close = document.querySelector(root === ".oc-modal-box" ? "#oc-modal-x" : "#side-panel-close");
+  const close = document.querySelector(root === "#oc-modal .oc-modal-box" ? "#oc-modal-x" : "#side-panel-close");
   return {
     width: r.width,
     radius: getComputedStyle(box).borderTopLeftRadius,
@@ -48,7 +50,7 @@ for (const id of DIALOGS) {
     await boot(page);
     await page.evaluate((id) => window.opencalcEditor.runCommand(id), id);
     await expect(page.locator("#oc-modal")).toBeVisible();
-    const m = await measure(page, ".oc-modal-box");
+    const m = await measure(page, "#oc-modal .oc-modal-box");
     expect(m.radius).toBe("8px");
     expect(m.width, "narrower than the shared minimum").toBeGreaterThanOrEqual(359);
     expect(m.width, "wider than the shared maximum").toBeLessThanOrEqual(561);
@@ -74,7 +76,7 @@ test("dialog Edit Hyperlink uses the shared frame", async ({ page }) => {
     ed.runCommand("insert.hyperlink");
   });
   await expect(page.locator("#oc-modal-title")).toHaveText("Edit Hyperlink");
-  const m = await measure(page, ".oc-modal-box");
+  const m = await measure(page, "#oc-modal .oc-modal-box");
   expect(m.radius).toBe("8px");
   expect(m.width).toBeGreaterThanOrEqual(359);
   expect(m.width).toBeLessThanOrEqual(561);
@@ -106,7 +108,7 @@ test("dialog developer.visual-basic uses the shared frame", async ({ page }) => 
   expect(await page.evaluate((b) => window.opencalcEditor.openBytes(new Uint8Array(b), "vba-hello.xlsm"), bytes)).toBe(true);
   await page.evaluate(() => window.opencalcEditor.runCommand("developer.visual-basic"));
   await expect(page.locator("#oc-modal")).toBeVisible();
-  const m = await measure(page, ".oc-modal-box");
+  const m = await measure(page, "#oc-modal .oc-modal-box");
   expect(m.radius).toBe("8px");
   expect(m.width, "narrower than the shared minimum").toBeGreaterThanOrEqual(359);
   expect(m.width, "wider than the shared maximum").toBeLessThanOrEqual(561);

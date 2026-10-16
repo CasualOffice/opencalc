@@ -34,6 +34,7 @@ import {
   wasm,
 } from "./editor.core.js";
 import { excelSerialNow, syncVolatileClock } from "./editor.selection.js";
+import { CallClock, serveNetwork } from "./editor.network.js";
 
 /// docs/99 §5: a time limit per run. Generous for anything a person would
 /// write; a loop that never ends is stopped well before the tab feels hung.
@@ -60,15 +61,19 @@ let running = false;
 
 /// The worker's half: run `source` in a fresh sandbox and resolve with what
 /// it asked for. Never touches the workbook.
-function runInWorker(source, { timeLimitMs, maxOps }) {
+function runInWorker(source, { timeLimitMs, maxOps, name, guid }) {
   return new Promise((resolve) => {
     let worker;
     let timer = null;
+    let clock = null;
+    let stopNetwork = null;
     let settled = false;
     const finish = (result) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      clock?.stop();
+      try { stopNetwork?.(); } catch {}
       try { worker?.terminate(); } catch {}
       resolve(result);
     };
@@ -94,11 +99,23 @@ function runInWorker(source, { timeLimitMs, maxOps }) {
         e.preventDefault?.();
         fail("MacroError", e.message || "the macro worker failed");
       };
+      // What the macro calls `fetch` lands here (`MACRO-13`, docs/99 §5a).
+      const label = String(name || "Macro");
+      stopNetwork = serveNetwork(worker, {
+        kind: "macro",
+        guid: String(guid ?? ""),
+        sources: [{ guid: String(guid ?? ""), name: label, source }],
+        label: (asker) => (asker === "macro" ? (label.length > 120 ? `${label.slice(0, 117)}…` : label) : null),
+        clock: () => clock,
+      });
       worker.onmessage = (ev) => {
         const m = ev.data || {};
         if (m.type === "started") {
           clearTimeout(timer);
-          timer = setTimeout(() => fail("TimeLimitExceeded", `the macro ran longer than ${timeLimitMs} ms and was stopped`), timeLimitMs);
+          // Stopped while the macro waits on the page for a request: the
+          // person answering the Security Notice is not the macro running.
+          clock = new CallClock(() => fail("TimeLimitExceeded", `the macro ran longer than ${timeLimitMs} ms and was stopped`));
+          clock.arm(timeLimitMs);
         } else if (m.type === "done") {
           finish(m);
         }
@@ -195,7 +212,7 @@ export async function runMacro(source, opts = {}) {
   if (readOnly) return { ok: false, error: { name: "ReadOnly", message: "ReadOnly: this workbook is open read-only" }, operations: [] };
   running = true;
   try {
-    const res = await runInWorker(String(source ?? ""), { timeLimitMs, maxOps });
+    const res = await runInWorker(String(source ?? ""), { timeLimitMs, maxOps, name: opts.name, guid: opts.guid });
     if (!res.ok) return { ok: false, error: res.error, operations: [] };
     if (!validOperations(res.operations, maxOps)) {
       return { ok: false, error: { name: "MacroError", message: "MacroError: the macro returned an invalid operation list" }, operations: [] };
