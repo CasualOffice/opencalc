@@ -2822,6 +2822,99 @@ fn a_new_error_value_is_a_protocol_change() {
     );
 }
 
+/// **A formula crosses the wire as its tree, so a new `Expr` variant is a
+/// protocol change** (`XL-FEAT-014`, `XL-FEAT-017`). `WireOperation` carries
+/// every formula an operation refers to by value, and `Expr` is a plain
+/// externally-tagged enum: a peer that has never heard of a tag refuses the
+/// whole batch. The tag set is pinned against the version that introduced it,
+/// and `tag` is an exhaustive match so a new variant does not compile until it
+/// is listed here — which is when this test asks for the bump.
+#[test]
+fn a_new_formula_variant_is_a_protocol_change() {
+    use casual_calc_formula::Expr;
+    fn tag(e: &Expr) -> &'static str {
+        match e {
+            Expr::Number(_) => "number",
+            Expr::Bool(_) => "bool",
+            Expr::Text(_) => "text",
+            Expr::Error(_) => "error",
+            Expr::Reference(_) => "reference",
+            Expr::Range(..) => "range",
+            Expr::Name(_) => "name",
+            Expr::Call { .. } => "call",
+            Expr::Empty => "empty",
+            Expr::Raw(_) => "raw",
+            Expr::StructuredRef { .. } => "structuredRef",
+            Expr::Unary { .. } => "unary",
+            Expr::Binary { .. } => "binary",
+            Expr::Function { .. } => "function",
+            Expr::Array(_) => "array",
+        }
+    }
+    let parsed = |text: &str| casual_calc_formula::parse(text).expect("parses");
+    let samples = [
+        parsed("1"),
+        parsed("TRUE"),
+        parsed("\"a\""),
+        parsed("#N/A"),
+        parsed("A1"),
+        parsed("A1:B2"),
+        parsed("Rate"),
+        parsed("LAMBDA(x,x)(1)"),
+        Expr::Empty,
+        Expr::Raw("Sheet1!$1:".to_owned()),
+        parsed("Sales[Amount]"),
+        parsed("-A1"),
+        parsed("1+1"),
+        parsed("SUM(1)"),
+        parsed("{1,2;3,4}"),
+    ];
+    let mut tags: Vec<&str> = Vec::new();
+    for expr in &samples {
+        let wire = serde_json::to_value(expr).expect("serialises");
+        let on_wire = match &wire {
+            serde_json::Value::String(s) => s.clone(),
+            serde_json::Value::Object(map) => map.keys().next().expect("one tag").clone(),
+            other => panic!("unexpected encoding {other}"),
+        };
+        assert_eq!(on_wire, tag(expr), "the wire tag of {expr:?}");
+        tags.push(tag(expr));
+    }
+    tags.sort_unstable();
+    tags.dedup();
+    assert_eq!(
+        tags,
+        [
+            "array",
+            "binary",
+            "bool",
+            "call",
+            "empty",
+            "error",
+            "function",
+            "name",
+            "number",
+            "range",
+            "raw",
+            "reference",
+            "structuredRef",
+            "text",
+            "unary"
+        ],
+        "the formula variants that cross the wire have changed: move PROTOCOL_VERSION \
+         (currently {}) and update this list.",
+        crate::protocol::PROTOCOL_VERSION,
+    );
+    #[allow(clippy::assertions_on_constants)]
+    let moved = crate::protocol::PROTOCOL_VERSION > 11;
+    assert!(
+        moved,
+        "Expr gained `array`, a tag a protocol-11 peer cannot read. Move PROTOCOL_VERSION \
+         (currently {}) so the mismatch is refused at the handshake.",
+        crate::protocol::PROTOCOL_VERSION,
+    );
+}
+
 /// `SetMacros` applies, inverts to the previous library (so undo travels as an
 /// ordinary edit), and crosses the wire whole.
 #[test]

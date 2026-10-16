@@ -515,8 +515,9 @@ fn collect_precedents(
         // recalculate on any change rather than track a dependency that cannot
         // be derived. Conservative, never stale.
         Expr::Raw(_) => *uses_name = true,
-        // Nothing there, so nothing to depend on.
-        Expr::Empty => {}
+        // Nothing there, so nothing to depend on — and an array constant holds
+        // constants only.
+        Expr::Empty | Expr::Array(_) => {}
         Expr::Call { callee, args } => {
             collect_precedents(
                 callee, origin, ctx_sheet, workbook, on_cell, on_range, uses_name,

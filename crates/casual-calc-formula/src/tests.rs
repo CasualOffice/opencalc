@@ -602,3 +602,68 @@ fn first_arg(expr: &Expr) -> &Expr {
         other => other,
     }
 }
+
+/// Array constants (XL-FEAT-014): `,` between columns, `;` between rows, and
+/// only constants inside — numbers (a leading `-` allowed), text, logicals and
+/// error values. Excel: "Use array constants in array formulas".
+#[test]
+fn array_constants_parse_and_print_as_typed() {
+    for text in [
+        "{1,2,3}",
+        "{1;2}",
+        "{1,2;3,4}",
+        "{\"a\",TRUE,#N/A,-1.5}",
+        "{-1,0.25;1E+20,FALSE}",
+        "SUM(COUNTIF(E1:E5,{\"a\",\"b\"}))",
+        "CHOOSE({1,2},A1,B1)",
+        "{1,2}+{10;20}",
+        "{\"say \"\"hi\"\"\"}",
+    ] {
+        let expr = parse(text).unwrap_or_else(|e| panic!("{text}: {e}"));
+        let again = parse(&expr.to_string()).unwrap_or_else(|e| panic!("reparse {text}: {e}"));
+        assert_eq!(expr, again, "{text}: round trip");
+    }
+    // What the formula bar shows is what was typed (numbers print as Rust
+    // prints them, so `1E+20` is the only spelling not kept).
+    for text in ["{1,2,3}", "{1;2}", "{1,2;3,4}", "{\"a\",TRUE,#N/A,-1.5}"] {
+        assert_eq!(parse(text).unwrap().to_string(), text);
+    }
+    assert_eq!(parse("{ 1 , 2 ; 3 , 4 }").unwrap().to_string(), "{1,2;3,4}");
+    assert_eq!(parse("{true,false}").unwrap().to_string(), "{TRUE,FALSE}");
+}
+
+/// Excel refuses anything in a constant that is not itself a constant, a
+/// ragged constant, and a nested one.
+#[test]
+fn array_constants_refuse_what_excel_refuses() {
+    for text in [
+        "{}", "{A1}", "{A1:B2}", "{1+2}", "{SUM(1)}", "{(1)}", "{10%}", "{1,,2}", "{1,}",
+        "{1,2;3}", "{{1}}", "{1", "{--1}", "{-\"a\"}", "{Name}", "1;2", "}",
+    ] {
+        assert!(parse(text).is_err(), "{text} parsed: {:?}", parse(text));
+    }
+}
+
+/// A constant is untrusted input: its size is capped at parse time, and
+/// parsing one is linear — no quadratic re-scan per element.
+#[test]
+fn an_array_constant_is_bounded() {
+    let at_cap = format!(
+        "{{{}}}",
+        vec!["1"; crate::parse::MAX_ARRAY_CONSTANT].join(",")
+    );
+    assert!(parse(&at_cap).is_ok());
+    let over = format!(
+        "{{{}}}",
+        vec!["1"; crate::parse::MAX_ARRAY_CONSTANT + 1].join(",")
+    );
+    assert!(parse(&over).is_err(), "one past the cap was accepted");
+    let rows = format!(
+        "{{{}}}",
+        vec!["1"; crate::parse::MAX_ARRAY_CONSTANT + 1].join(";")
+    );
+    assert!(
+        parse(&rows).is_err(),
+        "one past the cap, as rows, was accepted"
+    );
+}

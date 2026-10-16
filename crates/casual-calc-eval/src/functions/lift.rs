@@ -217,6 +217,9 @@ fn may_be_array(expr: &Expr) -> bool {
                 .any(|(i, a)| kind_at(kinds, i) == ParamKind::Scalar && may_be_array(a)),
             None => true,
         },
+        // `COUNTIF(r, {"a","b"})` is two counts: a constant with more than one
+        // element is exactly what lifting is for.
+        Expr::Array(rows) => rows.len() > 1 || rows.first().is_some_and(|r| r.len() > 1),
         Expr::Range(..) | Expr::Name(_) | Expr::Call { .. } => true,
     }
 }

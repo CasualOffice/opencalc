@@ -249,15 +249,83 @@ pub(crate) fn eval_choose(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -
     if args.len() < 2 {
         return Value::Error(ErrorValue::Value);
     }
-    let index = match ev.eval_expr(sheet, &args[0]).as_number() {
+    let choices = &args[1..];
+    // An array of indexes picks per element: `CHOOSE({1,2},A1:A3,B1:B3)` is
+    // the 3x2 block of both columns, which is how a formula puts a column to
+    // the left of another (XL-FEAT-014). Not a lift: only the choices the
+    // indexes name are evaluated, so CHOOSE stays lazy in the rest.
+    let index = match ev.eval_expr_array(sheet, &args[0]) {
+        Value::Array { rows, cols, cells } => {
+            return choose_each(ev, sheet, choices, rows, cols, &cells);
+        }
+        scalar => scalar,
+    };
+    let index = match index.as_number() {
         Ok(n) => n as i64,
         Err(e) => return Value::Error(e),
     };
-    let choices = &args[1..];
     if index < 1 || index as usize > choices.len() {
         return Value::Error(ErrorValue::Value);
     }
     ev.eval_expr(sheet, &choices[index as usize - 1])
+}
+
+/// `CHOOSE` over an array of indexes: each element picks its choice, and the
+/// chosen values broadcast against the index array as any operator's do.
+fn choose_each(
+    ev: &mut Evaluator<'_>,
+    sheet: usize,
+    choices: &[Expr],
+    rows: usize,
+    cols: usize,
+    indexes: &[Value],
+) -> Value {
+    // Each named choice is evaluated once, whole, however many elements name it.
+    let pick_of = |v: &Value| match v {
+        Value::Error(e) => Err(*e),
+        v => match v.as_number() {
+            Ok(n) if n >= 1.0 && (n as usize) <= choices.len() => Ok(n as usize - 1),
+            Ok(_) => Err(ErrorValue::Value),
+            Err(e) => Err(e),
+        },
+    };
+    let mut chosen: Vec<Option<Value>> = vec![None; choices.len()];
+    for index in indexes {
+        if let Ok(i) = pick_of(index)
+            && chosen[i].is_none()
+        {
+            chosen[i] = Some(ev.eval_expr_array(sheet, &choices[i]));
+        }
+    }
+    let shapes: Vec<&Value> = chosen.iter().flatten().collect();
+    let (mut out_rows, mut out_cols) = crate::value::broadcast_shape(&shapes);
+    out_rows = out_rows.max(rows);
+    out_cols = out_cols.max(cols);
+    if let Err(e) = super::checked_array_size(out_rows, out_cols) {
+        return Value::Error(e);
+    }
+    let index_array = Value::Array {
+        rows,
+        cols,
+        cells: indexes.to_vec(),
+    };
+    let mut cells = Vec::with_capacity(out_rows * out_cols);
+    for r in 0..out_rows {
+        for c in 0..out_cols {
+            // The index that applies here, broadcast like any operand.
+            cells.push(match pick_of(&index_array.broadcast_at(r, c)) {
+                Ok(i) => chosen[i]
+                    .as_ref()
+                    .map_or(Value::Error(ErrorValue::Value), |v| v.broadcast_at(r, c)),
+                Err(e) => Value::Error(e),
+            });
+        }
+    }
+    Value::Array {
+        rows: out_rows,
+        cols: out_cols,
+        cells,
+    }
 }
 
 // --- Extra text -----------------------------------------------------------
@@ -408,6 +476,11 @@ pub(crate) fn eval_lookup(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -
     if let Value::Error(e) = target {
         return Value::Error(e);
     }
+    // An array rather than a range — `LOOKUP(2,{1,2,3},{"a","b","c"})`, an
+    // array constant or a computed array (XL-FEAT-014).
+    if !matches!(args[1], Expr::Range(..) | Expr::StructuredRef { .. }) {
+        return lookup_in_arrays(ev, sheet, &target, args);
+    }
     let Some(lookup) = range_cells(ev, sheet, &args[1]) else {
         return Value::Error(ErrorValue::Value);
     };
@@ -438,6 +511,52 @@ pub(crate) fn eval_lookup(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -
             None => Value::Error(ErrorValue::Na),
         },
         None => ev.eval_cell(lookup.0, lookup.1[index]),
+    }
+}
+
+/// `LOOKUP` whose lookup argument is an array rather than a range.
+///
+/// With a result vector, both are read as vectors. Without one it is Excel's
+/// *array form*: a block wider than it is tall is searched along its first row
+/// and answered from its last, otherwise along its first column and answered
+/// from its last column.
+fn lookup_in_arrays(ev: &mut Evaluator<'_>, sheet: usize, target: &Value, args: &[Expr]) -> Value {
+    let grid = match eval_range_2d(ev, sheet, &args[1]) {
+        Ok(g) => g,
+        Err(e) => return Value::Error(e),
+    };
+    let (keys, results): (Vec<Value>, Vec<Value>) = match args.get(2) {
+        Some(result) => {
+            let result = match eval_range_2d(ev, sheet, result) {
+                Ok(g) => g,
+                Err(e) => return Value::Error(e),
+            };
+            (grid.cells, result.cells)
+        }
+        None if grid.cols > grid.rows => (
+            (0..grid.cols).map(|c| grid.get(0, c).clone()).collect(),
+            (0..grid.cols)
+                .map(|c| grid.get(grid.rows - 1, c).clone())
+                .collect(),
+        ),
+        None => (
+            (0..grid.rows).map(|r| grid.get(r, 0).clone()).collect(),
+            (0..grid.rows)
+                .map(|r| grid.get(r, grid.cols - 1).clone())
+                .collect(),
+        ),
+    };
+    let mut best: Option<usize> = None;
+    for (i, value) in keys.iter().enumerate() {
+        match loose_cmp(value, target) {
+            Some(Ordering::Greater) => break,
+            Some(_) => best = Some(i),
+            None => {}
+        }
+    }
+    match best.and_then(|i| results.get(i)) {
+        Some(v) => v.clone(),
+        None => Value::Error(ErrorValue::Na),
     }
 }
 

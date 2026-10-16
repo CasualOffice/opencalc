@@ -826,6 +826,10 @@ fn translate_formula(raw: &str) -> Option<casual_calc_formula::Expr> {
                 }
             }
             ';' => out.push(','),
+            // An inline array's row separator (`{1;2|3;4}`, ODF 1.2 part 2
+            // §5.13). Its column separator is `;`, which the arm above has
+            // already turned into this engine's `,`.
+            '|' => out.push(';'),
             '[' => {
                 let mut inner = String::new();
                 for c in chars.by_ref() {
@@ -1231,6 +1235,12 @@ fn odf_formula(expr: &casual_calc_formula::Expr) -> Option<String> {
                 out.push(';');
                 i += 1;
             }
+            // Only an array constant prints a `;` (between its rows), and
+            // OpenFormula writes that separator as `|`.
+            ';' => {
+                out.push('|');
+                i += 1;
+            }
             c => {
                 out.push(c);
                 i += 1;
@@ -1257,6 +1267,8 @@ fn writable_in_odf(expr: &casual_calc_formula::Expr) -> bool {
     use casual_calc_formula::Expr;
     match expr {
         Expr::Number(_) | Expr::Bool(_) | Expr::Text(_) | Expr::Error(_) | Expr::Empty => true,
+        // `{1;2|3;4}`: constants only, so always expressible.
+        Expr::Array(_) => true,
         Expr::Reference(r) => !r.col_implicit && !r.row_implicit,
         Expr::Range(a, b) => {
             !a.col_implicit && !a.row_implicit && !b.col_implicit && !b.row_implicit
@@ -1925,6 +1937,24 @@ mod tests {
         // engine does not model — pointing it at one of the two would be an
         // answer nobody asked for.
         assert!(translate_formula("of:=SUM([$One.A1:$Two.B2])").is_none());
+    }
+
+    /// Inline arrays (`XL-FEAT-014`): OpenFormula separates columns with `;`
+    /// and rows with `|` (ODF 1.2 part 2, §5.13), where Excel uses `,` and `;`.
+    /// A separator inside a string is data and is not rewritten either way.
+    #[test]
+    fn inline_arrays_map_to_and_from_openformula() {
+        let expr =
+            translate_formula(r#"of:=SUM({1;2|3;4})+COUNTA({"a|b";"c;d"})"#).expect("translates");
+        assert_eq!(expr.to_string(), r#"SUM({1,2;3,4})+COUNTA({"a|b","c;d"})"#);
+        assert_eq!(
+            odf_formula(&expr).as_deref(),
+            Some(r#"of:=SUM({1;2|3;4})+COUNTA({"a|b";"c;d"})"#)
+        );
+        let column = casual_calc_formula::parse(r#"{1;-2;"x";TRUE;#N/A}"#).unwrap();
+        let written = odf_formula(&column).expect("writable");
+        assert_eq!(written, r#"of:={1|-2|"x"|TRUE|#N/A}"#);
+        assert_eq!(translate_formula(&written), Some(column));
     }
 
     /// **A formula survives the round trip as a formula, not as its answer.**

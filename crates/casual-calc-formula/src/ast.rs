@@ -142,6 +142,14 @@ pub enum Expr {
         /// The right operand.
         right: Box<Expr>,
     },
+    /// An array constant: `{1,2;3,4}` — rows of equal length, each element a
+    /// constant (`XL-FEAT-014`).
+    ///
+    /// The parser admits only [`Self::Number`] (a leading `-` folded in),
+    /// [`Self::Text`], [`Self::Bool`] and [`Self::Error`] as elements, which is
+    /// Excel's rule, so nothing downstream re-checks it: a constant holds no
+    /// reference to shift, rename or depend on.
+    Array(Vec<Vec<Expr>>),
     /// A function call.
     Function {
         /// The function name (upper-cased).
@@ -209,6 +217,15 @@ impl Expr {
                 op.hash(state);
                 left.hash_into(state);
                 right.hash_into(state);
+            }
+            Expr::Array(rows) => {
+                rows.len().hash(state);
+                for row in rows {
+                    row.len().hash(state);
+                    for item in row {
+                        item.hash_into(state);
+                    }
+                }
             }
             Expr::Function { name, args } => {
                 name.hash(state);

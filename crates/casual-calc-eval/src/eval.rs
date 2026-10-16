@@ -406,6 +406,41 @@ impl<'a> Evaluator<'a> {
                 call_function(self, sheet_index, name, args)
             }
             Expr::Call { callee, args } => self.eval_call(sheet_index, callee, args),
+            Expr::Array(rows) => self.array_constant(sheet_index, rows),
+        }
+    }
+
+    /// An array constant (`{1,2;3,4}`) as an array value.
+    ///
+    /// The parser has already refused a ragged or oversized constant, but a
+    /// tree also arrives over the collaboration wire and from a snapshot,
+    /// where no parser has seen it — so the shape and the size are checked
+    /// again here rather than trusted. A malformed one is `#VALUE!`, an
+    /// oversized one `#NUM!`, the evaluator's answer for any array too big.
+    fn array_constant(&mut self, sheet_index: usize, rows: &[Vec<Expr>]) -> Value {
+        let cols = rows.first().map_or(0, Vec::len);
+        if cols == 0 || rows.iter().any(|row| row.len() != cols) {
+            return Value::Error(ErrorValue::Value);
+        }
+        if let Err(e) = crate::functions::checked_array_size(rows.len(), cols) {
+            return Value::Error(e);
+        }
+        let mut cells = Vec::with_capacity(rows.len() * cols);
+        for item in rows.iter().flatten() {
+            cells.push(match item {
+                // Constants only. Anything else could only have come from a
+                // tree no parser produced, and evaluating it would let a
+                // constant hide a reference from the dependency graph.
+                Expr::Number(_) | Expr::Text(_) | Expr::Bool(_) | Expr::Error(_) => {
+                    self.eval_expr_inner(sheet_index, item)
+                }
+                _ => Value::Error(ErrorValue::Value),
+            });
+        }
+        Value::Array {
+            rows: rows.len(),
+            cols,
+            cells,
         }
     }
 

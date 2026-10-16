@@ -5776,3 +5776,17 @@ fn whole_row_references_round_trip_through_xlsx() {
         assert_formula_round_trips(text, text);
     }
 }
+
+/// Excel writes an array constant into `<f>` exactly as it is typed (en-US
+/// separators), and reads it back the same way (XL-FEAT-014).
+#[test]
+fn array_constants_round_trip_through_xlsx() {
+    for text in [
+        "SUM({1,2;3,4})",
+        "SUM(COUNTIF(Sheet2!A1:A5,{\"a\",\"b\"}))",
+        "{1;-2;0.5}",
+        "INDEX({TRUE,#N/A,\"x\"},1,2)",
+    ] {
+        assert_formula_round_trips(text, text);
+    }
+}

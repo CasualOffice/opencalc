@@ -60,6 +60,13 @@ pub enum Token {
     Colon,
     /// `!`
     Bang,
+    /// `{`, opening an array constant.
+    LBrace,
+    /// `}`
+    RBrace,
+    /// `;`, the row separator inside an array constant. Excel's file grammar
+    /// is the en-US one, so `;` means nothing else.
+    Semicolon,
 }
 
 const KNOWN_ERRORS: &[&str] = &[
@@ -129,6 +136,18 @@ pub fn tokenize(input: &str) -> Result<Vec<Token>, FormulaError> {
             }
             '!' => {
                 tokens.push(Token::Bang);
+                i += 1;
+            }
+            '{' => {
+                tokens.push(Token::LBrace);
+                i += 1;
+            }
+            '}' => {
+                tokens.push(Token::RBrace);
+                i += 1;
+            }
+            ';' => {
+                tokens.push(Token::Semicolon);
                 i += 1;
             }
             '+' => {

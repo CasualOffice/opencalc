@@ -208,6 +208,22 @@ impl fmt::Display for At<'_> {
                 f.write_str(binary_symbol(*op))?;
                 write_child(f, right, origin, bp(right).0 < rbp)
             }
+            // Separators as Excel writes them, in the file and the formula bar.
+            Expr::Array(rows) => {
+                f.write_str("{")?;
+                for (r, row) in rows.iter().enumerate() {
+                    if r > 0 {
+                        f.write_str(";")?;
+                    }
+                    for (c, item) in row.iter().enumerate() {
+                        if c > 0 {
+                            f.write_str(",")?;
+                        }
+                        write!(f, "{}", At(item, origin))?;
+                    }
+                }
+                f.write_str("}")
+            }
             Expr::Function { name, args } => {
                 f.write_str(name)?;
                 f.write_str("(")?;

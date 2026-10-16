@@ -66,6 +66,15 @@ pub const MAX_DEPTH: u32 = 65;
 /// hundred cells with `+` wants `SUM` anyway.
 pub const MAX_CHAIN: u32 = 512;
 
+/// How many elements an array constant (`{1,2;3,4}`) may hold.
+///
+/// A constant is untrusted input — typed, imported, or arriving on the wire —
+/// and it is materialised whole the moment it is evaluated. Excel bounds a
+/// formula at 8,192 characters, which cannot hold more than about 4,096
+/// one-digit elements; this is four times that, so no formula Excel can write
+/// is refused, and it is far below the evaluator's own array ceiling.
+pub const MAX_ARRAY_CONSTANT: usize = 16_384;
+
 /// Parse a formula body (the text after a leading `=`) into an [`Expr`].
 pub fn parse(input: &str) -> Result<Expr, FormulaError> {
     let tokens = tokenize(input)?;
@@ -210,6 +219,7 @@ impl Parser {
             Some(Token::Number(n)) => Ok(Expr::Number(n)),
             Some(Token::Text(s)) => Ok(Expr::Text(s)),
             Some(Token::Error(s)) => Ok(Expr::Error(s)),
+            Some(Token::LBrace) => self.parse_array(),
             Some(Token::LParen) => {
                 let expr = self.parse_expr(0)?;
                 self.expect(&Token::RParen)?;
@@ -347,6 +357,72 @@ impl Parser {
             }
             Some(other) => Err(FormulaError::UnexpectedToken(format!("{other:?}"))),
             None => Err(FormulaError::UnexpectedToken("end of input".to_owned())),
+        }
+    }
+
+    /// The rest of an array constant, after its `{`.
+    ///
+    /// One pass, element by element: the cost is linear in the constant and the
+    /// count is checked as each element is read, so an oversized constant is
+    /// refused before it is built rather than after.
+    fn parse_array(&mut self) -> Result<Expr, FormulaError> {
+        let mut rows: Vec<Vec<Expr>> = Vec::new();
+        let mut row: Vec<Expr> = Vec::new();
+        let mut count = 0usize;
+        loop {
+            row.push(self.array_element()?);
+            count += 1;
+            if count > MAX_ARRAY_CONSTANT {
+                return Err(FormulaError::TooLarge {
+                    limit: MAX_ARRAY_CONSTANT,
+                });
+            }
+            let end = match self.advance() {
+                Some(Token::Comma) => continue,
+                Some(Token::Semicolon) => false,
+                Some(Token::RBrace) => true,
+                Some(other) => {
+                    return Err(FormulaError::UnexpectedToken(format!(
+                        "{other:?} in an array constant"
+                    )));
+                }
+                None => {
+                    return Err(FormulaError::UnexpectedToken(
+                        "end of input in an array constant".to_owned(),
+                    ));
+                }
+            };
+            // Every row as wide as the first: Excel has no ragged constant.
+            if rows.first().is_some_and(|first| first.len() != row.len()) {
+                return Err(FormulaError::UnexpectedToken(
+                    "array constant rows of different lengths".to_owned(),
+                ));
+            }
+            rows.push(std::mem::take(&mut row));
+            if end {
+                return Ok(Expr::Array(rows));
+            }
+        }
+    }
+
+    /// One element of an array constant: a number (optionally negated), text,
+    /// a logical or an error value — and nothing else, as in Excel.
+    fn array_element(&mut self) -> Result<Expr, FormulaError> {
+        match self.advance() {
+            Some(Token::Number(n)) => Ok(Expr::Number(n)),
+            Some(Token::Minus) => match self.advance() {
+                Some(Token::Number(n)) => Ok(Expr::Number(-n)),
+                other => Err(FormulaError::UnexpectedToken(format!(
+                    "-{other:?} in an array constant"
+                ))),
+            },
+            Some(Token::Text(s)) => Ok(Expr::Text(s)),
+            Some(Token::Error(s)) => Ok(Expr::Error(s)),
+            Some(Token::Word(w)) if w.eq_ignore_ascii_case("TRUE") => Ok(Expr::Bool(true)),
+            Some(Token::Word(w)) if w.eq_ignore_ascii_case("FALSE") => Ok(Expr::Bool(false)),
+            other => Err(FormulaError::UnexpectedToken(format!(
+                "{other:?} in an array constant"
+            ))),
         }
     }
 

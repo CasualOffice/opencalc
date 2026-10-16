@@ -1890,7 +1890,8 @@ fn rewrite_expr(expr: &Expr, ctx: &RewriteCtx) -> Expr {
         Expr::StructuredRef { .. } => expr.clone(),
         // Unparsed text cannot be rewritten without understanding it, and
         // guessing at its references would corrupt what was preserved.
-        Expr::Raw(_) | Expr::Empty => expr.clone(),
+        // An array constant holds constants only: nothing in it to shift.
+        Expr::Raw(_) | Expr::Empty | Expr::Array(_) => expr.clone(),
         Expr::Reference(reference) => rewrite_reference(reference, ctx),
         Expr::Range(a, b) => rewrite_range(a, b, ctx),
         Expr::Unary { op, operand } => Expr::Unary {
@@ -2174,7 +2175,7 @@ fn move_expr(
         // Same reasoning as the insert/delete rewrite: a structured reference
         // names columns rather than addresses, and unparsed text cannot be
         // rewritten without understanding it.
-        Expr::StructuredRef { .. } | Expr::Raw(_) | Expr::Empty => expr.clone(),
+        Expr::StructuredRef { .. } | Expr::Raw(_) | Expr::Empty | Expr::Array(_) => expr.clone(),
         Expr::Reference(reference) => {
             match moved_reference(reference, moved_sheet, home, block, delta) {
                 Some(moved) => Expr::Reference(moved),
