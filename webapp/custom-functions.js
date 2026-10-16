@@ -90,10 +90,14 @@ export function validJsDoc(doc) {
   return doc.params.every((p) => TYPES.has(p.type));
 }
 
+/// Taken when this module loads, before the sandbox closes the `Function`
+/// global — reading it afterwards is itself a refused door.
+const functionText = Function.prototype.toString;
+
 /// A function's parameter names, from its own text (ONLYOFFICE
 /// `_getArgsByFunc`).
 export function parameterNames(fn) {
-  const text = Function.prototype.toString.call(fn).replace(/((\/\/.*$)|(\/\*[\s\S]*?\*\/))/gm, "");
+  const text = functionText.call(fn).replace(/((\/\/.*$)|(\/\*[\s\S]*?\*\/))/gm, "");
   const open = text.indexOf("(");
   const close = text.indexOf(")");
   if (open < 0 || close < open) return [];
