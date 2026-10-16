@@ -29,6 +29,9 @@ use casual_calc_transaction::{
 // ([`WorkbookSession::compatibility_report`] and
 // [`WorkbookSession::format_loss`]), and a return type a caller cannot name
 // without adding a second dependency is a leak rather than a facade.
+/// The read-only VBA viewer's types (`MACRO-05`), returned by
+/// [`WorkbookSession::vba_project`].
+pub use casual_calc_import::vba::{VbaError, VbaModule, VbaModuleKind, VbaProject};
 pub use casual_calc_import::{
     CompatibilityEntry, CompatibilityReport, ModelOutcome, RetentionOutcome,
 };
@@ -1094,6 +1097,20 @@ impl WorkbookSession {
 
     pub fn workbook(&self) -> &Workbook {
         &self.workbook
+    }
+
+    /// The VBA project this workbook carries, **decoded for reading** — or
+    /// `None` when it carries none (`MACRO-05`, docs/99 §4).
+    ///
+    /// Decoded on each call from the retained `vbaProject.bin`; nothing is
+    /// cached and nothing is written back. The project's bytes stay exactly as
+    /// they arrived whatever this returns, so a project this cannot decode
+    /// (`Some(Err(_))`) is still one the next save keeps. VBA is never run.
+    #[must_use]
+    pub fn vba_project(&self) -> Option<Result<VbaProject, VbaError>> {
+        self.workbook
+            .macro_project()
+            .map(|part| casual_calc_import::vba::decode_vba_project(&part.bytes))
     }
 
     /// The compatibility report from import (empty for a blank session).

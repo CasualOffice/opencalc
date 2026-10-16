@@ -792,7 +792,7 @@ jobs:
         working-directory: fuzz
         run: |
           set -euo pipefail
-          for target in bounded_package formula_parse number_format wire_operation ooxml_xml transform_tp1 token_verify ods xlsx delimited snapshot; do
+          for target in bounded_package formula_parse number_format wire_operation ooxml_xml transform_tp1 token_verify ods xlsx delimited snapshot vba; do
             seeds="seeds/$target"
             extra=""
             flags="-max_total_time=60 -rss_limit_mb=4096"

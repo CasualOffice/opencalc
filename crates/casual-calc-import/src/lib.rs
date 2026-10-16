@@ -21,6 +21,7 @@ mod read;
 mod report;
 mod styles;
 mod theme;
+pub mod vba;
 
 pub use error::{ImportError, Overrun};
 pub use report::{CompatibilityEntry, CompatibilityReport, ModelOutcome, RetentionOutcome};

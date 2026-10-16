@@ -35,7 +35,7 @@ export function isRegistered(id) { return registered.has(id); }
 export function registeredIds() { return [...registered.keys()]; }
 
 /// Register a command that has no DOM node. `spec`: `{ label, run, shortcut?,
-/// enabled?: () => boolean, checked?: () => boolean }`.
+/// enabled?: () => boolean, checked?: () => boolean, hidden?: () => boolean }`.
 export function register(id, spec) {
   registered.set(id, { id, ...spec });
 }
@@ -57,8 +57,10 @@ export function command(id) {
   if (r) {
     return {
       ...r,
-      hidden: () => policy(id).hidden,
-      enabled: () => { const p = policy(id); return !p.hidden && !p.disabled && (r.enabled ? r.enabled() : true); },
+      // A rule (`policy`) or the command itself (`spec.hidden`: a verb that is
+      // only there when the document has the thing it acts on) can hide it.
+      hidden: () => policy(id).hidden || (r.hidden ? r.hidden() : false),
+      enabled: () => { const p = policy(id); return !p.hidden && !p.disabled && !(r.hidden && r.hidden()) && (r.enabled ? r.enabled() : true); },
     };
   }
   const n = nodeFor(id);
