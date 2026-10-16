@@ -335,26 +335,72 @@ pub fn session_set_hyperlink(
 }
 
 /// The hyperlink covering a cell as JSON, or `null`.
+///
+/// A stored hyperlink answers first. Otherwise a cell whose formula is a
+/// `HYPERLINK()` call answers with its **evaluated** link argument
+/// (`XL-FEAT-139`) — the cell displays the friendly name, so its value cannot
+/// say where it goes. A target starting `#` is a place in this workbook and is
+/// reported as `location`, without the `#`; anything else is `target`.
+/// `formula` is `true` for that second kind, so the dialog does not offer to
+/// edit or remove a link that lives in the formula.
 #[wasm_bindgen]
 pub fn session_hyperlink_at(sheet: usize, row: u32, col: u32) -> String {
     with_session(|s| {
-        let Some(link) = s.workbook().sheets.get(sheet).and_then(|sh| {
+        let field = |v: Option<&str>| v.map_or("null".to_owned(), json_string);
+        let wb = s.workbook();
+        let stored = wb.sheets.get(sheet).and_then(|sh| {
             sh.hyperlinks.iter().find(|h| {
                 row >= h.range.start.row
                     && row <= h.range.end.row
                     && col >= h.range.start.col
                     && col <= h.range.end.col
             })
-        }) else {
+        });
+        if let Some(link) = stored {
+            return format!(
+                "{{\"target\":{},\"location\":{},\"tooltip\":{},\"display\":{},\"formula\":false}}",
+                field(link.target.as_deref()),
+                field(link.location.as_deref()),
+                field(link.tooltip.as_deref()),
+                field(link.display.as_deref()),
+            );
+        }
+        let mut ev = casual_calc_eval::Evaluator::new(wb);
+        let Some(target) = ev.hyperlink_target(sheet, CellRef::new(row, col)) else {
             return "null".to_owned();
         };
-        let field = |v: &Option<String>| v.as_deref().map_or("null".to_owned(), json_string);
+        let target = target.trim();
+        let (target, location) = match target.strip_prefix('#') {
+            Some(place) => (None, Some(place)),
+            None => (Some(target), None),
+        };
         format!(
-            "{{\"target\":{},\"location\":{},\"tooltip\":{},\"display\":{}}}",
-            field(&link.target),
-            field(&link.location),
-            field(&link.tooltip),
-            field(&link.display),
+            "{{\"target\":{},\"location\":{},\"tooltip\":null,\"display\":null,\"formula\":true}}",
+            field(target),
+            field(location),
+        )
+    })
+    .unwrap_or_else(|| "null".to_owned())
+}
+
+/// Resolve a link's in-document location from `sheet`, as JSON
+/// `{sheet,r0,c0,r1,c1}`, or `null` for Excel's "Reference isn't valid."
+///
+/// Cells and ranges (`Sheet2!B3:D5`, `'It''s'!A1`) and defined names —
+/// workbook-scoped, or `Sheet!Local` — compared case-insensitively. One parser
+/// for following a link and for validating one in the dialog, so the dialog
+/// cannot accept a place that clicking the link then refuses.
+#[wasm_bindgen]
+pub fn session_resolve_location(sheet: usize, text: &str) -> String {
+    with_session(|s| {
+        casual_calc_eval::links::resolve_location(s.workbook(), sheet, text).map_or_else(
+            || "null".to_owned(),
+            |p| {
+                format!(
+                    "{{\"sheet\":{},\"r0\":{},\"c0\":{},\"r1\":{},\"c1\":{}}}",
+                    p.sheet, p.r0, p.c0, p.r1, p.c1
+                )
+            },
         )
     })
     .unwrap_or_else(|| "null".to_owned())
@@ -362,22 +408,44 @@ pub fn session_hyperlink_at(sheet: usize, row: u32, col: u32) -> String {
 
 /// The linked cells within a range as JSON `[{r,c}, …]`, so the grid can
 /// underline them without asking cell by cell.
+///
+/// Stored hyperlinks and `HYPERLINK()` formula cells both: a link is clickable
+/// whichever way it was made, and the underline is the only cue that it is.
+/// The formula test reads the tree and never evaluates it, and a stored link's
+/// range is clamped to the window before it is walked — a link over a whole
+/// column must not cost a million iterations per frame.
 #[wasm_bindgen]
 pub fn session_hyperlink_cells(sheet: usize, r0: u32, c0: u32, r1: u32, c1: u32) -> String {
     with_session(|s| {
-        let Some(sh) = s.workbook().sheets.get(sheet) else {
+        let wb = s.workbook();
+        let Some(sh) = wb.sheets.get(sheet) else {
             return "[]".to_owned();
         };
-        let mut items = Vec::new();
+        let mut seen = std::collections::BTreeSet::new();
         for link in &sh.hyperlinks {
-            for r in link.range.start.row..=link.range.end.row {
-                for c in link.range.start.col..=link.range.end.col {
-                    if r >= r0 && r <= r1 && c >= c0 && c <= c1 {
-                        items.push(format!("{{\"r\":{r},\"c\":{c}}}"));
-                    }
+            for r in link.range.start.row.max(r0)..=link.range.end.row.min(r1) {
+                for c in link.range.start.col.max(c0)..=link.range.end.col.min(c1) {
+                    seen.insert((r, c));
                 }
             }
         }
+        for (at, cell) in sh.cells.row_band(r0, r1) {
+            if at.col < c0 || at.col > c1 {
+                continue;
+            }
+            let is_link = cell
+                .formula
+                .and_then(|h| wb.formula(h))
+                .and_then(casual_calc_eval::links::hyperlink_call)
+                .is_some();
+            if is_link {
+                seen.insert((at.row, at.col));
+            }
+        }
+        let items: Vec<String> = seen
+            .into_iter()
+            .map(|(r, c)| format!("{{\"r\":{r},\"c\":{c}}}"))
+            .collect();
         format!("[{}]", items.join(","))
     })
     .unwrap_or_else(|| "[]".to_owned())
@@ -1782,7 +1850,13 @@ pub(crate) fn shown_value(v: &casual_calc_eval::Value) -> String {
 #[wasm_bindgen]
 pub fn session_name_target(name: &str) -> String {
     with_session(|s| {
-        let Some(d) = s.workbook().defined_names.iter().find(|d| d.name == name) else {
+        // Case-insensitive, as Excel's names are: `totals` finds `Totals`.
+        let Some(d) = s
+            .workbook()
+            .defined_names
+            .iter()
+            .find(|d| d.name.eq_ignore_ascii_case(name))
+        else {
             return "null".to_owned();
         };
         match &d.formula {
@@ -2851,6 +2925,85 @@ mod defined_name_tests {
             session_evaluate(0, "SUM(A:A)"),
             "3",
             "inside a function the range is whole"
+        );
+    }
+}
+
+#[cfg(test)]
+mod hyperlink_tests {
+    use super::*;
+    use crate::{session_add_sheet, session_new, session_set_cell};
+
+    fn at(sheet: usize, row: u32, col: u32) -> serde_json::Value {
+        serde_json::from_str(&session_hyperlink_at(sheet, row, col)).expect("json")
+    }
+
+    /// **A `HYPERLINK()` cell is a link** (`XL-FEAT-139`). Only stored links
+    /// were reported, so a formula link drew as plain text and a click did
+    /// nothing. Its target is the link argument *evaluated* — the cell shows
+    /// the friendly name — and a `#` target is a place in this workbook.
+    #[test]
+    fn a_hyperlink_formula_reports_its_evaluated_target() {
+        session_new();
+        session_add_sheet().unwrap();
+        session_set_cell(0, 0, 0, "Sheet2!B4").unwrap();
+        session_set_cell(0, 1, 1, r##"=HYPERLINK("#"&A1,"Go")"##).unwrap();
+        session_set_cell(0, 2, 1, r#"=HYPERLINK("https://example.com","site")"#).unwrap();
+        session_set_cell(0, 3, 1, "=1+1").unwrap();
+
+        let link = at(0, 1, 1);
+        assert_eq!(link["location"], "Sheet2!B4");
+        assert_eq!(link["target"], serde_json::Value::Null);
+        assert_eq!(link["formula"], true);
+        assert_eq!(at(0, 2, 1)["target"], "https://example.com");
+        assert_eq!(at(0, 3, 1), serde_json::Value::Null);
+
+        let cells: Vec<serde_json::Value> =
+            serde_json::from_str(&session_hyperlink_cells(0, 0, 0, 9, 9)).unwrap();
+        assert_eq!(
+            cells.len(),
+            2,
+            "the two HYPERLINK cells, not =1+1: {cells:?}"
+        );
+
+        // A stored link answers before the formula, and says it is not one.
+        session_set_hyperlink(0, 1, 1, "", "Sheet1!Z9", "", "").unwrap();
+        assert_eq!(at(0, 1, 1)["location"], "Sheet1!Z9");
+        assert_eq!(at(0, 1, 1)["formula"], false);
+    }
+
+    /// A link over a whole column is walked only where it meets the window.
+    #[test]
+    fn a_huge_stored_link_is_clamped_to_the_window() {
+        session_new();
+        session_set_hyperlink(0, 0, 0, "https://example.com", "", "", "").unwrap();
+        // Widen the stored range directly: the binding sets single cells.
+        edit_sheet_metadata(0, |_, data| {
+            data.hyperlinks[0].range =
+                CellRange::new(CellRef::new(0, 0), CellRef::new(1_048_575, 0));
+        })
+        .unwrap();
+        let cells: Vec<serde_json::Value> =
+            serde_json::from_str(&session_hyperlink_cells(0, 10, 0, 12, 3)).unwrap();
+        assert_eq!(cells.len(), 3);
+    }
+
+    #[test]
+    fn locations_resolve_through_the_engine_and_names_ignore_case() {
+        session_new();
+        session_add_sheet().unwrap();
+        session_define_name("Totals", "Sheet2!$B$3:$D$5").unwrap();
+        let place: serde_json::Value =
+            serde_json::from_str(&session_resolve_location(0, "totals")).unwrap();
+        assert_eq!(
+            place,
+            serde_json::json!({"sheet": 1, "r0": 2, "c0": 1, "r1": 4, "c1": 3})
+        );
+        assert_eq!(session_resolve_location(0, "Nowhere!A1"), "null");
+        assert_ne!(
+            session_name_target("TOTALS"),
+            "null",
+            "names are case-insensitive"
         );
     }
 }

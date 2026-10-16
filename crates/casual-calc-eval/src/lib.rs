@@ -28,6 +28,7 @@ mod eval;
 mod functions;
 pub mod goal_seek;
 mod graph;
+pub mod links;
 pub mod pivot;
 mod ranges;
 mod structured;
