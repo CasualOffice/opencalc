@@ -57,7 +57,7 @@ for (const [name, chord] of [["the ContextMenu key", "ContextMenu"], ["Shift+F10
     expect(await focused()).toBe("Cut");
     await page.keyboard.press("Escape");
     await expect(menu).toHaveCount(0);
-    expect(await page.evaluate(() => document.activeElement?.id)).toBe("grid");
+    expect(await page.evaluate(() => window.opencalcEditor.gridHasKeyboard())).toBe(true);
     expect(await sel(page)).toEqual({ r0: 1, c0: 1, r1: 1, c1: 1 });
   });
 }

@@ -45,6 +45,7 @@ import {
   on,
   outlineToggles,
   rebuildGrowth,
+  syncGrowth,
   rowHAt,
   rowYAt,
   scrollMeta,
@@ -103,7 +104,7 @@ export function rowOffsetPx(row) {
 }
 
 export function rowAtPx(px) {
-  if (growthDirty) rebuildGrowth();
+  syncGrowth();
   const want = Math.max(0, Math.round(px));
   // With nothing grown there is nothing to correct for, and every extra engine
   // call rebuilds the sheet's geometry from scratch. This stays one call a

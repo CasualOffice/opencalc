@@ -55,7 +55,8 @@ test('skip link focuses the actual spreadsheet', async ({ page }) => {
   await page.locator('.skip-link').focus();
   await expect(page.locator('.skip-link')).toBeVisible();
   await page.keyboard.press('Enter');
-  await expect(page.locator('#grid')).toBeFocused();
+  // The grid's keyboard, which is the idle in-cell editor (XL-FEAT-023).
+  await expect.poll(() => page.evaluate(() => window.opencalcEditor.gridHasKeyboard())).toBe(true);
 });
 
 // One shell (UX-SHELL-08, docs/95): the toolbar and Sheets chromes are

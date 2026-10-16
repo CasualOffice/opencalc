@@ -174,8 +174,8 @@ test("Enter applies the typed width to every column in the selection", async ({ 
   // The prompt's scope was the selection and no more; keep it that way.
   expect(Math.round(await widthOf(page, 4)), "it resized past the selection").toBe(outside);
   // And the grid gets the keyboard back, or the next arrow key goes nowhere.
-  expect(await page.evaluate(() => document.activeElement.id),
-    "focus did not return to the grid").toBe("grid");
+  expect(await page.evaluate(() => window.opencalcEditor.gridHasKeyboard()),
+    "focus did not return to the grid").toBe(true);
   expect(await nativeDialogs(page)).toEqual([]);
   expect(problems, "resizing from the dialog logged nothing").toEqual([]);
 });
@@ -210,8 +210,8 @@ test("Escape leaves the sizes exactly as they were", async ({ page }) => {
   // spot: it asks, and resizes anyway.
   expect(await widthOf(page, 1), "Escape resized the column").toBe(before);
   expect(await canUndo(page), "Escape left something on the undo stack").toBe(undoBefore);
-  expect(await page.evaluate(() => document.activeElement.id),
-    "focus did not return to the grid").toBe("grid");
+  expect(await page.evaluate(() => window.opencalcEditor.gridHasKeyboard()),
+    "focus did not return to the grid").toBe(true);
 });
 
 test("a size that is not a number is refused in the field, keeping what was typed", async ({ page }) => {

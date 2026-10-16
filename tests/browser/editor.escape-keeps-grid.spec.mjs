@@ -16,8 +16,11 @@ async function boot(page) {
   await expect(page.locator("#tb-status")).toHaveAttribute("data-engine", /^\d/, { timeout: 30_000 });
 }
 
+/// Whether the grid holds the keyboard. Not `activeElement === #grid`: while
+/// no edit is open the grid's keys arrive through the idle in-cell editor, so
+/// an input method can compose into it (XL-FEAT-023).
 const focused = (page) =>
-  page.evaluate(() => `${document.activeElement?.tagName}#${document.activeElement?.id}`);
+  page.evaluate(() => (window.opencalcEditor.gridHasKeyboard() ? "grid" : `${document.activeElement?.tagName}#${document.activeElement?.id}`));
 const cell = (page, row, col) => page.locator(`#a11y-${row}-${col}`);
 
 test("Escape out of a cell edit leaves the grid holding the keyboard", async ({ page }) => {
@@ -26,7 +29,7 @@ test("Escape out of a cell edit leaves the grid holding the keyboard", async ({ 
 
   await page.keyboard.type("discard me");
   await page.keyboard.press("Escape");
-  expect(await focused(page), "Escape moved focus off the grid").toBe("CANVAS#grid");
+  expect(await focused(page), "Escape moved focus off the grid").toBe("grid");
 
   // The consequence as a person meets it: the next thing typed lands in the sheet.
   await page.keyboard.type("7");
@@ -37,7 +40,7 @@ test("Escape out of a cell edit leaves the grid holding the keyboard", async ({ 
 test("Escape with nothing open does not move focus", async ({ page }) => {
   await boot(page);
   await page.keyboard.press("Escape");
-  expect(await focused(page)).toBe("CANVAS#grid");
+  expect(await focused(page)).toBe("grid");
 });
 
 test("Escape still closes the File page and returns to its tab", async ({ page }) => {
