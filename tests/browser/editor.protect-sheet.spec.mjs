@@ -71,7 +71,10 @@ test("a password is confirmed, then demanded to unprotect", async ({ page }) => 
   await expect(title(page)).toHaveText("Confirm Password");
   await page.locator("#oc-prot-confirm").fill("wrong");
   await page.keyboard.press("Enter");
-  await expect(page.locator("#oc-prot-error")).toHaveText("Confirmation password is not identical.");
+  // Excel's message box over the dialog (XL-UX-168), in Excel's words.
+  await expect(page.locator("#oc-msgbox-text")).toHaveText("The confirmation password is not identical.");
+  await page.keyboard.press("Enter");
+  await expect(page.locator("#oc-prot-confirm")).toBeFocused();
   expect((await protection(page)).on).toBe(false);
   await page.locator("#oc-prot-confirm").fill("s3cret");
   await page.keyboard.press("Enter");
@@ -83,7 +86,9 @@ test("a password is confirmed, then demanded to unprotect", async ({ page }) => 
   await expect(title(page)).toHaveText("Unprotect Sheet");
   await page.locator("#oc-prot-unpw").fill("S3CRET");
   await page.keyboard.press("Enter");
-  await expect(page.locator("#oc-prot-error")).toContainText("The password you supplied is not correct.");
+  await expect(page.locator("#oc-msgbox-text")).toContainText("The password you supplied is not correct.");
+  await page.keyboard.press("Enter");
+  await expect(page.locator("#oc-prot-unpw")).toBeFocused();
   expect((await protection(page)).on).toBe(true);
   await page.locator("#oc-prot-unpw").fill("s3cret");
   await ok(page).click();

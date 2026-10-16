@@ -115,3 +115,6 @@ text_case_title
 code
 play
 shield
+# Message box icons (XL-UX-168): Excel's warning and error; info is above.
+warning
+error_circle
