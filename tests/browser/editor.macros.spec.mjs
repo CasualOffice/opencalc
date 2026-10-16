@@ -278,7 +278,11 @@ test("a read sees the macro's own write, recalculated by the engine", async ({ p
 // 2. The sandbox.
 
 const REFUSED = {
-  fetch: `fetch("http://127.0.0.1:9/exfiltrate");`,
+  // The bare name `fetch` is the page's stub (`MACRO-13`), refused by host
+  // policy and tested in `editor.macro-network.spec.mjs`; the global is still
+  // a refused door.
+  "fetch on the global": `self.fetch("http://127.0.0.1:9/exfiltrate");`,
+  "fetch on globalThis": `globalThis.fetch("http://127.0.0.1:9/exfiltrate");`,
   document: `document.title = "pwned";`,
   importScripts: `importScripts("http://127.0.0.1:9/x.js");`,
   XMLHttpRequest: `new XMLHttpRequest();`,

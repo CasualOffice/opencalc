@@ -2696,3 +2696,29 @@ html, .editor-body { overscroll-behavior: none; }
 .oc-gs-head { margin: 0 0 10px; }
 .oc-gs-status { display: grid; grid-template-columns: auto 1fr; gap: 4px 12px; }
 .oc-gs-num { font-family: var(--oc-mono-font-family); }
+
+/* Network access (MACRO-13, docs/99 §5a). The Security Warning bar is Excel's
+   yellow message bar; the Security Notice is a message box over any dialog. */
+.oc-net-bar {
+  background: color-mix(in srgb, #f5c400 18%, var(--oc-background-color));
+}
+.oc-net-bar-title { letter-spacing: .02em; }
+.oc-net-bar-x {
+  width: 24px; height: 24px; padding: 0; border: 0; border-radius: 6px; background: transparent;
+  color: var(--oc-muted-text-color); display: inline-flex; align-items: center; justify-content: center; cursor: pointer;
+}
+.oc-net-bar-x:hover { background: var(--oc-surface-color); color: var(--oc-text-color); }
+.oc-modal.oc-net-notice { z-index: 320; }
+.oc-net-notice-lead { margin: 0 0 10px; font-weight: 600; }
+/* File ▸ Options ▸ Trust Center: categories on the left, a page on the right. */
+.oc-tc { display: grid; grid-template-columns: 150px 1fr; gap: 16px; min-height: 180px; }
+.oc-tc-nav { display: flex; flex-direction: column; gap: 2px; border-right: 1px solid var(--oc-border-color); padding-right: 8px; }
+.oc-tc-cat { text-align: left; border: 0; background: transparent; color: var(--oc-text-color); font: inherit; padding: 6px 8px; border-radius: 6px; cursor: pointer; }
+.oc-tc-cat.is-on { background: var(--oc-surface-color); font-weight: 600; }
+.oc-tc-heading { margin: 0 0 6px; font-size: 13px; font-weight: 600; }
+.oc-tc-note { margin: 0 0 10px; color: var(--oc-muted-text-color); }
+.oc-tc-list { display: flex; flex-direction: column; gap: 6px; }
+.oc-tc-item { display: flex; align-items: center; gap: 8px; justify-content: space-between; }
+.oc-tc-site { font-weight: 600; word-break: break-all; }
+.oc-tc-who { color: var(--oc-muted-text-color); font-size: 12px; word-break: break-word; }
+@media (max-width: 520px) { .oc-tc { grid-template-columns: 1fr; } .oc-tc-nav { border-right: 0; padding-right: 0; } }

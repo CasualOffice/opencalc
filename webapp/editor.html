@@ -228,6 +228,15 @@
         <div class="oc-modal-body" id="oc-modal-body"></div>
       </div>
     </div>
+    <!-- The Security Notice (`MACRO-13`): a message box over whatever is
+         open, as Excel raises its own over the window that caused it. -->
+    <div class="oc-modal oc-net-notice" id="oc-net-notice" hidden>
+      <div class="oc-modal-box" role="alertdialog" aria-modal="true" aria-labelledby="oc-net-notice-title" aria-describedby="oc-net-notice-text">
+        <button class="oc-modal-x" id="oc-net-notice-x" aria-label="Close"><svg viewBox="0 0 20 20" width="16" height="16" fill="currentColor" aria-hidden="true"><use href="#fi-dismiss"/></svg></button>
+        <h2 class="oc-modal-title" id="oc-net-notice-title">OpenCalc Security Notice</h2>
+        <div class="oc-modal-body" id="oc-net-notice-body"></div>
+      </div>
+    </div>
 
     <!-- Hidden file picker; triggered from the header Open button and File ▸ Open.
          File ops (New / Open / Download) live in the header + File menu, not the
@@ -267,6 +276,9 @@
     <!-- Custom functions (`MACRO-04`): a workbook that arrives defining its own
          worksheet functions keeps its saved values until Enable is chosen. -->
     <div class="oc-recovery oc-macro-bar" id="oc-cf-bar" role="status" hidden></div>
+    <!-- Network access (`MACRO-13`, docs/99 §5a): Excel's Security Warning
+         message bar, shown while a workbook's code is blocked from a site. -->
+    <div class="oc-recovery oc-net-bar" id="oc-net-bar" role="status" hidden></div>
 
     <div class="toolbar" role="toolbar" aria-label="Formatting">
       <div class="tb-group tb-keep">

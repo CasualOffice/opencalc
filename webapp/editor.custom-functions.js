@@ -39,6 +39,7 @@ import {
   statusError,
   wasm,
 } from "./editor.core.js";
+import { CallClock, serveNetwork } from "./editor.network.js";
 
 /// Per call. Generous for computation; a loop that never ends is cut off well
 /// before anybody wonders whether the editor has hung (it has not: the call
@@ -56,6 +57,10 @@ const cf = {
   /// Runtimes the person said "Not now" to.
   declined: new Set(),
   worker: null,
+  /// The running call's clock, which a network request stops (`MACRO-13`).
+  clock: null,
+  /// Stops answering the worker's network requests.
+  stopNetwork: null,
   /// The sources the worker was loaded with, for a restart.
   sources: [],
   registering: false,
@@ -89,8 +94,21 @@ export function mayRunCustomFunctions() {
 }
 
 function stopWorker() {
+  try { cf.stopNetwork?.(); } catch {}
+  cf.stopNetwork = null;
   try { cf.worker?.terminate(); } catch {}
   cf.worker = null;
+}
+
+/// What the Security Notice calls the source `guid` asked from (`MACRO-13`):
+/// the functions it registered, else its name. `null` for a guid this page
+/// did not load — the worker's word is not taken for who asked.
+function askerLabel(sources, names, guid) {
+  const src = sources.find((s) => String(s.guid) === guid);
+  if (!src) return null;
+  const fns = names.get(guid);
+  const label = fns && fns.length ? fns.join(", ") : String(src.name || "Function");
+  return label.length > 120 ? `${label.slice(0, 117)}…` : label;
 }
 
 /// A fresh sandbox loaded with `sources`. Resolves `{functions, errors}`.
@@ -99,6 +117,14 @@ function startWorker(sources) {
   const worker = new Worker(new URL(`./custom-functions.worker.js?b=${BUILD}`, import.meta.url), { type: "module" });
   cf.worker = worker;
   cf.sources = sources;
+  /// guid → the function names it registered, filled when loading answers.
+  const names = new Map();
+  cf.stopNetwork = serveNetwork(worker, {
+    kind: "functions",
+    sources: sources.map(({ guid, name, source }) => ({ guid, name, source })),
+    label: (guid) => askerLabel(sources, names, guid),
+    clock: () => (cf.worker === worker ? cf.clock : null),
+  });
   return new Promise((resolve) => {
     const timer = setTimeout(() => {
       if (cf.worker === worker) stopWorker();
@@ -112,6 +138,11 @@ function startWorker(sources) {
     worker.onmessage = (ev) => {
       if (ev.data?.type !== "loaded") return;
       clearTimeout(timer);
+      for (const f of ev.data.functions || []) {
+        const g = String(f.guid);
+        if (!names.has(g)) names.set(g, []);
+        names.get(g).push(String(f.name));
+      }
       resolve({ functions: ev.data.functions || [], errors: ev.data.errors || [] });
     };
     worker.postMessage({ type: "load", sources: sources.map(({ guid, name, source }) => ({ guid, name, source })) });
@@ -169,8 +200,11 @@ function runCall(call) {
     const worker = cf.worker;
     if (!worker) { resolve({ error: "#BUSY!" }); return; }
     let timer = null;
+    let clock = null;
     const done = (value) => {
       clearTimeout(timer);
+      clock?.stop();
+      if (cf.clock === clock) cf.clock = null;
       worker.removeEventListener("message", onMessage);
       resolve(value);
     };
@@ -179,12 +213,17 @@ function runCall(call) {
       if (m.ticket !== call.ticket) return;
       if (m.type === "started") {
         clearTimeout(timer);
-        timer = setTimeout(() => {
+        // The clock stops while the function waits on the page for a
+        // request (`MACRO-13`): the person answering the Security Notice,
+        // or the site answering, is not the function running.
+        clock = new CallClock(() => {
           // Stopped from outside; the next call gets a new sandbox.
           if (cf.worker === worker) stopWorker();
           status.textContent = `custom function ${call.name} ran longer than ${cf.limitMs} ms and was stopped`;
           done({ error: "#VALUE!" });
-        }, cf.limitMs);
+        });
+        cf.clock = clock;
+        clock.arm(cf.limitMs);
       } else if (m.type === "result") {
         if (m.message) status.textContent = `custom function ${call.name}: ${m.message}`;
         done(m.value);

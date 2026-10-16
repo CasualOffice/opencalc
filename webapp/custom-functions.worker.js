@@ -22,12 +22,17 @@
 // which nothing inside it can prevent.
 
 import { MacroError } from "./macro.api.js";
+import { networkStubs } from "./macro.net-stub.js";
 import { lockdown } from "./macro.sandbox.js";
 import { CellError, convertAnswer, convertArgument, describe, parseJsDoc, versionOf } from "./custom-functions.js";
 
 /// Taken before user code exists; the globals are closed by `lockdown`.
 const post = self.postMessage.bind(self);
 const listen = self.addEventListener.bind(self);
+/// What a function calls `fetch` (`MACRO-13`, docs/99 §5a): a request to the
+/// page, never a network primitive. One per source, so the page can name the
+/// source that asked.
+const stubFor = networkStubs(post, listen);
 
 /// NAME → { fn, meta }
 const registered = new Map();
@@ -38,7 +43,7 @@ function compile(source) {
     throw new MacroError("SandboxViolation", "import is not available to macros (remove the word `import`)");
   }
   // eslint-disable-next-line no-new-func
-  return new Function("Api", source);
+  return new Function("Api", "fetch", source);
 }
 
 function lineOf(err) {
@@ -95,7 +100,7 @@ function load(sources) {
     const calls = (source.match(/\.AddCustomFunction\(/g) || []).length;
     docs.length = Math.min(docs.length, calls);
     try {
-      run.call(undefined, apiFor(entry, docs, functions, errors));
+      run.call(undefined, apiFor(entry, docs, functions, errors), stubFor(entry.guid));
     } catch (err) {
       const message = err && err.message ? String(err.message) : String(err);
       errors.push({ guid: entry.guid, name: entry.name, message, line: lineOf(err) });

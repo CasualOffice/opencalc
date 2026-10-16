@@ -149,6 +149,39 @@ security hole. Without consent, §5's "no network" holds unchanged.
   function's return value or the macro API, never as HTML, script or a
   formula.
 
+**As built** (precision the implementation added; nothing above is relaxed):
+
+- The stub reaches a script as the *name* `fetch` — a parameter of the
+  compiled source — so `self.fetch`, `globalThis.fetch` and every prototype
+  route still meet the lockdown's `SandboxViolation`. One stub per source, so
+  the page knows which source asked; the page checks that against the sources
+  it loaded and takes nothing else from the worker.
+- "The exact sources that asked": for a macro, its source; for custom
+  functions, **every** custom-function source loaded into the worker, since
+  they share one global scope and any one of them can change what another
+  sends. The SHA-256 is computed by the page. Editing any of them asks again,
+  and the first request after an edit deletes the grants the old hash held.
+- **The document id.** XL-FEAT-113's carried id is not built yet. Until it
+  is, a grant is keyed by the half of its design that needs nothing in the
+  file: the SHA-256 of the opened bytes, or, for a workbook that did not come
+  from bytes (new, joined, recovered), an id for this tab only. This is
+  narrower than the carried id — a grant does not survive a save, so the
+  person is asked again — never wider.
+- **The clock.** A call's or a run's time limit stops while the Security
+  Notice is up (the person's time) and while its requests are in flight, the
+  latter for at most 60 s in total per call or run, so a slow allowed site
+  cannot hold a function open for ever.
+- A macro's run ends when no request is waiting on the page, so an
+  ONLYOFFICE-style `(async function () { await fetch(…) })()` is waited for;
+  a rejection it leaves unhandled fails the run and nothing is applied.
+- The Security Notice is a message box above any open dialog (the Macros
+  window included); its focus starts on **Disable**, and Escape, the close
+  button and Enter-on-Disable all answer Disable. After Disable the bar stays,
+  with **Enable Content**, until the tab closes, as Excel's does.
+- Grants are stored under `localStorage["opencalc.network-grants.v1"]`; the
+  Trust Center is File ▸ Options ▸ Trust Center ▸ Trust Center Settings… ▸
+  External Content.
+
 ## 6. Phases
 
 | Row | Scope |

@@ -698,6 +698,23 @@ function createShell({ root, host, editor }) {
       .map(([v, label]) => ({ label, pick: () => applyLabels(v), on: () => store.get(LABELS_KEY, LABELS_DEFAULT) === v }))));
     wrap.appendChild(ribbon);
 
+    // Excel: File ▸ Options ▸ Trust Center ▸ Trust Center Settings… (MACRO-13).
+    if (command("file.trust-center")) {
+      const trust = h("div", "rb-section");
+      trust.appendChild(h("h2", "rb-section-title", "Trust Center"));
+      const list = h("div", "rb-page-list");
+      const b = h("button", "rb-page-item");
+      b.type = "button";
+      b.dataset.ocProxy = "file.trust-center";
+      const text = h("span", "rb-item-text");
+      text.append(h("span", "rb-item-label", "Trust Center Settings…"), h("span", "rb-item-desc", "Sites this device lets a workbook's macros and custom functions connect to"));
+      b.append(icon("shield", 20), text);
+      b.addEventListener("click", () => { closeBackstage(); run("file.trust-center"); });
+      list.appendChild(b);
+      trust.appendChild(list);
+      wrap.appendChild(trust);
+    }
+
     if (command("tools.settings")) {
       const more = h("div", "rb-section");
       const list = h("div", "rb-page-list");
