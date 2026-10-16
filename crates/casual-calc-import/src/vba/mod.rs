@@ -12,9 +12,9 @@
 //!
 //! # The format
 //!
-//! `vbaProject.bin` is a Compound File (`[MS-CFB]`, [`cfb`]) holding a VBA
+//! `vbaProject.bin` is a Compound File (`[MS-CFB]`, module `cfb`) holding a VBA
 //! storage (`[MS-OVBA]`). Its `VBA/dir` stream, compressed with the
-//! `[MS-OVBA]` §2.4.1 algorithm ([`ovba`]), lists the project's code page and
+//! `[MS-OVBA]` §2.4.1 algorithm (module `ovba`), lists the project's code page and
 //! its modules, each with the stream that holds it and the offset in that
 //! stream (`MODULEOFFSET`) where the compressed **source text** begins — before
 //! it is compiled p-code, which this does not read. The `PROJECT` stream, plain
