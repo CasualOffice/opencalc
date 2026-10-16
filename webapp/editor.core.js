@@ -3237,11 +3237,25 @@ export function draw() {
   // Merged ranges: paint each as one cell — erase interior gridlines, redraw the
   // top-left cell's fill + text across the span, outline it.
   for (const m of sheetMerges) {
-    const it = items.find((t) => t.r === m.r0 && t.c === m.c0);
+    // The block's fill and text are its top-left cell's, wherever that cell is.
+    // `items` holds only the window, so once the anchor scrolls out (a banner
+    // merged across from column A, scrolled right) it is not there — and the
+    // block painted white and lost its title as column A left the view. Fetch
+    // the anchor itself when the window did not; only for merges actually drawn.
+    let it = items.find((t) => t.r === m.r0 && t.c === m.c0);
+    let anchorFetched = it !== undefined;
+    const anchorItem = () => {
+      if (!anchorFetched) {
+        anchorFetched = true;
+        try { it = JSON.parse(wasm.session_cells(state.sheet, m.r0, m.c0, m.r0, m.c0)).find((t) => t.r === m.r0 && t.c === m.c0); } catch { it = undefined; }
+      }
+      return it;
+    };
     const selected = mergeInSel(m);
     for (const s of mergeSlices(m)) {
       const { x: mx, y: my, w: mw, h: mh } = s;
       if (mx > v.w || my > v.h || mx + mw < HW || my + mh < HH) continue;
+      anchorItem();
       withSliceClip(s, () => {
         ctx.fillStyle = it && it.bg ? "#" + it.bg : colors.bg;
         ctx.fillRect(mx, my, mw, mh);
