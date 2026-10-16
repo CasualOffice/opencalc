@@ -187,16 +187,160 @@ pub fn coverage_face_bytes(ch: char, bold: bool, italic: bool) -> Option<&'stati
     // font did so because the bundled ones were not enough, and consulting them
     // second would mean a bundled face that half-covers a script wins over the
     // one chosen deliberately.
-    registered()
-        .iter()
-        .copied()
-        .find(|&bytes| face_covers(bytes, ch))
+    find_registered(ch)
         .or_else(|| {
             FAMILIES
                 .iter()
                 .map(|family| family.face_bytes(bold, italic))
                 .find(|&bytes| face_covers(bytes, ch))
         })
+        // A CJK slice the host has handed over covers its characters too, so
+        // the coverage report does not call a loaded script missing.
+        .or_else(|| crate::cjk::any_loaded(ch))
+}
+
+/// The face one character is drawn in, and what would draw it better.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Resolved {
+    /// The face that draws it now, or `None` when nothing loaded can.
+    pub face: Option<&'static [u8]>,
+    /// The CJK variant that *should* draw it and is not loaded for it — what
+    /// a host fetches before exporting. `Some` alongside a `face` when a
+    /// stand-in is drawing it (another region's slice, a Latin face for the
+    /// Latin text of an East Asian font); `Some` with no face is a character
+    /// that would be drawn as nothing.
+    pub wanted: Option<crate::cjk::Variant>,
+    /// Draw it emboldened: bold was asked for and the face is a regular one
+    /// (the serif CJK faces ship no bold, as Excel's own do not).
+    pub synthetic_bold: bool,
+    /// The width every shipped CJK face gives this character, in ems, when
+    /// that is fixed ([`crate::cjk::nominal_advance_em`]) — what it is
+    /// measured at while its face is not loaded.
+    pub nominal_em: Option<f32>,
+}
+
+/// Which face draws each character of one run of text (`XL-FEAT-140`).
+///
+/// Built once per run, because the CJK region is a property of the whole run —
+/// a Calibri cell with kana in it draws its Han in the Japanese face — and
+/// then asked per character. The single place the renderers, the PDF writer
+/// and [`crate::advance_width`] decide this, so they cannot draw a character
+/// in one face and measure it in another.
+///
+/// Order, per character:
+///
+/// 1. An East Asian font (`ＭＳ 明朝`) draws everything its slice covers,
+///    Latin included, as Excel's does.
+/// 2. Otherwise the cell's own (substituted) face, if it has the glyph.
+/// 3. CJK text: the run's region, then the other regions — the same chain the
+///    editor's CSS font stack lists, so screen and export agree.
+/// 4. Anything else: the supplied and bundled faces, as before.
+#[derive(Debug, Clone, Copy)]
+pub struct TextFaces {
+    primary: &'static [u8],
+    own: Option<crate::cjk::Variant>,
+    target: crate::cjk::Variant,
+    bold: bool,
+    italic: bool,
+}
+
+impl TextFaces {
+    /// The resolver for `text` in `family`, bold or italic as given.
+    #[must_use]
+    pub fn new(family: Option<&str>, bold: bool, italic: bool, text: &str) -> Self {
+        use crate::cjk::{Style, Variant, east_asian, region_for};
+        let own = family
+            .and_then(east_asian)
+            .map(|(region, style)| Variant::new(region, style, bold));
+        let style = own.map_or_else(
+            || {
+                let serif = family
+                    .and_then(crate::substitution::substitute)
+                    .is_some_and(|s| s.family.generic == "serif");
+                if serif { Style::Serif } else { Style::Sans }
+            },
+            |v| v.style,
+        );
+        let target = Variant::new(region_for(family, text), style, bold);
+        Self {
+            primary: face_bytes_for(family, bold, italic),
+            own,
+            target,
+            bold,
+            italic,
+        }
+    }
+
+    /// The face the run's metrics (ascent, descent) come from: the cell's
+    /// substituted Latin face.
+    #[must_use]
+    pub fn primary(&self) -> &'static [u8] {
+        self.primary
+    }
+
+    /// The CJK variant this run's East Asian text is drawn in.
+    #[must_use]
+    pub fn target(&self) -> crate::cjk::Variant {
+        self.target
+    }
+
+    fn cjk(&self, ch: char, first: crate::cjk::Variant) -> Option<(&'static [u8], bool)> {
+        first
+            .chain()
+            .into_iter()
+            .enumerate()
+            .find_map(|(i, v)| crate::cjk::loaded_face(v, ch).map(|f| (f, i == 0)))
+    }
+
+    /// The face for one character.
+    #[must_use]
+    pub fn resolve(&self, ch: char) -> Resolved {
+        let (face, wanted, synthetic_bold) = self.pick(ch);
+        Resolved {
+            face,
+            wanted,
+            synthetic_bold,
+            nominal_em: crate::cjk::nominal_advance_em(
+                ch,
+                self.own.map_or(self.target.style, |v| v.style),
+            ),
+        }
+    }
+
+    fn pick(&self, ch: char) -> (Option<&'static [u8]>, Option<crate::cjk::Variant>, bool) {
+        let cjk = crate::cjk::is_cjk(ch);
+        let synth = |v: crate::cjk::Variant| self.bold && v.weight < 700;
+        if let Some(own) = self.own {
+            if let Some((face, exact)) = self.cjk(ch, own) {
+                return (Some(face), (!exact).then_some(own), synth(own));
+            }
+            if !cjk {
+                // Latin in an East Asian font, its slice not loaded: the Latin
+                // stand-in draws it meanwhile, and the slice is still wanted.
+                let face = covers(self.primary, ch)
+                    .then_some(self.primary)
+                    .or_else(|| coverage_face_bytes(ch, self.bold, self.italic));
+                return (face, Some(own), false);
+            }
+        } else if covers(self.primary, ch) {
+            return (Some(self.primary), None, false);
+        }
+        if cjk {
+            let target = self.own.unwrap_or(self.target);
+            if let Some((face, exact)) = self.cjk(ch, target) {
+                return (Some(face), (!exact).then_some(target), synth(target));
+            }
+            // A face the host supplied for CJK still draws it, but the slice
+            // is what the screen shows, so it is still wanted.
+            let supplied = find_registered(ch);
+            return (supplied, Some(target), false);
+        }
+        (coverage_face_bytes(ch, self.bold, self.italic), None, false)
+    }
+}
+
+fn covers(bytes: &'static [u8], ch: char) -> bool {
+    face_covers(bytes, ch)
 }
 
 /// Faces supplied at runtime, in the order they were given.
@@ -214,13 +358,20 @@ pub fn coverage_face_bytes(ch: char, bold: bool, italic: bool) -> Option<&'stati
 /// already serves static assets, and it can ship one font or twenty without
 /// this crate changing. What stays here is Latin, because something has to work
 /// with no configuration at all.
-fn registered() -> &'static [&'static [u8]] {
-    REGISTERED.read().map_or(&[], |guard| {
-        // Leaked deliberately: a font lives as long as the process, the list only
-        // grows, and handing out `&'static` keeps every call site below free of
-        // lifetimes it would otherwise thread through the whole renderer.
-        Box::leak(guard.clone().into_boxed_slice())
-    })
+///
+/// (Japanese, Chinese and Korean are now shipped as slices a host registers
+/// with [`crate::cjk::register_slice`] — `XL-FEAT-140` — which is this same
+/// "a host supplies them" design with the files provided.)
+///
+/// The first supplied face covering `ch`, searched under the lock.
+///
+/// This used to hand out the list itself by **leaking a copy of it on every
+/// call** — eight bytes per registered face per character looked up, for the
+/// life of the process, on the per-glyph path. The faces are `'static`
+/// already; the list does not need to be.
+fn find_registered(ch: char) -> Option<&'static [u8]> {
+    let guard = REGISTERED.read().ok()?;
+    guard.iter().copied().find(|&bytes| face_covers(bytes, ch))
 }
 
 static REGISTERED: std::sync::RwLock<Vec<&'static [u8]>> = std::sync::RwLock::new(Vec::new());
@@ -271,7 +422,7 @@ pub struct MissingScript {
 /// Anything unrecognised is reported under its code point instead of being
 /// dropped, because a character nobody anticipated is exactly the one worth
 /// mentioning.
-fn block_of(ch: char) -> &'static str {
+pub fn script_of(ch: char) -> &'static str {
     match u32::from(ch) {
         0x0590..=0x05FF | 0xFB1D..=0xFB4F => "Hebrew",
         0x0600..=0x06FF | 0x0750..=0x077F | 0xFB50..=0xFDFF | 0xFE70..=0xFEFF => "Arabic",
@@ -329,7 +480,7 @@ pub fn missing_scripts(text: &str) -> Vec<MissingScript> {
         if coverage_face_bytes(ch, false, false).is_some() {
             continue;
         }
-        let script = block_of(ch);
+        let script = script_of(ch);
         if !found.iter().any(|m| m.script == script) {
             found.push(MissingScript { script, sample: ch });
         }

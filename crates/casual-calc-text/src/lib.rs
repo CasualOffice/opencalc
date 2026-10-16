@@ -26,9 +26,14 @@
 //!   remains the single source of truth it always was.
 //! - [`faces`] — the bundled bytes, moved from `casual-calc-render`.
 //! - [`advance_width`] — how wide a string is in those bytes.
+//! - [`cjk`] — Japanese, Chinese and Korean: the East Asian font names, the
+//!   region a run is drawn in, and the slices a host supplies (`XL-FEAT-140`).
+//! - [`woff2`] — reading those slices, which are WOFF2.
 
+pub mod cjk;
 pub mod faces;
 pub mod substitution;
+pub mod woff2;
 
 use skrifa::{FontRef, MetadataProvider, instance::LocationRef, prelude::Size};
 
@@ -56,30 +61,34 @@ pub fn advance_width(text: &str, px: f32, bold: bool, italic: bool, family: Opti
     if text.is_empty() || !px.is_finite() || px <= 0.0 {
         return 0.0;
     }
-    let bytes = faces::face_bytes_for(family, bold, italic);
-    let Ok(font) = FontRef::new(bytes) else {
-        return 0.0;
-    };
-    let size = Size::new(px);
-    let loc = LocationRef::default();
-    let charmap = font.charmap();
-    let metrics = font.glyph_metrics(size, loc);
-
+    let faces = faces::TextFaces::new(family, bold, italic, text);
     text.chars()
-        .map(|ch| {
-            if let Some(g) = charmap.map(ch) {
-                return metrics.advance_width(g).unwrap_or(0.0);
-            }
-            faces::coverage_face_bytes(ch, bold, italic)
-                .and_then(|bytes| FontRef::new(bytes).ok())
-                .and_then(|fb| {
-                    let g = fb.charmap().map(ch)?;
-                    fb.glyph_metrics(size, loc).advance_width(g)
-                })
-                .unwrap_or(0.0)
-        })
+        .map(|ch| char_advance(&faces.resolve(ch), ch, px))
         .sum()
 }
 
+/// How far one character advances the pen, in pixels at `px`, in the face it
+/// resolved to.
+///
+/// With no face — a CJK slice that has not loaded yet — the width is the one
+/// every CJK face gives it ([`cjk::nominal_advance_em`]): one em for an
+/// ideograph, kana or hangul syllable, half for the half-width forms. So a
+/// column measured before the face arrives is already the right width for
+/// that text, and the renderers leave the same gap a drawn glyph would.
+#[must_use]
+pub fn char_advance(resolved: &faces::Resolved, ch: char, px: f32) -> f32 {
+    let drawn = resolved.face.and_then(|bytes| {
+        let font = FontRef::new(bytes).ok()?;
+        let g = font.charmap().map(ch)?;
+        font.glyph_metrics(Size::new(px), LocationRef::default())
+            .advance_width(g)
+    });
+    drawn
+        .or_else(|| resolved.nominal_em.map(|em| em * px))
+        .unwrap_or(0.0)
+}
+
+#[cfg(test)]
+mod cjk_tests;
 #[cfg(test)]
 mod tests;

@@ -20,9 +20,14 @@
 use casual_calc_text::faces as fonts;
 mod images;
 pub mod pdf;
+mod subset;
+
+/// Japanese, Chinese and Korean faces, re-exported for hosts that drive this
+/// crate (`XL-FEAT-140`): register the slices, set the default region.
+pub use casual_calc_text::cjk;
 
 pub use casual_calc_text::faces::{
-    MissingScript, missing_scripts, register_face, registered_count,
+    MissingScript, Resolved, TextFaces, missing_scripts, register_face, registered_count, script_of,
 };
 pub use images::{
     ImageReport, ImageSource, MAX_IMAGE_PIXELS, NoImages, UndrawnImage, UndrawnReason,
@@ -723,7 +728,8 @@ fn draw_glyphs(
     viewport: &Viewport,
     dpi: u32,
 ) {
-    let bytes = fonts::face_bytes_for(font_name, bold, italic);
+    let faces = fonts::TextFaces::new(font_name, bold, italic, content);
+    let bytes = faces.primary();
     let Ok(font) = FontRef::new(bytes) else {
         return;
     };
@@ -733,29 +739,19 @@ fn draw_glyphs(
     }
     let size = Size::new(size_px);
     let loc = LocationRef::default();
-    let charmap = font.charmap();
-    let glyph_metrics = font.glyph_metrics(size, loc);
     let metrics = font.metrics(size, loc);
-    let outlines = font.outline_glyphs();
 
-    // Per-glyph advance: the primary face when it covers `ch`, otherwise the
-    // coverage-fallback face's advance for that glyph (so the run stays metric-
-    // correct across faces), or 0.0 if nothing covers it.
-    let advance = |ch: char| -> f32 {
-        if let Some(g) = charmap.map(ch) {
-            return glyph_metrics.advance_width(g).unwrap_or(0.0);
-        }
-        fonts::coverage_face_bytes(ch, bold, italic)
-            .and_then(|bytes| FontRef::new(bytes).ok())
-            .and_then(|fb| {
-                let fb_charmap = fb.charmap();
-                let g = fb_charmap.map(ch)?;
-                fb.glyph_metrics(size, loc).advance_width(g)
-            })
-            .unwrap_or(0.0)
-    };
+    // Per character: the face `TextFaces` resolves it to — the cell's own,
+    // a CJK slice, or the coverage fallback — so the run stays metric-correct
+    // across faces, and a CJK character whose slice has not loaded keeps its
+    // one-em gap (`XL-FEAT-140`). The PDF writer and `advance_width` resolve
+    // through the same type, so all three agree.
+    let resolved: Vec<(char, fonts::Resolved)> =
+        content.chars().map(|ch| (ch, faces.resolve(ch))).collect();
+    let advance =
+        |ch: char, r: &fonts::Resolved| -> f32 { casual_calc_text::char_advance(r, ch, size_px) };
     // First pass: total advance width, to place the run for the requested align.
-    let total: f32 = content.chars().map(advance).sum();
+    let total: f32 = resolved.iter().map(|(ch, r)| advance(*ch, r)).sum();
 
     let x0 = twips_to_px(rect.x - viewport.x, dpi);
     let y0 = twips_to_px(rect.y - viewport.y, dpi);
@@ -774,13 +770,17 @@ fn draw_glyphs(
     let baseline_y = y0 + ((h - text_h) / 2.0).max(0.0) + metrics.ascent;
 
     let mut builder = PathBuilder::new();
+    // Glyphs drawn emboldened — bold asked of a CJK face that ships no bold,
+    // which Windows draws by thickening the regular outline. Kept apart so
+    // they alone are stroked as well as filled.
+    let mut emboldened = PathBuilder::new();
 
     // Shaped path first, when the build has a shaper and one face covers the
     // whole run. A run spanning two faces falls through to the per-`char` loop
     // below: shaping is defined against a single face, and shaping each part
     // separately would place them by two different sets of rules.
     #[cfg(feature = "shaping")]
-    if let Some(face_bytes) = single_face_for(content, font_name, bold, italic)
+    if let Some((face_bytes, synthetic)) = single_face_for(&resolved)
         && let Some(shaped) = shape::run(face_bytes, content, size_px)
         && let Ok(shaped_font) = FontRef::new(face_bytes)
     {
@@ -791,10 +791,15 @@ fn draw_glyphs(
             Align::Right => x0 + w - pad - total_shaped,
             Align::Center => x0 + (w - total_shaped) / 2.0,
         };
+        let target = if synthetic {
+            &mut emboldened
+        } else {
+            &mut builder
+        };
         for glyph in &shaped {
             if let Some(outline) = shaped_outlines.get(skrifa::GlyphId::from(glyph.id)) {
                 let mut pen = GlyphPen {
-                    builder: &mut builder,
+                    builder: target,
                     origin_x: x + glyph.x_offset,
                     baseline_y: baseline_y - glyph.y_offset,
                 };
@@ -803,78 +808,80 @@ fn draw_glyphs(
             x += glyph.advance;
         }
         finish_text(pixmap, builder, color);
+        finish_emboldened(pixmap, emboldened, color, size_px);
         return;
     }
 
-    for ch in content.chars() {
-        if let Some(gid) = charmap.map(ch) {
-            // Primary face covers this char: outline from it.
-            if let Some(glyph) = outlines.get(gid) {
-                let mut pen = GlyphPen {
-                    builder: &mut builder,
-                    origin_x: pen_x,
-                    baseline_y,
-                };
-                let settings = DrawSettings::unhinted(size, loc);
-                let _ = glyph.draw(settings, &mut pen);
-            }
-        } else if let Some(bytes) = fonts::coverage_face_bytes(ch, bold, italic)
-            && let Ok(fb) = FontRef::new(bytes)
+    for (ch, r) in &resolved {
+        if let Some(face) = r.face
+            && let Ok(fb) = FontRef::new(face)
+            && let Some(gid) = fb.charmap().map(*ch)
+            && let Some(glyph) = fb.outline_glyphs().get(gid)
         {
-            // Coverage fallback: outline from the first family that covers `ch`,
-            // accumulating into the same builder (uniform fill color) at the same
-            // pen position, size, and baseline.
-            let fb_charmap = fb.charmap();
-            let fb_outlines = fb.outline_glyphs();
-            if let Some(gid) = fb_charmap.map(ch)
-                && let Some(glyph) = fb_outlines.get(gid)
-            {
-                let mut pen = GlyphPen {
-                    builder: &mut builder,
-                    origin_x: pen_x,
-                    baseline_y,
-                };
-                let settings = DrawSettings::unhinted(size, loc);
-                let _ = glyph.draw(settings, &mut pen);
-            }
+            let mut pen = GlyphPen {
+                builder: if r.synthetic_bold {
+                    &mut emboldened
+                } else {
+                    &mut builder
+                },
+                origin_x: pen_x,
+                baseline_y,
+            };
+            let _ = glyph.draw(DrawSettings::unhinted(size, loc), &mut pen);
         }
-        pen_x += advance(ch);
+        pen_x += advance(*ch, r);
     }
     finish_text(pixmap, builder, color);
+    finish_emboldened(pixmap, emboldened, color, size_px);
 }
 
-/// The one face that covers every character of `content`, if there is one.
+/// The one face that draws every character of a run, if there is one, and
+/// whether it is drawn emboldened.
 ///
 /// Shaping is defined against a single face. A run spanning two of them — a
-/// Latin word beside a Hebrew one, where the bundled families split the
-/// coverage — has no single set of rules to shape by, so the caller keeps the
-/// per-`char` path for it. That path is already correct for exactly the case it
-/// is kept for: unshaped, left to right, one glyph per character.
+/// Latin word beside a Hebrew one, or Latin beside CJK — has no single set of
+/// rules to shape by, so the caller keeps the per-`char` path for it. That
+/// path is already correct for exactly the case it is kept for: unshaped,
+/// left to right, one glyph per character.
 #[cfg(feature = "shaping")]
-fn single_face_for(
-    content: &str,
-    font_name: Option<&str>,
-    bold: bool,
-    italic: bool,
-) -> Option<&'static [u8]> {
-    let primary = fonts::face_bytes_for(font_name, bold, italic);
-    if let Ok(font) = FontRef::new(primary) {
-        let charmap = font.charmap();
-        if content.chars().all(|ch| charmap.map(ch).is_some()) {
-            return Some(primary);
-        }
-    }
-    // Otherwise the first fallback that covers the whole run, which is what a
-    // single-script cell in a script the primary lacks looks like.
-    let first = content.chars().next()?;
-    let candidate = fonts::coverage_face_bytes(first, bold, italic)?;
-    let font = FontRef::new(candidate).ok()?;
-    let charmap = font.charmap();
-    content
-        .chars()
-        .all(|ch| charmap.map(ch).is_some())
-        .then_some(candidate)
+fn single_face_for(resolved: &[(char, fonts::Resolved)]) -> Option<(&'static [u8], bool)> {
+    let (_, first) = resolved.first()?;
+    let face = first.face?;
+    resolved
+        .iter()
+        .all(|(_, r)| {
+            r.face.is_some_and(|f| std::ptr::eq(f, face))
+                && r.synthetic_bold == first.synthetic_bold
+        })
+        .then_some((face, first.synthetic_bold))
 }
+
+/// Fill, then stroke, glyphs being drawn emboldened: the stroke thickens every
+/// edge by a fiftieth of an em, about the difference Windows' simulated bold
+/// makes.
+fn finish_emboldened(pixmap: &mut Pixmap, builder: PathBuilder, color: Color, size_px: f32) {
+    let Some(path) = builder.finish() else {
+        return;
+    };
+    let mut paint = Paint::default();
+    paint.set_color(color);
+    paint.anti_alias = true;
+    pixmap.fill_path(
+        &path,
+        &paint,
+        FillRule::Winding,
+        Transform::identity(),
+        None,
+    );
+    let stroke = tiny_skia::Stroke {
+        width: (size_px * SYNTHETIC_BOLD_EM).max(0.5),
+        ..tiny_skia::Stroke::default()
+    };
+    pixmap.stroke_path(&path, &paint, &stroke, Transform::identity(), None);
+}
+
+/// How much a synthetic bold thickens a glyph, in ems.
+pub(crate) const SYNTHETIC_BOLD_EM: f32 = 0.02;
 
 /// Fill an accumulated glyph path.
 ///
@@ -1242,5 +1249,7 @@ fn fill_thin(pixmap: &mut Pixmap, paint: &Paint, x: f32, y: f32, w: f32, h: f32)
     }
 }
 
+#[cfg(test)]
+mod cjk_tests;
 #[cfg(test)]
 mod tests;

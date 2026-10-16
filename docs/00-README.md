@@ -148,6 +148,7 @@ the other way around. This index is the map.
 | 97 | [Agent access](97-AGENT-ACCESS.md) | Owner-accepted design: one set of tools over the SDK, exposed as an MCP server, a CLI and a live-session participant; rows `AGENT-01..04` (`XL-FEAT-122`) |
 | 99 | [Macros and scripts](99-MACROS-AND-SCRIPTS.md) | Accepted: OnlyOffice's model — JavaScript macros against an OnlyOffice-compatible Office API, View ▸ Macros with autostart, stored in the workbook, `Api.AddCustomFunction`, VBA converted not run; rows `MACRO-01..05` (`XL-FEAT-038`) |
 | 100 | [Several embeds on one page](100-MULTI-EMBED.md) | Proposed: why two `<opencalc-sheet>` share one editor since `MNT-005`, and the options — an instance object, a multi-session engine, a same-origin iframe per element — with the engine's one-session model, memory and risk (`UX-SHELL-24`) |
+| 101 | [Japanese, Chinese and Korean fonts](101-CJK-FONTS.md) | Implemented: Noto CJK in four regions as unicode-range WOFF2 slices loaded on demand, Excel's East Asian font names mapped, per-glyph fallback shared by canvas, measurement and export, subset embedding in PDF (`XL-FEAT-140`) |
 
 ### Measured gap trackers (50–53, 73)
 

@@ -464,6 +464,7 @@ dependencies = [
 name = "casual-calc-text"
 version = "0.0.0"
 dependencies = [
+ "brotli-decompressor",
  "skrifa",
 ]
 
