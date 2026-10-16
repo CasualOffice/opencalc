@@ -317,6 +317,51 @@ test("the request carries no cookie, no referrer, no credentials and only Accept
   expect(req.headers.accept).toBe("text/plain");
 });
 
+test("the page makes the request with docs/99's fixed options, whatever the script asked for", async ({ page }) => {
+  // What the page hands the browser's own fetch. The network-level tests
+  // above cannot see every option — Chromium does not follow a redirect that
+  // a Playwright route fulfils for a CORS fetch, whatever \`redirect\` says —
+  // so the options themselves are held here.
+  await page.addInitScript(() => {
+    const real = window.fetch.bind(window);
+    window.__netCalls = [];
+    window.fetch = (input, init) => {
+      if (String(input).startsWith("https://api.example.com/")) {
+        const { signal, ...rest } = init || {};
+        window.__netCalls.push({ url: String(input), init: rest, signal: signal instanceof AbortSignal });
+      }
+      return real(input, init);
+    };
+  });
+  await boot(page);
+  await fakeApi(page);
+  const run = startMacro(page, `(async function () {
+    await fetch("${API}/v1/post", {
+      method: "POST", headers: { "Content-Type": "text/plain" }, body: "hi",
+      credentials: "include", mode: "no-cors", redirect: "follow", referrerPolicy: "unsafe-url", cache: "force-cache",
+      keepalive: true, integrity: "sha256-x", priority: "high",
+    });
+  })();`);
+  await expect(notice(page)).toBeVisible({ timeout: 10_000 });
+  await page.locator("#oc-net-notice-enable").click();
+  expect((await run).error).toBeNull();
+  const calls = await page.evaluate(() => window.__netCalls);
+  expect(calls).toEqual([{
+    url: "https://api.example.com/v1/post",
+    init: {
+      method: "POST",
+      headers: { "content-type": "text/plain" },
+      body: "hi",
+      credentials: "omit",
+      referrerPolicy: "no-referrer",
+      cache: "no-store",
+      mode: "cors",
+      redirect: "error",
+    },
+    signal: true,
+  }]);
+});
+
 test("headers, methods and bodies outside the rules are refused before anybody is asked", async ({ page }) => {
   await boot(page);
   const seen = await fakeApi(page);
@@ -346,7 +391,8 @@ test("hostile addresses are refused without a prompt", async ({ page }) => {
   const res = await startMacro(page, `(async function () {
     var urls = ["http://api.example.com/", "https://127.0.0.1/", "https://0x7f.1/", "https://2130706433/", "https://[::1]/",
       "https://[::ffff:127.0.0.1]/", "https://localhost/", "https://printer.local/", "https://intranet/", "https://u:p@api.example.com/",
-      "https://api.example.com:8443/", location.origin + "/editor.html"];
+      "https://api.example.com:8443/", location.origin + "/editor.html", "https://8.8.8.8/", "https://[2001:4860:4860::8888]/",
+      "https://0x08080808/"];
     var out = [];
     for (var i = 0; i < urls.length; i++) {
       try { await fetch(urls[i]); out.push("sent"); } catch (e) { out.push(e.name); }
@@ -354,7 +400,7 @@ test("hostile addresses are refused without a prompt", async ({ page }) => {
     Api.GetActiveSheet().GetRange("A1").SetValue(out.join(","));
   })();`.replace("location.origin", JSON.stringify(new URL(page.url()).origin.replace(/^http:/, "https:"))));
   expect(res.error).toBeNull();
-  expect((await input(page, 0, 0)).split(",")).toEqual(Array(12).fill("NetworkBlocked"));
+  expect((await input(page, 0, 0)).split(",")).toEqual(Array(15).fill("NetworkBlocked"));
   await expect(notice(page)).toBeHidden();
   await expect(bar(page)).toBeHidden();
 });
