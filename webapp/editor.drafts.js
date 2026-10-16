@@ -89,7 +89,8 @@ import {
   errText,
   getCapabilities,
   isDirty,
-  openBytes,
+  openBytesAsync,
+  openWasCancelled,
   savedAtEditsForDraft,
   status,
   statusError,
@@ -863,7 +864,9 @@ async function reviewDraft(meta) {
 async function loadDraftHere(meta) {
   const bytes = await readDraftBytes(meta.id);
   if (!bytes) { markUnreadable(meta, "stored without its bytes"); return; }
-  const ok = openBytes(bytes, meta.name || `draft.${meta.format || "xlsx"}`);
+  const ok = await openBytesAsync(bytes, meta.name || `draft.${meta.format || "xlsx"}`);
+  // Esc while it opened says nothing about the draft, which is kept unmarked.
+  if (!ok && openWasCancelled()) return;
   if (!ok) {
     // §5.7. The draft is kept and marked; `openBytes` has already put the
     // engine's own sentence in the status bar.

@@ -9,6 +9,7 @@
 import { syncVolatileClock } from "./editor.selection.js";
 import { offerAutostartMacros } from "./editor.macros-window.js";
 import { noteOpenedBytes } from "./editor.network.js";
+import { openInWorker, saveInWorker, yieldFrame } from "./editor.files.js";
 import {
   A1,
   HH,
@@ -51,6 +52,7 @@ import {
   statusError,
   stopMarch,
   syncClock,
+  clockReading,
   // A live binding: `editor.core.js` assigns it at mount, and this module reads
   // it only after boot has called `wireZoom()`.
   tabsEl,
@@ -546,8 +548,47 @@ function editsApplied() {
 
 /// The document is now on disk, or freshly loaded: this is the state to compare
 /// against.
-export function markSaved() {
-  savedAtEdits = editsApplied();
+///
+/// `written`, from [`writeBytes`], is the save that landed: the counter **when
+/// its copy was taken** and the document it was taken of. A save runs in a
+/// worker while the person keeps working (`PERF-16`), so an edit made during
+/// it is not in the file and must leave the document dirty; and a save of a
+/// document that has since been replaced by an open says nothing about the new
+/// one.
+export function markSaved(written) {
+  if (written === undefined) {
+    savedAtEdits = editsApplied();
+  } else if (written.generation === documentGeneration) {
+    savedAtEdits = written.at;
+  }
+}
+
+/// Bumped whenever the session is replaced by another document.
+let documentGeneration = 0;
+
+/// The bytes of a save, written in a worker when one is available
+/// (`PERF-16`), on this thread otherwise.
+///
+/// `what` is `{ native: true }`, `{ ext }` or `{ delim, sheet, ext }`.
+/// Resolves with `{ bytes }` or `{ text }` plus what [`markSaved`] needs, or
+/// `null` when the person pressed Esc — nothing is written then. Throws on a
+/// failure, as the engine calls it replaces did.
+async function writeBytes(what, name) {
+  const written = { at: editsApplied(), generation: documentGeneration };
+  const ext = what.native ? wasm.session_format() : what.ext;
+  // Opened and not edited: the bytes are the opened file's, a copy and no
+  // writer — nothing for a worker to do.
+  const verbatim = !what.delim && wasm.session_save_is_verbatim(ext);
+  if (!verbatim) {
+    const r = await saveInWorker({ ext, delim: what.delim, sheet: what.sheet }, name);
+    if (r.outcome === "ok") return { ...written, bytes: r.bytes, text: r.text };
+    if (r.outcome === "cancelled") return null;
+    if (r.outcome === "error") throw r.error;
+    if (r.outcome === "busy") throw new Error("a file is already being opened or saved");
+    // `unavailable`: the main-thread path, exactly as before.
+  }
+  if (what.delim) return { ...written, text: wasm.session_save_delimited(what.sheet, what.delim) };
+  return { ...written, bytes: what.native ? wasm.session_save_native() : wasm.session_save_as(ext) };
 }
 
 /// Whether anything has changed since the last save or load.
@@ -659,9 +700,13 @@ async function confirmLoss(ext, verb) {
 export async function doSaveFormat(ext) {
   if (!(await confirmLoss(ext, "Download"))) return false;
   let written;
+  let out;
   try {
+    out = await writeBytes({ ext }, `opencalc.${ext}`);
+    // Esc while saving: nothing was written and nothing is said.
+    if (!out) { status.textContent = ""; return false; }
     written = await download(
-      wasm.session_save_as(ext),
+      out.bytes,
       `opencalc.${ext}`,
       wasm.format_content_type(ext),
     );
@@ -674,7 +719,7 @@ export async function doSaveFormat(ext) {
     status.textContent = "";
     return false;
   }
-  markSaved();
+  markSaved(out);
   status.textContent = window.__opencalcNative
     ? `wrote a copy — ${written}`
     : `downloaded .${ext}`;
@@ -720,7 +765,15 @@ export async function doSaveDelimited(delim, ext) {
     );
     if (!ok) return false;
   }
-  const text = wasm.session_save_delimited(state.sheet, delim);
+  let out;
+  try {
+    out = await writeBytes({ delim, sheet: state.sheet, ext }, `opencalc.${ext}`);
+  } catch (e) {
+    statusError(`could not save: ${errText(e)}`);
+    return false;
+  }
+  if (!out) { status.textContent = ""; return false; }
+  const text = out.text;
   // A BOM so spreadsheet apps open it as UTF-8 rather than guessing a codepage
   // and turning every accented character into mojibake.
   //
@@ -730,7 +783,7 @@ export async function doSaveDelimited(delim, ext) {
   // A delimited export holds one sheet and no formatting, so it is a save point
   // only in the sense that the user has the data — which is what the warning is
   // about. Marking it clean is the honest reading of "you have this on disk".
-  markSaved();
+  markSaved(out);
   return true;
 }
 
@@ -757,7 +810,7 @@ export async function doSaveDelimited(delim, ext) {
 /// `true` the bytes landed, `false` they did not and the user has been told,
 /// and `"no-target"` — this document has never been saved, so the caller
 /// *acquires* a target through the panel rather than downloading.
-async function commitToTarget(bytes, force = false) {
+async function commitToTarget(bytes, force = false, saved = undefined) {
   const native = window.__opencalcNative;
   let outcome;
   try {
@@ -771,7 +824,7 @@ async function commitToTarget(bytes, force = false) {
     // **Only now.** `SAVE-01`'s lesson, and the reason this is awaited at all:
     // the document is marked saved by the completion of a write, never by the
     // start of one.
-    markSaved();
+    markSaved(saved);
     status.textContent = `saved ${outcome.name}`;
     return true;
   }
@@ -790,7 +843,7 @@ async function commitToTarget(bytes, force = false) {
         statusError(`not saved — ${outcome.name} changed on disk. File ▸ Download writes a copy under another name.`);
         return false;
       }
-      return await commitToTarget(bytes, true);
+      return await commitToTarget(bytes, true, saved);
     }
     statusError(`could not save: ${outcome.why}`);
     return false;
@@ -819,8 +872,18 @@ export async function doSaveNative(intent = "save") {
     if (!ok) return false;
   }
   const native = window.__opencalcNative;
+  // The bytes, once, before either destination: written off the page's
+  // thread, and `null` when Esc stopped the save — nothing is written then.
+  let out;
+  try {
+    out = await writeBytes({ native: true }, openedName || `opencalc.${ext}`);
+  } catch (e) {
+    statusError(`could not save: ${errText(e)}`);
+    return false;
+  }
+  if (!out) { status.textContent = ""; return false; }
   if (intent === "save" && native && native.saveTarget) {
-    const done = await commitToTarget(wasm.session_save_native());
+    const done = await commitToTarget(out.bytes, false, out);
     // Anything but "no-target" is an answer; only a document that has never
     // been saved falls through to the panel below.
     if (done !== "no-target") return done;
@@ -838,7 +901,7 @@ export async function doSaveNative(intent = "save") {
   let written;
   try {
     written = await download(
-      wasm.session_save_native(),
+      out.bytes,
       `opencalc.${ext}`,
       wasm.session_format_content_type(),
       // Acquiring a target, not writing a copy: the file the user names in this
@@ -854,7 +917,7 @@ export async function doSaveNative(intent = "save") {
     status.textContent = "";
     return false;
   }
-  markSaved();
+  markSaved(out);
   // **A download is not a save, and the status must not claim otherwise.**
   // In a browser tab this put a file in the downloads folder and the document
   // has no home to go back to; only a host that owns a file has actually
@@ -884,6 +947,7 @@ export async function doSaveNative(intent = "save") {
 /// name is now also the thing the shell matches a save target against.
 export function newDocument() {
   openedName = null;
+  documentGeneration += 1;
   const native = window.__opencalcNative;
   if (native && native.clearSaveTarget) {
     native.clearSaveTarget().catch((err) => console.error("[opencalc] clearSaveTarget", err));
@@ -1033,8 +1097,12 @@ export function setDocumentName(name) {
   return true;
 }
 
-export function openBytes(raw, name = "workbook.xlsx", budgetMs = undefined) {
-  let bytes = raw;
+/// What an open needs to know before it reads a byte: the format the name
+/// asks for, whether it is text, and the bytes the engine should be handed.
+///
+/// Throws when the build cannot open that format, which the callers report as
+/// they report any failed open.
+function prepareOpen(raw, name) {
   const dot = name.lastIndexOf(".");
   // No extension at all means a package — `openBytes(bytes)` names nothing and
   // that is what it has always meant. An extension the engine does *not* know
@@ -1045,34 +1113,32 @@ export function openBytes(raw, name = "workbook.xlsx", budgetMs = undefined) {
   // than copied into a table of the page's own. The copy is the defect
   // (`WASM-01`): it opened exactly the formats it was last told about, so a
   // `.csv` was openable through the WOPI service and not in the editor.
+  const prep = { ext, isText: false, bytes: raw };
   let canonical = "";
-  let isText = false;
   try {
     canonical = wasm.format_for_extension(ext);
-    isText = !!canonical && wasm.format_is_text(ext);
+    prep.isText = !!canonical && wasm.format_is_text(ext);
   } catch {}
+  if (!canonical) throw Object.assign(new Error(`.${ext} is not a format this build can open`), { prep });
+  // Delimited text carries no encoding declaration, so it is decoded here; a
+  // package declares its own and must be handed over byte for byte.
+  if (prep.isText) {
+    try { prep.bytes = decodeTextBytes(raw); } catch (e) { throw Object.assign(e, { prep }); }
+  }
+  return prep;
+}
+
+/// Everything an open does after the engine has answered, whichever thread
+/// read the file. `err` is the failure, or null for a workbook now installed.
+/// `clockSet` when the installed workbook was already settled under the
+/// host's clock (the worker path), so the full pass is not run again here.
+function finishOpen(raw, name, isText, err, retry, clockSet = false) {
   let ok = true;
   let stopped = false;
-  clearKeepWaiting();
-  try {
-    stopMarch();
-    if (!canonical) throw new Error(`.${ext} is not a format this build can open`);
-    // Delimited text carries no encoding declaration, so it is decoded here; a
-    // package declares its own and must be handed over byte for byte.
-    if (isText) bytes = decodeTextBytes(bytes);
-    // A wall-clock limit, so a workbook that is inside every admission bound
-    // and simply enormous cannot hold the tab's one thread until it finishes
-    // (`SEC-017`). Cleared afterwards: the budget bounds this job, not the
-    // next one.
-    wasm.session_set_time_budget_ms(budgetMs === undefined ? openBudgetMs : budgetMs);
-    try {
-      wasm.session_open_as(ext, bytes);
-    } finally {
-      wasm.session_clear_time_budget();
-    }
+  if (!err) {
     status.textContent = `opened ${name}`;
     reportImportIssues();
-  } catch (err) {
+  } else {
     status.textContent = friendlyOpenError(err, name, isText);
     stopped = wasStopped(err);
     ok = false;
@@ -1082,7 +1148,7 @@ export function openBytes(raw, name = "workbook.xlsx", budgetMs = undefined) {
   // `xl/media/image1.png` — so a cache kept across a load shows the previous
   // file's pictures.
   imageCache.clear();
-  syncClock();
+  if (!clockSet) syncClock();
   // Open on the sheet the file was left on, not always the first: a workbook
   // records which tab its author was looking at, and a summary sheet at the
   // end is put there deliberately.
@@ -1094,11 +1160,11 @@ export function openBytes(raw, name = "workbook.xlsx", budgetMs = undefined) {
   // actually left standing. A stopped open loaded nothing, so what is on screen
   // is still whole — this hands back the choice the limit took, rather than
   // leaving a big file permanently unopenable.
-  if (stopped) offerKeepWaiting(`opening ${name}`, () => openBytes(raw, name, -1));
+  if (stopped) offerKeepWaiting(`opening ${name}`, retry);
   // Only a successful open renames the window. A failed one leaves the
   // previous document's name in place, because the previous document is what
   // is still on screen.
-  if (ok) openedName = name;
+  if (ok) { openedName = name; documentGeneration += 1; }
   // MACRO-13: an opened file is known by its bytes until XL-FEAT-113 gives it a
   // carried id, so a network grant is for this file and no other.
   if (ok) noteOpenedBytes(raw);
@@ -1107,6 +1173,115 @@ export function openBytes(raw, name = "workbook.xlsx", budgetMs = undefined) {
   // document, whose offer (if any) was already made.
   if (ok) offerAutostartMacros(name);
   return ok;
+}
+
+/// Open `raw` as the file `name`, on this thread, synchronously.
+///
+/// The path every open took before `PERF-16`, and still the one a host or a
+/// test that needs an answer *now* calls. The editor's own File ▸ Open, drag
+/// and drop, the desktop picker, a recovered draft and the SDK's `open()` go
+/// through [`openBytesAsync`], which reads the file in a worker and falls back
+/// to this.
+export function openBytes(raw, name = "workbook.xlsx", budgetMs = undefined) {
+  clearKeepWaiting();
+  let prep = { isText: false };
+  let err = null;
+  try {
+    stopMarch();
+    prep = prepareOpen(raw, name);
+    // A wall-clock limit, so a workbook that is inside every admission bound
+    // and simply enormous cannot hold the tab's one thread until it finishes
+    // (`SEC-017`). Cleared afterwards: the budget bounds this job, not the
+    // next one.
+    wasm.session_set_time_budget_ms(budgetMs === undefined ? openBudgetMs : budgetMs);
+    try {
+      wasm.session_open_as(prep.ext, prep.bytes);
+    } finally {
+      wasm.session_clear_time_budget();
+    }
+  } catch (e) {
+    err = e;
+    if (e && e.prep) prep = e.prep;
+  }
+  return finishOpen(raw, name, prep.isText, err, () => openBytes(raw, name, -1));
+}
+
+/// Whether the last [`openBytesAsync`] ended because the person pressed Esc.
+///
+/// A separate question because `false` from an open has always meant "the
+/// file could not be read", and a recovered draft is marked unreadable on it;
+/// a cancelled open says nothing about the file.
+let lastOpenCancelled = false;
+export function openWasCancelled() {
+  return lastOpenCancelled;
+}
+
+/// Open `raw` as `name` **without freezing the editor** (`PERF-16`): the file
+/// is read in a worker under the same bounds and time budget, and installed
+/// here in parts between frames. Resolves with what [`openBytes`] returns.
+///
+/// While it runs the status bar shows Excel's "Opening 'name'" and a progress
+/// bar, and Esc stops it — leaving the workbook on screen exactly as it was.
+/// Falls back to [`openBytes`] where a worker cannot run.
+export async function openBytesAsync(raw, name = "workbook.xlsx", budgetMs = undefined) {
+  lastOpenCancelled = false;
+  clearKeepWaiting();
+  let prep;
+  try {
+    stopMarch();
+    prep = prepareOpen(raw, name);
+  } catch (e) {
+    return finishOpen(raw, name, e?.prep?.isText ?? false, e, () => openBytesAsync(raw, name, -1));
+  }
+  const before = editsApplied();
+  const budget = budgetMs === undefined ? openBudgetMs : budgetMs;
+  // The clock the worker settles the workbook under, and the page adopts.
+  const clock = clockReading();
+  const r = await openInWorker(prep.bytes, prep.ext, name, budget, clock);
+  if (r.outcome === "unavailable") return openBytes(raw, name, budgetMs);
+  if (r.outcome === "busy") {
+    statusError("a file is already being opened or saved");
+    return false;
+  }
+  if (r.outcome === "cancelled") {
+    lastOpenCancelled = true;
+    // Nothing was installed; what is on screen is the workbook as it was.
+    status.textContent = "";
+    return false;
+  }
+  if (r.outcome === "error") {
+    return finishOpen(raw, name, prep.isText, r.error, () => openBytesAsync(raw, name, -1));
+  }
+  // The editor stayed live while the file was read, so the workbook on
+  // screen may have changed since the open was asked for. Replacing it would
+  // discard that work without a word; ask, as an open over unsaved changes
+  // always asks.
+  if (editsApplied() !== before && !(await confirmModal(
+    "Open another workbook?",
+    `This workbook changed while ${name} was opening. Opening it discards those changes, and undo will not bring them back.`,
+    "Discard and open",
+  ))) {
+    r.discard();
+    lastOpenCancelled = true;
+    status.textContent = "";
+    return false;
+  }
+  let err = null;
+  try {
+    r.install();
+    // The worker already ran the full pass that settles the volatile
+    // functions under `clock` — on this thread it was the longest single step
+    // left (24 ms for 250,000 cells) — so the page takes the same clock
+    // without repeating it.
+    wasm.session_adopt_clock(clock.serial, clock.seed);
+  } catch (e) {
+    err = e;
+  }
+  // The install and the redraw in separate frames, so the two do not add up
+  // to one long one; nothing is drawn in between, because the grid is only
+  // painted when asked.
+  await yieldFrame();
+  return finishOpen(raw, name, prep.isText, err, () => openBytesAsync(raw, name, -1), !err);
 }
 
 export function setZoomForTest(z) {

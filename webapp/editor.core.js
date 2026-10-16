@@ -385,6 +385,8 @@ import {
   moveTab,
   needsRecalc,
   openBytes,
+  openBytesAsync,
+  openWasCancelled,
   documentName,
   setDocumentName,
   printSheet,
@@ -437,6 +439,9 @@ export function reloadVersionsForTest() {
 // undo step. Re-exported so a host — and the Macros window to come — reaches it
 // on `window.opencalcEditor` like every other verb.
 export { MACRO_MAX_OPS, MACRO_TIME_LIMIT_MS, runMacro, runMacroForTest } from "./editor.macros.js";
+// Open and save off the page's thread (`PERF-16`): whether one is running, Esc's
+// verb, and the switch a test uses to run both on this thread as before.
+export { cancelFileJob, fileJobActive, setFileWorkersForTest } from "./editor.files.js";
 // The Macros window and the autostart offer (`MACRO-02`): View ▸ Macros,
 // Developer ▸ Macros and Alt+F8 open the window; a workbook's autostart macros
 // are offered on open and never run without the person choosing Run.
@@ -824,6 +829,8 @@ export {
   moveTab,
   needsRecalc,
   openBytes,
+  openBytesAsync,
+  openWasCancelled,
   documentName,
   setDocumentName,
   printSheet,
@@ -4329,15 +4336,23 @@ export function hostNow() { return new Date(); }
 export function syncClock(reseed = false) {
   if (!wasm) return;
   if (reseed) volatileSeed = (volatileSeed * 1103515245 + 12345) >>> 0;
+  const { serial, seed } = clockReading();
+  // Swallowed: no user asked for this. It runs at boot and on every recalc,
+  // before a session may even exist, and there is no control here whose failure
+  // a message would explain.
+  try { wasm.session_set_clock(serial, seed); } catch {}
+}
+
+/// What [`syncClock`] would hand the engine now: the host's clock as an Excel
+/// serial, and the current seed. The file worker (`PERF-16`) settles a newly
+/// opened workbook under these two numbers off the page's thread, and the page
+/// then adopts the same two (`session_adopt_clock`).
+export function clockReading() {
   const now = hostNow();
   // Excel's epoch is 1899-12-30, and the serial is local time, not UTC — a
   // UTC serial puts TODAY() on the wrong day for most of the world's evening.
   const local = new Date(now.getTime() - now.getTimezoneOffset() * 60000);
-  const serial = local.getTime() / 86400000 + 25569;
-  // Swallowed: no user asked for this. It runs at boot and on every recalc,
-  // before a session may even exist, and there is no control here whose failure
-  // a message would explain.
-  try { wasm.session_set_clock(serial, volatileSeed); } catch {}
+  return { serial: local.getTime() / 86400000 + 25569, seed: volatileSeed };
 }
 
 // The sheet's display switches, as the engine holds them.
@@ -9814,7 +9829,7 @@ function wireEvents() {
       }
       status.textContent = `opening ${picked.name}…`;
       await new Promise((r) => setTimeout(r, 0));
-      if (openBytes(picked.bytes, picked.name)) {
+      if (await openBytesAsync(picked.bytes, picked.name)) {
         markSaved();
         native.setDocument(picked.name, false);
       }
@@ -9852,7 +9867,7 @@ function wireEvents() {
       status.textContent = "";
       return false;
     }
-    const ok = openBytes(new Uint8Array(await file.arrayBuffer()), file.name);
+    const ok = await openBytesAsync(new Uint8Array(await file.arrayBuffer()), file.name);
     // Whatever was just opened is the baseline, not whatever preceded it.
     if (ok) markSaved();
     e.target.value = ""; // allow re-opening the same file
