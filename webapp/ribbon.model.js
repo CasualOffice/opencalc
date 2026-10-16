@@ -172,9 +172,11 @@ export const TABS = [
     { label: "Macros", fold: 1, icon: "code", items: [L("view.macros", "code", "Macros (Alt+F8)")] },
   ] },
   // Excel's Developer tab. Only what is built: Record Macro (MACRO-03) and
-  // Convert VBA (MACRO-05) arrive with their rows, not as dead buttons now.
+  // Convert VBA arrive with their rows, not as dead buttons now.
   { id: "developer", label: "Developer", key: "L", groups: [
-    { label: "Code", fold: 1, icon: "code", items: [L("developer.macros", "code", "Macros (Alt+F8)")] },
+    // Excel's order: Visual Basic, then Macros. Visual Basic (MACRO-05) is the
+    // read-only VBA view, there only when the workbook carries a VBA project.
+    { label: "Code", fold: 1, icon: "code", items: [L("developer.visual-basic", "document", "Visual Basic (Alt+F11)"), L("developer.macros", "code", "Macros (Alt+F8)")] },
   ] },
   { id: "help", label: "Help", key: "Y", groups: [
     { label: "Help", fold: 1, icon: "question_circle", items: [

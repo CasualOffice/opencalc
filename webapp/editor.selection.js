@@ -1275,7 +1275,11 @@ export function runCommand(id) {
     const p = commandPolicy(String(id));
     if (p.hidden) throw new Error(`the command "${id}" is not available in this mode`);
     if (p.disabled) throw new Error(`the command "${id}" is disabled`);
-    registryCommand(String(id)).run();
+    const c = registryCommand(String(id));
+    // A command that hides itself when the document lacks what it acts on
+    // (Visual Basic without a VBA project) is refused the same way.
+    if (c.hidden()) throw new Error(`the command "${id}" is not available for this document`);
+    c.run();
     return true;
   }
   if (!node) {

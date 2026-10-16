@@ -830,7 +830,15 @@ fn write_fixtures() {
     std::fs::write(root.join("fuzz/seeds/vba/hello.bin"), &bin).unwrap();
     std::fs::create_dir_all(root.join("tests/fixtures")).unwrap();
     std::fs::write(root.join("tests/fixtures/vba-hello.xlsm"), xlsm_with(&bin)).unwrap();
+    std::fs::write(
+        root.join("tests/fixtures/vba-broken.xlsm"),
+        xlsm_with(BROKEN),
+    )
+    .unwrap();
 }
+
+/// What `vba-broken.xlsm` carries in place of a project.
+const BROKEN: &[u8] = b"not a vba project";
 
 /// The committed fixtures are what the builder makes today, so the browser
 /// test and the fuzz seed cannot drift from the decoder's own tests.
@@ -839,9 +847,11 @@ fn the_committed_fixtures_are_the_builders_output() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let seed = std::fs::read(root.join("fuzz/seeds/vba/hello.bin")).unwrap();
     assert_eq!(seed, hello_project(), "re-run write_fixtures");
-    let xlsm = std::fs::read(root.join("tests/fixtures/vba-hello.xlsm")).unwrap();
-    let mut zip = zip::ZipArchive::new(std::io::Cursor::new(xlsm)).unwrap();
-    let mut inner = Vec::new();
-    std::io::Read::read_to_end(&mut zip.by_name("xl/vbaProject.bin").unwrap(), &mut inner).unwrap();
-    assert_eq!(inner, hello_project(), "re-run write_fixtures");
+    for (file, want) in [
+        ("vba-hello.xlsm", hello_project()),
+        ("vba-broken.xlsm", BROKEN.to_vec()),
+    ] {
+        let xlsm = std::fs::read(root.join("tests/fixtures").join(file)).unwrap();
+        assert_eq!(xlsm, xlsm_with(&want), "{file}: re-run write_fixtures");
+    }
 }

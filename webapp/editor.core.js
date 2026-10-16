@@ -441,6 +441,7 @@ export { MACRO_MAX_OPS, MACRO_TIME_LIMIT_MS, runMacro, runMacroForTest } from ".
 // Developer ▸ Macros and Alt+F8 open the window; a workbook's autostart macros
 // are offered on open and never run without the person choosing Run.
 import { forgetMacroAnswersForTest, offerAutostartMacros, openMacrosWindow } from "./editor.macros-window.js";
+import { hasVbaProject, openVbaViewer } from "./editor.vba-viewer.js";
 export { forgetMacroAnswersForTest, offerAutostartMacros, openMacrosWindow };
 export {
   autosaveFault,
@@ -6960,6 +6961,9 @@ function registerShellCommands() {
   // MACRO-02: ONLYOFFICE's place (View) and Excel's (Developer), one window.
   R("view.macros", { label: "Macros…", shortcut: "Alt+F8", run: () => openMacrosWindow() });
   R("developer.macros", { label: "Macros…", shortcut: "Alt+F8", run: () => openMacrosWindow() });
+  // MACRO-05: Excel's Visual Basic (Alt+F11), read-only, and present only when
+  // the workbook carries a VBA project to view.
+  R("developer.visual-basic", { label: "Visual Basic", shortcut: "Alt+F11", hidden: () => !hasVbaProject(), run: () => openVbaViewer() });
 }
 
 // ---- Insert Function / Function Arguments (Shift+F3, XL-UX-026/027) ---------
@@ -8643,6 +8647,14 @@ function wireEvents() {
     // the mode's rules decide exactly as they do for the ribbon button.
     if (e.altKey && !mod && e.key === "F8") {
       if (!runRegisteredCommand("view.macros")) statusError("macros are not available here");
+      e.preventDefault();
+      return;
+    }
+
+    // Alt+F11 — Excel's Visual Basic Editor; here the read-only VBA view
+    // (`MACRO-05`), which exists only for a workbook carrying a VBA project.
+    if (e.altKey && !mod && e.key === "F11") {
+      if (!runRegisteredCommand("developer.visual-basic")) status.textContent = "this workbook has no VBA code";
       e.preventDefault();
       return;
     }
