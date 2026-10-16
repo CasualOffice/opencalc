@@ -143,6 +143,10 @@ pub(crate) fn eval_error_type(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr
         return Value::Error(ErrorValue::Value);
     };
     match ev.eval_expr(sheet, arg) {
+        // A pending custom function (`MACRO-04`) has no type yet: the answer
+        // is still on its way, so this waits with it rather than classifying
+        // the placeholder. Excel publishes no ERROR.TYPE number for #BUSY!.
+        Value::Error(ErrorValue::Busy) => Value::Error(ErrorValue::Busy),
         Value::Error(e) => Value::Number(match e {
             ErrorValue::Null => 1.0,
             ErrorValue::Div0 => 2.0,
@@ -157,6 +161,7 @@ pub(crate) fn eval_error_type(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr
             ErrorValue::Spill => 9.0,
             // Excel numbers #CALC! 14, continuing past #SPILL!'s 9.
             ErrorValue::Calc => 14.0,
+            ErrorValue::Busy => unreachable!("answered above"),
         }),
         // Not an error: the answer is itself #N/A, not a number.
         _ => Value::Error(ErrorValue::Na),

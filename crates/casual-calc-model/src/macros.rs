@@ -192,6 +192,53 @@ impl MacroLibrary {
         Ok(())
     }
 
+    /// The custom functions the sources declare, upper-case, in the order
+    /// written — read from the text, **not** by running it.
+    ///
+    /// For naming things only (an import or save report that says
+    /// "custom function DOUBLE" rather than "unsupported function DOUBLE"):
+    /// what is actually registered is decided by running the sources in the
+    /// sandbox (`MACRO-04`). Recognised: `Api.AddCustomFunction(function NAME`
+    /// (optionally `async`), and `Api.AddCustomFunction(NAME)` naming a
+    /// function declared in the same source.
+    #[must_use]
+    pub fn declared_custom_function_names(&self) -> Vec<String> {
+        const CALL: &str = "AddCustomFunction(";
+        fn ident(text: &str) -> &str {
+            let end = text
+                .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '$'))
+                .unwrap_or(text.len());
+            &text[..end]
+        }
+        let mut out: Vec<String> = Vec::new();
+        for source in self.custom_functions.iter().map(|f| f.source.as_str()) {
+            let mut rest = source;
+            while let Some(at) = rest.find(CALL) {
+                rest = &rest[at + CALL.len()..];
+                let mut arg = rest.trim_start();
+                if let Some(after) = arg.strip_prefix("async") {
+                    arg = after.trim_start();
+                }
+                let name = if let Some(after) = arg.strip_prefix("function") {
+                    ident(after.trim_start_matches(|c: char| c.is_whitespace() || c == '*'))
+                } else {
+                    let named = ident(arg);
+                    let declared = !named.is_empty()
+                        && source.match_indices("function").any(|(i, _)| {
+                            let after = source[i + "function".len()..].trim_start();
+                            ident(after) == named
+                        });
+                    if declared { named } else { "" }
+                };
+                let upper = name.to_ascii_uppercase();
+                if !upper.is_empty() && !out.contains(&upper) {
+                    out.push(upper);
+                }
+            }
+        }
+        out
+    }
+
     /// Read ONLYOFFICE's `jsaProject.bin` (see the module docs).
     ///
     /// Lenient where ONLYOFFICE is — a missing `guid` is given one, derived

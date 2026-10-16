@@ -7,6 +7,7 @@
 // "×" for close. This gate opens every dialog and panel and holds each to the
 // same frame, so the next one built cannot drift.
 
+import fs from "node:fs";
 import { expect, test } from "@playwright/test";
 
 async function boot(page) {
@@ -76,3 +77,24 @@ for (const id of PANELS) {
     if (firstPrimary >= 0) expect(firstPrimary, "the action is not first").toBe(0);
   });
 }
+
+// Visual Basic (MACRO-05) exists only for a workbook carrying a VBA project, so it
+// is opened on one rather than on the demo.
+test("dialog developer.visual-basic uses the shared frame", async ({ page }) => {
+  await boot(page);
+  const bytes = [...fs.readFileSync(new URL("../fixtures/vba-hello.xlsm", import.meta.url))];
+  expect(await page.evaluate((b) => window.opencalcEditor.openBytes(new Uint8Array(b), "vba-hello.xlsm"), bytes)).toBe(true);
+  await page.evaluate(() => window.opencalcEditor.runCommand("developer.visual-basic"));
+  await expect(page.locator("#oc-modal")).toBeVisible();
+  const m = await measure(page, ".oc-modal-box");
+  expect(m.radius).toBe("8px");
+  expect(m.width, "narrower than the shared minimum").toBeGreaterThanOrEqual(359);
+  expect(m.width, "wider than the shared maximum").toBeLessThanOrEqual(561);
+  expect(m.closeIsIcon, "close is drawn as text").toBe(true);
+  for (const b of m.buttons) {
+    expect(b.cls, "a footer button outside the shared component").toMatch(/\boc-btn\b/);
+    expect(b.h).toBe(32);
+  }
+  const firstPrimary = m.buttons.findIndex((b) => b.primary);
+  if (firstPrimary >= 0) expect(firstPrimary, "the action is not first (Excel: OK, then Cancel)").toBe(0);
+});

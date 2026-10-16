@@ -116,3 +116,10 @@ path = "fuzz_targets/snapshot.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "vba"
+path = "fuzz_targets/vba.rs"
+test = false
+doc = false
+bench = false

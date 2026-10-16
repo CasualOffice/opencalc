@@ -62,8 +62,9 @@ for (const [how, open] of [
 test("the Developer tab carries only what is built", async ({ page }) => {
   await boot(page);
   await page.locator("#rb-tab-developer").click();
-  const cmds = await page.locator("#rb-panel-developer [data-cmd]").evaluateAll((bs) => bs.map((b) => b.dataset.cmd));
-  expect(cmds, "Record Macro and Convert VBA are later rows, not dead buttons").toEqual(["developer.macros"]);
+  const cmds = await page.locator("#rb-panel-developer [data-cmd]:not([hidden])").evaluateAll((bs) => bs.map((b) => b.dataset.cmd));
+  // Excel's Code group: Visual Basic, then Macros — Visual Basic for every workbook.
+  expect(cmds, "Record Macro and Convert VBA are later rows, not dead buttons").toEqual(["developer.visual-basic", "developer.macros"]);
 });
 
 test("create, edit and run a macro: the cells change and one undo takes the run back", async ({ page }) => {

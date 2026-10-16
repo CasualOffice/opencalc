@@ -24,6 +24,7 @@
 //! See `docs/40-FORMULA-AND-CALC-ENGINE-ARCHITECTURE.md`.
 
 pub mod conditional;
+mod custom;
 mod eval;
 mod functions;
 pub mod goal_seek;
@@ -343,8 +344,10 @@ fn recalculate_once_within(
                 }
             }
         }
-        updates
+        (updates, evaluator.take_custom_requests())
     };
+    let (updates, requests) = updates;
+    want_custom_calls(workbook, requests);
 
     // Phase 2: write the new cached values back (interning any text results),
     // spilling any array results into their neighbours.
@@ -354,6 +357,18 @@ fn recalculate_once_within(
         spilled |= write_result(workbook, sheet_index, at, value);
     }
     Stopped::No(spilled)
+}
+
+/// Hand the custom-function calls a pass found no answer for to the
+/// workbook's runtime (`MACRO-04`). A call the queue has no room for is not
+/// lost: its cell is remembered and asked again once answers arrive.
+fn want_custom_calls(workbook: &mut Workbook, requests: Vec<casual_calc_model::CustomCallKey>) {
+    for key in requests {
+        let cell = key.cell;
+        if !workbook.custom.request(key) {
+            workbook.custom.defer(cell);
+        }
+    }
 }
 
 /// Whether `cell` should go on showing the value its file cached rather than
@@ -412,6 +427,7 @@ pub fn cannot_compute(workbook: &Workbook, expr: &casual_calc_formula::Expr) -> 
             Expr::Raw(_) => out.push("(unparsed formula)".to_owned()),
             Expr::Function { name, args } => {
                 let known = functions::is_builtin(name)
+                    || workbook.custom.spec(name).is_some()
                     || bound.iter().any(|b| b.eq_ignore_ascii_case(name))
                     || workbook
                         .defined_names
@@ -683,8 +699,10 @@ fn apply_dirty(workbook: &mut Workbook, dirty: &std::collections::HashSet<(usize
                 updates.push((sheet_index, at, value));
             }
         }
-        updates
+        (updates, evaluator.take_custom_requests())
     };
+    let (updates, requests) = updates;
+    want_custom_calls(workbook, requests);
 
     // Phase 2: write the new cached values back, spilling any arrays. Shares
     // `write_result` with the full recalculation so the two cannot disagree

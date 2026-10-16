@@ -29,6 +29,9 @@ use casual_calc_transaction::{
 // ([`WorkbookSession::compatibility_report`] and
 // [`WorkbookSession::format_loss`]), and a return type a caller cannot name
 // without adding a second dependency is a leak rather than a facade.
+/// The read-only VBA viewer's types (`MACRO-05`), returned by
+/// [`WorkbookSession::vba_project`].
+pub use casual_calc_import::vba::{VbaError, VbaModule, VbaModuleKind, VbaProject};
 pub use casual_calc_import::{
     CompatibilityEntry, CompatibilityReport, ModelOutcome, RetentionOutcome,
 };
@@ -1096,6 +1099,20 @@ impl WorkbookSession {
         &self.workbook
     }
 
+    /// The VBA project this workbook carries, **decoded for reading** — or
+    /// `None` when it carries none (`MACRO-05`, docs/99 §4).
+    ///
+    /// Decoded on each call from the retained `vbaProject.bin`; nothing is
+    /// cached and nothing is written back. The project's bytes stay exactly as
+    /// they arrived whatever this returns, so a project this cannot decode
+    /// (`Some(Err(_))`) is still one the next save keeps. VBA is never run.
+    #[must_use]
+    pub fn vba_project(&self) -> Option<Result<VbaProject, VbaError>> {
+        self.workbook
+            .macro_project()
+            .map(|part| casual_calc_import::vba::decode_vba_project(&part.bytes))
+    }
+
     /// The compatibility report from import (empty for a blank session).
     pub fn compatibility_report(&self) -> &CompatibilityReport {
         &self.report
@@ -1770,6 +1787,80 @@ impl WorkbookSession {
         self.history.clear();
     }
 
+    /// Register the workbook's custom functions (`MACRO-04`), as the host's
+    /// sandboxed registration run reported them, replacing any registered
+    /// before. Every answer is dropped with the functions that gave it, and
+    /// every formula is recalculated: a cell that was `#NAME?` for want of the
+    /// function now asks for it.
+    ///
+    /// Not an edit — nothing is recorded, sent, or made undoable. The registry
+    /// is run-time state, not document content (see
+    /// [`CustomFunctionRuntime`](casual_calc_model::CustomFunctionRuntime)).
+    ///
+    /// # Errors
+    ///
+    /// [`SdkError::Edit`] with the reason when a spec is refused; nothing
+    /// changes then.
+    pub fn set_custom_functions(
+        &mut self,
+        specs: Vec<casual_calc_model::CustomFunctionSpec>,
+    ) -> Result<(), SdkError> {
+        self.workbook
+            .custom
+            .register(specs)
+            .map_err(|e| SdkError::Edit(TxnError::Invariant { reason: e.0 }))?;
+        // The registry decides which names are functions, and whether a call
+        // is volatile — both read by the precedent graph.
+        self.recalc.invalidate();
+        self.recalculate_if_automatic();
+        Ok(())
+    }
+
+    /// Take the custom-function calls recalculation found no answer for, each
+    /// with the ticket to answer it by. Each call is handed out once.
+    pub fn take_custom_calls(&mut self) -> Vec<casual_calc_model::PendingCustomCall> {
+        self.workbook.custom.take_pending()
+    }
+
+    /// Hand back answers to calls from [`take_custom_calls`](Self::take_custom_calls)
+    /// and recalculate the cells that asked, and everything that reads them.
+    /// Returns how many tickets were recognised; an unknown or stale ticket
+    /// (one issued before the functions were registered again) is ignored.
+    ///
+    /// Not an edit, for the reason [`set_custom_functions`](Self::set_custom_functions)
+    /// is not: each client computes its own answers.
+    pub fn set_custom_results(
+        &mut self,
+        results: Vec<(u64, casual_calc_model::CustomValue)>,
+    ) -> usize {
+        let mut cells = Vec::new();
+        for (ticket, value) in results {
+            if let Some((sheet, row, col)) = self.workbook.custom.resolve(ticket, value) {
+                cells.push((sheet, CellRef::new(row, col)));
+            }
+        }
+        let recognised = cells.len();
+        // Cells whose call found the queue full are asked again now there is
+        // room: the answers just taken out of it made some.
+        cells.extend(
+            self.workbook
+                .custom
+                .take_deferred()
+                .into_iter()
+                .map(|(sheet, row, col)| (sheet, CellRef::new(row, col))),
+        );
+        cells.retain(|(sheet, _)| *sheet < self.workbook.sheets.len());
+        if cells.is_empty() {
+            return recognised;
+        }
+        if self.calculation == CalculationMode::Manual {
+            self.stale = true;
+        } else {
+            self.recalc.recalculate(&mut self.workbook, &cells);
+        }
+        recognised
+    }
+
     /// Recompute all formula cells — Excel's Calculate Now, and the only thing
     /// that brings a manual-mode workbook up to date.
     pub fn recalculate(&mut self) {
@@ -2110,7 +2201,9 @@ impl WorkbookSession {
     /// so everything it costs is counted and named here.
     ///
     /// Empty for [`SessionFormat::Xlsx`], which is the format the model is
-    /// shaped for. What a *file* lost coming in is a different question, and
+    /// shaped for — except that a cell calling one of the workbook's custom
+    /// functions (`MACRO-04`) is named in every format, because Excel shows
+    /// `#NAME?` there on its next recalculation. What a *file* lost coming in is a different question, and
     /// [`compatibility_report`](Self::compatibility_report) answers it.
     ///
     /// Recomputed on each call rather than kept, because it describes the
@@ -2136,6 +2229,7 @@ impl WorkbookSession {
             SessionFormat::Ods => casual_calc_ods::export_loss(&self.workbook),
             SessionFormat::Delimited(_) => delimited_loss(&self.workbook, DELIMITED_SHEET),
         };
+        custom_function_loss(&self.workbook, &mut report);
         // **What the file carried and import could not keep** (`XL-FEAT-006`).
         // The import report said so on open; this says it again where it
         // matters, before the save that makes it permanent. An unedited save
@@ -2883,6 +2977,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::views::PersonalViews;
 
 #[cfg(test)]
+mod custom_function_tests;
+#[cfg(test)]
 mod tests;
 
 /// Everything in a workbook that a delimited save leaves behind, counted.
@@ -3021,6 +3117,72 @@ fn apply_environment(workbook: &mut Workbook, config: &SessionConfig) {
     workbook.volatile_seed = config.environment.seed;
 }
 
+/// Each custom function (`MACRO-04`) the workbook's formulas call, counted by
+/// the cells that call it — in every format, the native one included.
+///
+/// The formula and its last answer are both written, so ONLYOFFICE (which
+/// runs the sources) recomputes it and any reader shows the saved value; but
+/// Excel has no way to run it, and on its next recalculation the cell becomes
+/// `#NAME?`. That is the reader's own behaviour and not a loss in the file,
+/// so it is named rather than prevented.
+fn custom_function_loss(workbook: &Workbook, report: &mut CompatibilityReport) {
+    let mut names: Vec<String> = workbook.macros.declared_custom_function_names();
+    for spec in workbook.custom.functions() {
+        if !names.contains(&spec.name) {
+            names.push(spec.name.clone());
+        }
+    }
+    if names.is_empty() {
+        return;
+    }
+    let mut counts = vec![0u64; names.len()];
+    for sheet in &workbook.sheets {
+        for (_, cell) in sheet.cells.iter() {
+            let Some(expr) = cell.formula.and_then(|h| workbook.formula(h)) else {
+                continue;
+            };
+            let mut called = Vec::new();
+            function_names(expr, &mut called);
+            for (i, name) in names.iter().enumerate() {
+                if called.iter().any(|c| c == name) {
+                    counts[i] += 1;
+                }
+            }
+        }
+    }
+    for (name, count) in names.iter().zip(counts) {
+        if count > 0 {
+            report.record_n(
+                &format!("custom function {name} (Excel shows #NAME?)"),
+                ModelOutcome::Degraded,
+                RetentionOutcome::Preserved,
+                count,
+            );
+        }
+    }
+}
+
+/// Every function name `expr` calls, upper-case as the parser stores them.
+fn function_names(expr: &casual_calc_formula::Expr, out: &mut Vec<String>) {
+    use casual_calc_formula::Expr;
+    match expr {
+        Expr::Function { name, args } => {
+            out.push(name.clone());
+            args.iter().for_each(|a| function_names(a, out));
+        }
+        Expr::Call { callee, args } => {
+            function_names(callee, out);
+            args.iter().for_each(|a| function_names(a, out));
+        }
+        Expr::Unary { operand, .. } => function_names(operand, out),
+        Expr::Binary { left, right, .. } => {
+            function_names(left, out);
+            function_names(right, out);
+        }
+        _ => {}
+    }
+}
+
 /// Name, in the import report, every formula whose value is the file's cached
 /// one because this engine cannot compute it (`XL-FEAT-005`/`006`).
 ///
@@ -3030,6 +3192,11 @@ fn apply_environment(workbook: &mut Workbook, config: &SessionConfig) {
 /// with the `_xlfn.` qualification the file carries left off for reading; text
 /// the parser could not read is already counted at import as `f/unparsed`.
 fn report_uncomputable(workbook: &Workbook, report: &mut CompatibilityReport) {
+    // A function the workbook's own custom-function sources declare
+    // (`MACRO-04`) is not a gap in this engine: it computes once the sources
+    // run. Named as what it is, so the report does not send anybody looking
+    // for a missing built-in.
+    let declared = workbook.macros.declared_custom_function_names();
     for sheet in &workbook.sheets {
         for (_, cell) in sheet.cells.iter() {
             if !cell
@@ -3049,8 +3216,13 @@ fn report_uncomputable(workbook: &Workbook, report: &mut CompatibilityReport) {
                     .strip_prefix("_xlfn._xlws.")
                     .or_else(|| name.strip_prefix("_xlfn."))
                     .unwrap_or(&name);
+                let kind = if declared.iter().any(|d| d == shown) {
+                    "custom-function"
+                } else {
+                    "unsupported"
+                };
                 report.record(
-                    &format!("f/unsupported:{shown}"),
+                    &format!("f/{kind}:{shown}"),
                     ModelOutcome::Degraded,
                     RetentionOutcome::Preserved,
                 );

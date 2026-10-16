@@ -21,6 +21,7 @@ mod read;
 mod report;
 mod styles;
 mod theme;
+pub mod vba;
 
 pub use error::{ImportError, Overrun};
 pub use report::{CompatibilityEntry, CompatibilityReport, ModelOutcome, RetentionOutcome};
@@ -1861,6 +1862,7 @@ fn parse_error(token: &str) -> Option<ErrorValue> {
         "#NUM!" => ErrorValue::Num,
         "#SPILL!" => ErrorValue::Spill,
         "#CALC!" => ErrorValue::Calc,
+        "#BUSY!" => ErrorValue::Busy,
         _ => return None,
     })
 }

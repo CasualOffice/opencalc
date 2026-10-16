@@ -441,7 +441,20 @@ export { MACRO_MAX_OPS, MACRO_TIME_LIMIT_MS, runMacro, runMacroForTest } from ".
 // Developer ▸ Macros and Alt+F8 open the window; a workbook's autostart macros
 // are offered on open and never run without the person choosing Run.
 import { forgetMacroAnswersForTest, offerAutostartMacros, openMacrosWindow } from "./editor.macros-window.js";
+import { openVbaViewer } from "./editor.vba-viewer.js";
 export { forgetMacroAnswersForTest, offerAutostartMacros, openMacrosWindow };
+// Custom worksheet functions (`MACRO-04`): after every frame, a cheap look at
+// whether the engine is waiting on a custom function's answer, or the
+// workbook's function sources changed, and the sandbox is put to work.
+import { customFunctionInfo, customFunctionsTick } from "./editor.custom-functions.js";
+export {
+  CUSTOM_FUNCTION_TIME_LIMIT_MS,
+  customFunctionErrors,
+  customFunctionInfo,
+  customFunctionsSettledForTest,
+  setCustomFunctionLimitForTest,
+  trustCustomFunctions,
+} from "./editor.custom-functions.js";
 export {
   autosaveFault,
   breakDraftStoreForTest,
@@ -1855,6 +1868,7 @@ const ERROR_HELP = {
   "#NULL!": "Two ranges that were intersected don't overlap.",
   "#SPILL!": "A result needs more room than is free.",
   "#CALC!": "The calculation produced nothing — a filter that matched no rows, usually.",
+  "#BUSY!": "A custom function is still computing; the answer appears when it arrives.",
 };
 export let dragPos = null; // latest pointer {px,py} during a selection/fill drag
 let autoRaf = 0; // rAF handle for edge auto-scroll while dragging
@@ -3570,6 +3584,7 @@ export function draw() {
   // Last, so a host's listener sees the state the frame just painted rather
   // than the one it started from.
   if (wasm) emitStateEvents();
+  if (wasm) { try { customFunctionsTick(); } catch {} }
 }
 
 // px proximity to the freeze divider that arms a drag.
@@ -6960,6 +6975,9 @@ function registerShellCommands() {
   // MACRO-02: ONLYOFFICE's place (View) and Excel's (Developer), one window.
   R("view.macros", { label: "Macros…", shortcut: "Alt+F8", run: () => openMacrosWindow() });
   R("developer.macros", { label: "Macros…", shortcut: "Alt+F8", run: () => openMacrosWindow() });
+  // MACRO-05: Excel's Visual Basic (Alt+F11), read-only. Excel shows it for
+  // every workbook; one without a VBA project opens Excel's default project.
+  R("developer.visual-basic", { label: "Visual Basic", shortcut: "Alt+F11", run: () => openVbaViewer() });
 }
 
 // ---- Insert Function / Function Arguments (Shift+F3, XL-UX-026/027) ---------
@@ -6969,17 +6987,42 @@ function registerShellCommands() {
 const fnRecent = ["SUM", "AVERAGE", "IF", "HYPERLINK", "COUNT", "MAX", "SIN", "SUMIF", "PMT", "STDEV"];
 let fnInfo = null;
 let fnCategories = null;
+let builtinFnInfo = null;
+let builtinFnCategories = null;
+let customFns = [];
 
 /// The catalogue, loaded on first use: 150 KB of descriptions nobody needs
 /// until the dialog opens.
 async function loadFnInfo() {
-  if (!fnInfo) ({ FN_INFO: fnInfo, FN_CATEGORIES: fnCategories } = await import("./fn-info.js"));
+  if (!builtinFnInfo) ({ FN_INFO: builtinFnInfo, FN_CATEGORIES: builtinFnCategories } = await import("./fn-info.js"));
   if (!fnCatalog) { try { fnCatalog = JSON.parse(wasm.function_catalog()); } catch { fnCatalog = []; } }
+  // The workbook's own functions (`MACRO-04`) under Excel's **User Defined**
+  // category, rebuilt each time: they come and go with the workbook. Their
+  // text is the JSDoc's, i.e. workbook content — it reaches the dialog as text
+  // nodes only, like every other description.
+  customFns = customFunctionInfo();
+  fnInfo = Object.assign(Object.create(null), builtinFnInfo);
+  for (const f of customFns) {
+    if (fnInfo[f.name]) continue;
+    const args = (f.params || []).map((p) => [
+      p.optional ? `[${p.name}]` : p.name,
+      p.description || `${p.type || "any"}`,
+    ]);
+    fnInfo[f.name] = ["User Defined", f.description || "A custom function defined in this workbook.", args, 0];
+  }
+  fnCategories = builtinFnCategories.slice();
+  if (!fnCategories.includes("User Defined")) {
+    // Excel's place for it: after Information, before Engineering.
+    const at = fnCategories.indexOf("Engineering");
+    fnCategories.splice(at < 0 ? fnCategories.length : at, 0, "User Defined");
+  }
 }
 
-/// Only what the engine implements, with its Excel metadata.
+/// Only what the engine implements, with its Excel metadata — and the
+/// workbook's custom functions.
 function implementedFns() {
-  return (fnCatalog || []).map((f) => f.n).filter((n) => fnInfo[n]);
+  const builtin = (fnCatalog || []).map((f) => f.n).filter((n) => fnInfo[n]);
+  return [...builtin, ...customFns.map((f) => f.name).filter((n) => !builtin.includes(n))].sort();
 }
 
 /// Excel's syntax line: `VLOOKUP(lookup_value,table_array,col_index_num,range_lookup)`.
@@ -7210,6 +7253,18 @@ function functionArgumentsDialog(name) {
 // must not inject a cell reference or a function name there. Treats "" as an
 // escaped quote within a string.
 let fnCatalog = null;            // lazily-loaded function catalog
+
+/// The catalogue with the workbook's custom functions (`MACRO-04`) merged in,
+/// as `{n, sig}` — asked for each time, since they change with the workbook.
+function withCustomFns(catalog) {
+  const custom = customFunctionInfo();
+  if (!custom.length) return catalog;
+  const builtin = new Set(catalog.map((f) => f.n));
+  const extra = custom
+    .filter((f) => !builtin.has(f.name))
+    .map((f) => ({ n: f.name, sig: `${f.name}(${(f.params || []).map((p) => (p.optional ? `[${p.name}]` : p.name)).join(", ")})` }));
+  return [...catalog, ...extra].sort((a, b) => (a.n < b.n ? -1 : a.n > b.n ? 1 : 0));
+}
 export let acState = null;             // active autocomplete: {matches, idx, start}
 export let formulaRefDrag = null;      // click/drag ref insertion: {anchor, start, end}
 export let acEl;
@@ -7222,7 +7277,7 @@ function showAutocomplete() {
   if (!tok) { hideAutocomplete(); return; }
   if (!fnCatalog) { try { fnCatalog = JSON.parse(wasm.function_catalog()); } catch { fnCatalog = []; } }
   const up = tok.text.toUpperCase();
-  const matches = fnCatalog.filter((f) => f.n.startsWith(up)).slice(0, 8);
+  const matches = withCustomFns(fnCatalog).filter((f) => f.n.startsWith(up)).slice(0, 8);
   if (!matches.length) { hideAutocomplete(); return; }
   acState = { matches, idx: 0, start: tok.start };
   renderAutocomplete();
@@ -7249,7 +7304,7 @@ export function updateSignatureTip() {
   const call = acState ? null : callAtCaret();
   if (!call) { sigEl.hidden = true; return; }
   if (!fnCatalog) { try { fnCatalog = JSON.parse(wasm.function_catalog()); } catch { fnCatalog = []; } }
-  const fn = fnCatalog.find((f) => f.n === call.name);
+  const fn = withCustomFns(fnCatalog).find((f) => f.n === call.name);
   if (!fn) { sigEl.hidden = true; return; }
   const inner = /\(([^]*)\)\s*$/.exec(fn.sig);
   const args = inner ? inner[1].split(",").map((a) => a.trim()) : [];
@@ -8643,6 +8698,14 @@ function wireEvents() {
     // the mode's rules decide exactly as they do for the ribbon button.
     if (e.altKey && !mod && e.key === "F8") {
       if (!runRegisteredCommand("view.macros")) statusError("macros are not available here");
+      e.preventDefault();
+      return;
+    }
+
+    // Alt+F11 — Excel's Visual Basic Editor; here the read-only VBA view
+    // (`MACRO-05`), for every workbook, as in Excel.
+    if (e.altKey && !mod && e.key === "F11") {
+      runRegisteredCommand("developer.visual-basic");
       e.preventDefault();
       return;
     }

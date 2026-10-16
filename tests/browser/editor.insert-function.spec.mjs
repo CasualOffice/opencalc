@@ -31,8 +31,8 @@ const insert = (page) => page.evaluate(() => window.opencalcEditor.runCommand("f
 
 const CATEGORIES = [
   "Most Recently Used", "All", "Financial", "Date & Time", "Math & Trig", "Statistical",
-  "Lookup & Reference", "Database", "Text", "Logical", "Information", "Engineering",
-  "Cube", "Compatibility", "Web",
+  "Lookup & Reference", "Database", "Text", "Logical", "Information", "User Defined",
+  "Engineering", "Cube", "Compatibility", "Web",
 ];
 
 for (const [how, open] of [

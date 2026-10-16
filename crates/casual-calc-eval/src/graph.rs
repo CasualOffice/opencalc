@@ -579,10 +579,14 @@ fn collect_precedents(
             // anyway, so a dependency-driven recalculation would never reach
             // it — `=TODAY()` would keep yesterday's date until something
             // unrelated happened to touch it. Same flag, opposite reason.
+            // A custom function marked `@volatile` (`MACRO-04`) is the same
+            // case; so is one whose registry entry is missing, which is
+            // `#NAME?` and has nothing to recompute — hence the `is_some_and`.
             if matches!(
                 name.as_str(),
                 "TODAY" | "NOW" | "RAND" | "RANDBETWEEN" | "RANDARRAY"
-            ) {
+            ) || workbook.custom.spec(name).is_some_and(|s| s.volatile)
+            {
                 *uses_name = true;
             }
             if matches!(name.as_str(), "INDIRECT" | "OFFSET") {

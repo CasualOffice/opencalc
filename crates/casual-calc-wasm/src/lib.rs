@@ -47,6 +47,7 @@ mod calc;
 mod cells;
 mod clipboard;
 mod collab;
+mod custom;
 mod data;
 mod find;
 mod formula;
@@ -58,6 +59,7 @@ mod sheet;
 mod special;
 mod structural;
 mod style;
+mod vba;
 mod versions;
 mod view;
 

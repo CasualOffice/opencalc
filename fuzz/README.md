@@ -24,6 +24,7 @@ list has a row here.
 | `wire_operation` | an operation from a peer | parsing and localising decide rather than panic |
 | `transform_tp1` | two concurrent operations | TP1 holds |
 | `token_verify` | a JWT | it returns, and it never accepts a token this key did not sign |
+| `vba` | a `vbaProject.bin` (MS-CFB + MS-OVBA) | the decoder returns; a decoded project is within `MAX_MODULES` and `MAX_DECOMPRESSED` (`MACRO-05`) |
 
 The rule for a reader target is that **refusing is passing**: a bound that turns
 a document away is the bound working, and only a panic, a hang or an

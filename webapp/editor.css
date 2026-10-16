@@ -2548,6 +2548,8 @@ html, .editor-body { overscroll-behavior: none; }
 .oc-mw-tag { flex: 0 0 auto; font-size: 10.5px; color: var(--oc-muted-text-color); }
 .oc-mw-rename-input { width: 100%; min-height: 24px !important; font-size: 12px !important; }
 .oc-mw-empty { padding: 8px; }
+/* MACRO-04: Macros and Custom functions, each under its own heading (ONLYOFFICE). */
+.oc-mw-heading { padding: 6px 8px 2px; font-size: 11px; font-weight: 600; color: var(--oc-muted-text-color); text-transform: none; }
 .oc-mw-pane { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
 .oc-mw-editor {
   display: flex; height: 220px; border: 1px solid var(--oc-control-border-color); border-radius: 6px;
@@ -2571,6 +2573,53 @@ html, .editor-body { overscroll-behavior: none; }
 .oc-mw-result { font-size: 12px; line-height: 1.4; color: var(--oc-muted-text-color); overflow-wrap: anywhere; }
 .oc-mw-result.bad { color: var(--oc-danger-color); }
 .oc-mw-result[hidden] { display: none; }
+/* The Visual Basic window, read-only (MACRO-05): the VBA editor's Project
+   Explorer tree beside its Code window, in the Macros window's frame. */
+.oc-modal-box:has(.oc-vba) { width: min(92vw, 560px); }
+.oc-vba { display: flex; flex-direction: column; gap: 8px; }
+.oc-vba-note { font-size: 12px; line-height: 1.4; color: var(--oc-muted-text-color); }
+.oc-vba-link {
+  padding: 0; border: 0; background: none; font: inherit; color: var(--oc-accent-color);
+  text-decoration: underline; cursor: pointer; min-height: 0;
+}
+.oc-vba-split { display: grid; grid-template-columns: 190px minmax(0, 1fr); gap: 8px; }
+.oc-vba-explorer, .oc-vba-pane { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.oc-vba-caption {
+  font-size: 11.5px; color: var(--oc-muted-text-color); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.oc-vba-tree {
+  height: 280px; overflow: auto; border: 1px solid var(--oc-control-border-color); border-radius: 6px;
+  background: var(--oc-background-color); font-size: 12px; padding: 2px 0;
+}
+.oc-vba-project, .oc-vba-folder, .oc-vba-item {
+  display: flex; align-items: center; gap: 4px; padding: 2px 6px 2px calc(6px + var(--level, 0) * 14px); width: max-content; min-width: 100%; box-sizing: border-box;
+  color: var(--oc-text-color); cursor: default; white-space: nowrap;
+}
+.oc-vba-icon { flex: 0 0 auto; color: var(--oc-muted-text-color); }
+.oc-vba-item:hover { background: var(--oc-surface-color); }
+.oc-vba-item.on { background: var(--oc-accent-soft); }
+.oc-vba-item:focus-visible { outline: 2px solid var(--oc-accent-color); outline-offset: -2px; }
+/* Not cut short: the tree scrolls sideways, as the Project Explorer does. */
+.oc-vba-name { flex: 0 0 auto; }
+.oc-vba-empty { padding: 8px; }
+.oc-vba-editor {
+  display: flex; height: 280px; border: 1px solid var(--oc-control-border-color); border-radius: 6px;
+  background: var(--oc-background-color); overflow: hidden;
+}
+.oc-vba-editor:focus-within { border-color: var(--oc-accent-color); box-shadow: 0 0 0 2px var(--oc-accent-ring); }
+.oc-vba-gutter {
+  flex: 0 0 auto; min-width: 28px; padding: 8px 6px 8px 4px; overflow: hidden; text-align: right;
+  font-family: var(--oc-mono-font-family); font-size: 12px; line-height: 18px;
+  color: var(--oc-muted-text-color); background: var(--oc-surface-color); user-select: none;
+}
+.oc-modal-box textarea.oc-vba-code {
+  flex: 1; min-width: 0; height: 100%; margin: 0; padding: 8px; resize: none; border: 0; border-radius: 0;
+  font-family: var(--oc-mono-font-family); font-size: 12px; line-height: 18px; white-space: pre; tab-size: 4;
+  box-shadow: none;
+}
+.oc-modal-box textarea.oc-vba-code:focus-visible { box-shadow: none; }
+.oc-vba-problem { font-size: 12px; line-height: 1.4; color: var(--oc-danger-color); overflow-wrap: anywhere; }
+.oc-vba-problem[hidden] { display: none; }
 /* New Name / Edit Name (XL-UX-022): Excel's label column beside its fields. */
 .oc-name-form { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 10px 12px; align-items: center; }
 .oc-name-form .oc-form-label { align-self: start; padding-top: 7px; }

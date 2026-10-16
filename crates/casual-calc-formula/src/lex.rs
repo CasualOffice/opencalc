@@ -64,6 +64,9 @@ pub enum Token {
 
 const KNOWN_ERRORS: &[&str] = &[
     "#REF!", "#VALUE!", "#DIV/0!", "#N/A", "#NAME?", "#NULL!", "#NUM!", "#SPILL!",
+    // A pending custom function's placeholder (`MACRO-04`), so `#BUSY!` typed
+    // or read back is the error rather than a name.
+    "#BUSY!",
 ];
 
 fn is_word_char(c: char) -> bool {
