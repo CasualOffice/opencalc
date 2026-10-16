@@ -199,7 +199,17 @@ test("Insert Function lists the workbook's functions under User Defined, and aut
   await expect(page.locator("#oc-fn-list .fn-row")).toHaveText(["DOUBLE"]);
   await expect(page.locator("#oc-fn-syntax")).toHaveText("DOUBLE(x)");
   await expect(page.locator("#oc-fn-desc")).toHaveText("Doubles a number.");
-  await page.locator("#oc-modal .oc-confirm-actions .oc-btn", { hasText: "Cancel" }).click();
+  // OK goes on to Function Arguments, with the JSDoc's argument help, as a
+  // built-in's does; OK there writes the call into the cell.
+  await page.locator("#oc-modal .oc-confirm-actions .oc-btn.primary").click();
+  await expect(page.locator("#oc-modal-title")).toHaveText("Function Arguments");
+  await expect(page.locator("#oc-fa-fdesc")).toHaveText("Doubles a number.");
+  await page.locator("#oc-fa-arg-0").focus();
+  await expect(page.locator("#oc-fa-adesc")).toHaveText("x: The number to double.");
+  await page.locator("#oc-fa-arg-0").fill("21");
+  await page.locator("#oc-modal .oc-confirm-actions .oc-btn.primary").click();
+  expect(await input(page, 0, 0)).toBe("=DOUBLE(21)");
+  await expect.poll(() => shown(page, 0, 0), { timeout: 10_000 }).toBe("42");
 
   await page.evaluate(() => window.opencalcEditor.selectForTest(4, 4));
   await page.locator("#grid").focus();
