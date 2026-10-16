@@ -1717,27 +1717,17 @@ export function buildCfPanel(body) {
   const anchorRest = el("span", "cf-anchor-text", "");
   anchor.append(el("span", "cf-anchor-lead", "Written for "), anchorCell, anchorRest);
 
-  // Where a refusal lands. The binding refuses a formula that cannot parse
-  // rather than storing a rule that can never match; that refusal is only
-  // useful if it appears beside the field it is about. `docs/82` found a
-  // dialog whose validation message went somewhere nobody was looking — the
-  // status bar keeps its copy, but this is the one the author sees.
-  const problem = el("div", "panel-error");
-  problem.setAttribute("role", "alert");
-  problem.hidden = true;
-  body.appendChild(problem);
   body.appendChild(anchor);
-  const clearProblem = () => { problem.hidden = true; problem.textContent = ""; formula.removeAttribute("aria-invalid"); };
   // Says which of the two things Apply is about to do. Appended just above the
   // buttons, further down.
   const editingNote = el("div", "panel-hint cf-editing");
   editingNote.hidden = true;
-  const showProblem = (message, field) => {
-    problem.textContent = message;
-    problem.hidden = false;
-    if (field === formula) formula.setAttribute("aria-invalid", "true");
-    statusError(message);
-  };
+  // Where a refusal lands. The binding refuses a formula that cannot parse
+  // rather than storing a rule that can never match. `docs/82` found a dialog
+  // whose validation message went somewhere nobody was looking; Excel's
+  // answer, and ours, is a message box over the rule being written, which
+  // hands the focus back to the field with its text selected (docs/95 rule 8).
+  const showProblem = (message, field) => messageBox(message, { field });
 
   // The scale/bar kinds are range-relative: they take no operand, and their
   // colours come from the swatch row rather than a single fill.
@@ -1817,7 +1807,6 @@ export function buildCfPanel(body) {
     a.value = ""; b.value = ""; formula.value = "";
     selectSwatch(SWATCHES[0]);
     loaded = null;
-    clearProblem();
     sync();
     syncEditingNote();
   };
@@ -1846,13 +1835,12 @@ export function buildCfPanel(body) {
     if (SWATCHES.includes(hex)) selectSwatch(hex);
     else { fill = hex || SWATCHES[0]; strip.querySelectorAll(".swatch").forEach((x) => x.classList.remove("on")); }
     loaded = { i: found.i, range: found.range };
-    clearProblem();
     sync();
     syncEditingNote();
   };
 
   for (const control of [op, a, b, formula]) {
-    control.addEventListener("input", () => { dirty = true; clearProblem(); });
+    control.addEventListener("input", () => { dirty = true; });
     control.addEventListener("change", () => { dirty = true; });
   }
   op.addEventListener("change", sync);
@@ -1893,7 +1881,6 @@ export function buildCfPanel(body) {
       else if (kind === "colorscale3") { kind = "colorscale"; txt = `${fill},ffffff,63be7b`; }
       else if (kind === "databar") { txt = fill; }
       else if (kind === "formula") { txt = formula.value; }
-      clearProblem();
       // Replacing rather than stacking, and only when the range has not moved:
       // the add goes first so a refusal leaves the existing rule alone, and the
       // delete uses the document index the add did not disturb (a new rule is
@@ -1903,7 +1890,6 @@ export function buildCfPanel(body) {
         wasm.session_add_cf(state.sheet, s.r0, s.c0, s.r1, s.c1, kind, rank, bv, txt, fill);
       } catch (e) {
         showProblem(errText(e), kind === "formula" ? formula : a);
-        (kind === "formula" ? formula : a).focus();
         return;
       }
       if (replacing !== null) {
@@ -1945,8 +1931,8 @@ export function buildCfPanel(body) {
 ///   none.
 /// - **Existing File or Web Page is the Address box only** — no Look in,
 ///   Current Folder or Browsed Pages, which are the local file system.
-/// - **ScreenTip… opens its box inline**, and an invalid reference is
-///   answered inline: docs/95 rule 8, never a message box over a dialog.
+/// - **ScreenTip… opens its box inline** (to convert: XL-UX-169's audit). An
+///   invalid reference is Excel's message box over the dialog (XL-UX-168).
 /// - **Only web and e-mail addresses are accepted**, because those are the only
 ///   ones a click will open (`safeLinkUrl`) — a link stored here that could
 ///   never be followed would be a silent failure later.
@@ -2017,28 +2003,9 @@ export function hyperlinkDialog() {
     Object.assign(input, attrs);
     return [l, input];
   };
-  const errorFor = (input) => {
-    const err = el("div", "oc-form-error");
-    err.id = `${input.id}-error`;
-    err.setAttribute("role", "alert");
-    err.hidden = true;
-    input.addEventListener("input", () => clearError(input, err));
-    return err;
-  };
-  const clearError = (input, err) => {
-    err.hidden = true;
-    err.textContent = "";
-    input.classList.remove("bad");
-    input.removeAttribute("aria-invalid");
-  };
-  const showError = (input, err, text) => {
-    err.textContent = text;
-    err.hidden = false;
-    input.classList.add("bad");
-    input.setAttribute("aria-invalid", "true");
-    input.focus();
-    input.select();
-  };
+  // A refusal is Excel's message box over the dialog (docs/95 rule 8); OK
+  // returns to the field it is about with its text selected.
+  const showError = (input, text) => messageBox(text, { field: input });
   const svgIcon = (name) => {
     const ns = "http://www.w3.org/2000/svg";
     const svg = document.createElementNS(ns, "svg");
@@ -2110,9 +2077,8 @@ export function hyperlinkDialog() {
   // Existing File or Web Page.
   const webPane = addMode("web", "Existing File or Web Page", "globe");
   const [addressLabel, address] = fieldId("oc-link-address", "Address:");
-  const addressErr = errorFor(address);
   const addressCell = el("div", "oc-form-cell");
-  addressCell.append(address, addressErr);
+  addressCell.append(address);
   webPane.append(addressLabel, addressCell);
 
   // Place in This Document.
@@ -2120,9 +2086,8 @@ export function hyperlinkDialog() {
   const [refLabel, ref] = fieldId("oc-link-ref", "Type the cell reference:");
   ref.classList.add("mono");
   ref.value = "A1";
-  const refErr = errorFor(ref);
   const refCell = el("div", "oc-form-cell");
-  refCell.append(ref, refErr);
+  refCell.append(ref);
   const treeLabel = el("div", "oc-form-label oc-link-tree-label", "Or select a place in this document:");
   const tree = el("div", "fn-list oc-link-tree");
   tree.id = "oc-link-tree";
@@ -2141,7 +2106,6 @@ export function hyperlinkDialog() {
     }
     // A name is its own place; Excel greys the reference box out for one.
     ref.disabled = p.kind === "name";
-    clearError(ref, refErr);
     follow();
   };
   const group = (label) => {
@@ -2170,9 +2134,8 @@ export function hyperlinkDialog() {
   // E-mail Address.
   const emailPane = addMode("email", "E-mail Address", "mail");
   const [emailLabel, email] = fieldId("oc-link-email", "E-mail address:");
-  const emailErr = errorFor(email);
   const emailCell = el("div", "oc-form-cell");
-  emailCell.append(email, emailErr);
+  emailCell.append(email);
   const [subjectLabel, subject] = fieldId("oc-link-subject", "Subject:");
   emailPane.append(emailLabel, emailCell, subjectLabel, subject);
 
@@ -2282,7 +2245,7 @@ export function hyperlinkDialog() {
         // Excel assumes the web for an address without a scheme.
         linkTarget = /^[a-z][a-z0-9+.-]*:/i.test(typed) ? typed : `http://${typed}`;
         if (!safeLinkUrl(linkTarget)) {
-          showError(address, addressErr, "Only web (http, https) and e-mail addresses can be linked.");
+          showError(address, "Only web (http, https) and e-mail addresses can be linked.");
           return;
         }
       }
@@ -2291,13 +2254,13 @@ export function hyperlinkDialog() {
       let at = null;
       try { at = JSON.parse(wasm.session_resolve_location(sheet, linkLocation)); } catch {}
       if (!at) {
-        showError(ref.disabled ? address : ref, refErr, "Reference isn't valid.");
+        showError(ref.disabled ? tree : ref, "Reference isn't valid.");
         return;
       }
     } else {
       linkTarget = mailto();
       if (linkTarget && !safeLinkUrl(linkTarget)) {
-        showError(email, emailErr, "That isn't an e-mail address that can be linked.");
+        showError(email, "That isn't an e-mail address that can be linked.");
         return;
       }
     }
@@ -2395,18 +2358,6 @@ export function tableDialog() {
   rangeIn.spellcheck = false;
   rangeIn.autocomplete = "off";
 
-  const err = el("div", "oc-form-error");
-  err.id = "oc-table-range-error";
-  err.setAttribute("role", "alert");
-  err.hidden = true;
-  const clearError = () => {
-    err.hidden = true;
-    err.textContent = "";
-    rangeIn.classList.remove("bad");
-    rangeIn.removeAttribute("aria-invalid");
-  };
-  rangeIn.addEventListener("input", clearError);
-
   const headerLabel = el("label", "oc-check");
   const headerBox = document.createElement("input");
   headerBox.type = "checkbox";
@@ -2435,14 +2386,10 @@ export function tableDialog() {
     swatches.push({ b, id });
   }
 
-  // `err` is hidden until the range is refused, and a `display: none` child
-  // occupies no grid cell — so as a direct child it shifted every later
-  // control one place along and collapsed the control column to nothing. It
-  // goes inside a cell with the input it belongs to, which is also where a
-  // refused range should be answered. The two spacer spans that existed only
-  // to skip the error row go with it.
+  // The range keeps its own cell in the form grid. A refused range is
+  // answered by a message box over the dialog, not in it (docs/95 rule 8).
   const rangeCell = el("div", "oc-form-cell");
-  rangeCell.append(rangeIn, err);
+  rangeCell.append(rangeIn);
   form.append(
     rangeLabel, rangeCell,
     el("span"), headerLabel,
@@ -2482,14 +2429,8 @@ export function tableDialog() {
     const typed = rangeIn.value.trim();
     const box = parseNameRange(typed.replace(/^=/, "").replace(/\$/g, ""));
     if (!box) {
-      err.textContent = typed
-        ? `"${typed}" is not a range — type something like A1:D20.`
-        : "Enter a range, such as A1:D20.";
-      err.hidden = false;
-      rangeIn.classList.add("bad");
-      rangeIn.setAttribute("aria-invalid", "true");
-      rangeIn.focus();
-      rangeIn.select();
+      // Excel's words for a range it cannot read [unverified], over the dialog.
+      messageBox("Reference isn't valid.", { field: rangeIn });
       return;
     }
     const headers = headerBox.checked;
@@ -2565,6 +2506,113 @@ export function confirmModal(title, message, confirmLabel = "OK") {
     cancel.addEventListener("click", () => done(false));
     ok.addEventListener("click", () => done(true));
     ok.focus();
+  });
+}
+
+// ---- Excel's message box (XL-UX-168, docs/95 rule 8) -------------------------
+
+/// The box that is up, if any: one at a time, as in Excel.
+let msgBoxOpen = null;
+
+/// The box's DOM, built once on first use rather than written into every host
+/// page: `editor.html` and the embed both get it without either knowing.
+function msgBoxRoot() {
+  let root = byId("oc-msgbox");
+  if (root) return root;
+  root = document.createElement("div");
+  root.id = "oc-msgbox";
+  root.className = "oc-msgbox";
+  root.hidden = true;
+  const box = el("div", "oc-msgbox-box");
+  box.setAttribute("role", "alertdialog");
+  box.setAttribute("aria-modal", "true");
+  box.setAttribute("aria-labelledby", "oc-msgbox-title");
+  box.setAttribute("aria-describedby", "oc-msgbox-text");
+  const title = el("h2", "oc-msgbox-title", "OpenCalc");
+  title.id = "oc-msgbox-title";
+  const row = el("div", "oc-msgbox-row");
+  const ns = "http://www.w3.org/2000/svg";
+  const icon = document.createElementNS(ns, "svg");
+  icon.setAttribute("class", "oc-msgbox-icon");
+  icon.setAttribute("viewBox", "0 0 20 20");
+  icon.setAttribute("width", "32");
+  icon.setAttribute("height", "32");
+  icon.setAttribute("aria-hidden", "true");
+  icon.appendChild(document.createElementNS(ns, "use"));
+  const text = el("p", "oc-msgbox-text");
+  text.id = "oc-msgbox-text";
+  row.append(icon, text);
+  const actions = el("div", "oc-confirm-actions oc-msgbox-actions");
+  const ok = el("button", "oc-btn primary", "OK");
+  ok.id = "oc-msgbox-ok";
+  ok.type = "button";
+  actions.append(ok);
+  box.append(title, row, actions);
+  root.append(box);
+  // Beside `#oc-modal`, so a shadow-root mount keeps it inside the mount and
+  // the theme's tokens reach it.
+  (byId("oc-modal")?.parentNode || document.body).appendChild(root);
+  return root;
+}
+
+/// Excel's icons, mapped to the Fluent sprite (our own artwork, docs/95).
+const MSGBOX_ICONS = { warning: "warning", info: "info", error: "error_circle" };
+
+/// Raise Excel's message box: the title bar (our name where Excel says
+/// "Microsoft Excel"), an icon, the message and OK, over whatever is open.
+///
+/// OK has the focus and Enter, Space or Escape dismisses it, as in Excel.
+/// While it is up nothing behind it takes a key or a click. Dismissed, it
+/// gives the focus back to `field` — the input the message is about — with
+/// that input's text selected for retyping, or to whatever had the focus when
+/// it was raised. Resolves once dismissed.
+///
+/// Every message a dialog gives about its own input goes through here; no
+/// dialog shows one inline (`editor.message-box` checks each site).
+export function messageBox(message, { icon = "warning", field = null } = {}) {
+  if (msgBoxOpen) msgBoxOpen.dismiss();
+  const root = msgBoxRoot();
+  const ok = root.querySelector("#oc-msgbox-ok");
+  root.querySelector("#oc-msgbox-text").textContent = String(message ?? "");
+  root.dataset.icon = MSGBOX_ICONS[icon] ? icon : "warning";
+  root.querySelector(".oc-msgbox-icon use").setAttribute("href", `#fi-${MSGBOX_ICONS[root.dataset.icon]}`);
+  const active = (root.getRootNode() ?? document).activeElement;
+  const back = field || (active instanceof HTMLElement ? active : null);
+  root.hidden = false;
+  ok.focus();
+  return new Promise((resolve) => {
+    const onKey = (e) => {
+      // Modal: nothing behind the box takes a key while it is up.
+      e.stopImmediatePropagation();
+      if (e.key === "Enter" || e.key === "Escape" || e.key === " ") {
+        e.preventDefault();
+        dismiss();
+      } else if (e.key === "Tab") {
+        e.preventDefault();
+        ok.focus();
+      } else if (!["Control", "Shift", "Alt", "Meta"].includes(e.key) && !(e.ctrlKey || e.metaKey)) {
+        e.preventDefault();
+      }
+    };
+    const onClick = () => dismiss();
+    const holdFocus = (e) => { if (!root.contains(e.composedPath()[0])) ok.focus(); };
+    function dismiss() {
+      if (msgBoxOpen?.dismiss !== dismiss) return;
+      msgBoxOpen = null;
+      root.hidden = true;
+      window.removeEventListener("keydown", onKey, true);
+      document.removeEventListener("focusin", holdFocus, true);
+      ok.removeEventListener("click", onClick);
+      if (back && back.isConnected) {
+        back.focus();
+        if (field && typeof field.select === "function") field.select();
+      }
+      resolve();
+    }
+    msgBoxOpen = { dismiss };
+    window.addEventListener("keydown", onKey, true);
+    document.addEventListener("focusin", holdFocus, true);
+    ok.addEventListener("click", onClick);
   });
 }
 
@@ -3176,13 +3224,7 @@ export function sizeDialog(axis, index) {
   input.value = String(Math.round(current || (isCol ? COL_W : ROW_H)));
   const unit = el("span", "oc-size-unit", "px");
   line.append(input, unit);
-  const err = el("div", "oc-form-error");
-  err.id = "oc-size-error";
-  err.hidden = true;
-  // The error lives inside the cell, never as a direct child of the grid: a
-  // `hidden` child is `display: none`, occupies no grid cell, and shifts every
-  // later child one place along. That is `editor.dialog-grid-layout`'s gate.
-  cell.append(line, err);
+  cell.append(line);
   form.append(label, cell);
 
   const actions = el("div", "oc-confirm-actions");
@@ -3204,17 +3246,11 @@ export function sizeDialog(axis, index) {
   const onCancel = () => { close(); canvas.focus(); };
   const onBackdrop = (e) => { if (e.target === modal) onCancel(); };
 
-  const refuse = (message) => {
-    err.textContent = message;
-    err.hidden = false;
-    input.classList.add("bad");
-    input.setAttribute("aria-invalid", "true");
-    input.setAttribute("aria-describedby", err.id);
-    // The typed text stays: a refusal that clears the field makes the person
-    // retype the part that was right.
-    input.focus();
-    input.select();
-  };
+  // A message box over the dialog, as Excel's (docs/95 rule 8). The typed
+  // text stays, selected: a refusal that clears the field makes the person
+  // retype the part that was right. The words are ours while this dialog
+  // measures in pixels where Excel's measures in points and characters.
+  const refuse = (message) => messageBox(message, { field: input });
 
   const apply = () => {
     const typed = input.value.trim();
@@ -3675,17 +3711,6 @@ export function goToDialog() {
   input.spellcheck = false;
   input.autocomplete = "off";
 
-  const err = el("div", "oc-form-error");
-  err.id = "oc-goto-error";
-  err.setAttribute("role", "alert");
-  err.hidden = true;
-  const clearError = () => {
-    err.hidden = true;
-    err.textContent = "";
-    input.classList.remove("bad");
-    input.removeAttribute("aria-invalid");
-  };
-  input.addEventListener("input", clearError);
 
   for (const text of [...goToRecent, ...names]) {
     const opt = el("button", "fn-row", text);
@@ -3705,7 +3730,7 @@ export function goToDialog() {
 
   const form = el("div", "oc-goto-form");
   const refCell = el("div", "oc-form-cell");
-  refCell.append(input, err);
+  refCell.append(input);
   form.append(listLabel, list, refLabel, refCell);
 
   const actions = el("div", "oc-confirm-actions");
@@ -3734,12 +3759,8 @@ export function goToDialog() {
     const typed = input.value.trim();
     const hit = resolveGoTo(typed);
     if (!hit) {
-      err.textContent = "Reference isn't valid.";
-      err.hidden = false;
-      input.classList.add("bad");
-      input.setAttribute("aria-invalid", "true");
-      input.focus();
-      input.select();
+      // Excel raises this over the dialog; OK returns to the box, text selected.
+      messageBox("Reference isn't valid.", { field: input });
       return;
     }
     close();
@@ -3886,17 +3907,11 @@ export function goToSpecialDialog() {
   radio(right, "visible", "Visible cells only");
   grid.append(left, right);
 
-  const err = el("div", "oc-form-error");
-  err.id = "oc-gts-error";
-  err.setAttribute("role", "alert");
-  err.hidden = true;
-
   const picked = () => body.querySelector("input[name=oc-gts]:checked")?.value ?? "notes";
   // The type filter applies to Constants and Formulas only, as in Excel.
   const syncChecks = () => {
     const on = picked() === "constants" || picked() === "formulas";
     for (const box of typeBoxes) box.disabled = !on;
-    err.hidden = true;
   };
   grid.addEventListener("change", syncChecks);
   syncChecks();
@@ -3905,7 +3920,7 @@ export function goToSpecialDialog() {
   const ok = el("button", "oc-btn primary", "OK");
   const cancel = el("button", "oc-btn", "Cancel");
   actions.append(ok, cancel);
-  body.append(grid, err, actions);
+  body.append(grid, actions);
   modal.hidden = false;
 
   const x = byId("oc-modal-x");
@@ -3926,9 +3941,7 @@ export function goToSpecialDialog() {
     catch (e) { statusError(errText(e)); return; }
     gtsLast = kind;
     if (!boxes.length) {
-      err.textContent = "No cells were found.";
-      err.hidden = false;
-      ok.focus();
+      messageBox("No cells were found.", { field: ok });
       return;
     }
     close();
@@ -4106,11 +4119,8 @@ export function openNameManager() {
   ref.className = "oc-form-field mono";
   ref.spellcheck = false;
   ref.autocomplete = "off";
-  const err = el("div", "oc-form-error");
-  err.setAttribute("role", "alert");
-  err.hidden = true;
   const refCell = el("div", "oc-form-cell");
-  refCell.append(ref, err);
+  refCell.append(ref);
 
   root.append(bar, list, refLabel, refCell);
   const actions = el("div", "oc-confirm-actions");
@@ -4125,8 +4135,6 @@ export function openNameManager() {
     ref.value = n ? "=" + n.refersTo : "";
     ref.disabled = !n;
     refDirty = false;
-    err.hidden = true;
-    ref.classList.remove("bad");
   };
   const syncButtons = () => {
     del.disabled = !selected();
@@ -4184,10 +4192,8 @@ export function openNameManager() {
     try {
       wasm.session_set_name(n.name, n.sheet, n.name, n.sheet, ref.value, n.comment || "");
     } catch (e) {
-      err.textContent = errText(e);
-      err.hidden = false;
-      ref.classList.add("bad");
-      ref.focus();
+      // Excel's message box over the Name Manager; OK returns to Refers to.
+      messageBox(errText(e), { field: ref });
       return false;
     }
     refDirty = false;
@@ -4195,7 +4201,7 @@ export function openNameManager() {
     render();
     return true;
   }
-  ref.addEventListener("input", () => { refDirty = true; err.hidden = true; ref.classList.remove("bad"); });
+  ref.addEventListener("input", () => { refDirty = true; });
   filter.addEventListener("change", () => { nmState.filter = filter.value; render(); });
 
   const finish = () => {
@@ -4291,12 +4297,8 @@ export function nameDialog(editing = null, fromManager = false) {
   name.spellcheck = false;
   name.autocomplete = "off";
   name.maxLength = 255;
-  const err = el("div", "oc-form-error");
-  err.id = "oc-name-error";
-  err.setAttribute("role", "alert");
-  err.hidden = true;
   const nameCell = el("div", "oc-form-cell");
-  nameCell.append(name, err);
+  nameCell.append(name);
 
   const scope = document.createElement("select");
   scope.id = "oc-name-scope";
@@ -4340,22 +4342,17 @@ export function nameDialog(editing = null, fromManager = false) {
   actions.append(ok, cancel);
   body.append(form, actions);
 
-  const clearError = () => { err.hidden = true; err.textContent = ""; name.classList.remove("bad"); name.removeAttribute("aria-invalid"); };
-  name.addEventListener("input", clearError);
-  ref.addEventListener("input", clearError);
-
   function apply() {
     const want = name.value.trim();
     const at = Number(scope.value);
     try {
       wasm.session_set_name(editing ? editing.name : "", editing ? editing.sheet : -1, want, at, ref.value, comment.value);
     } catch (e) {
-      err.textContent = errText(e);
-      err.hidden = false;
-      name.classList.add("bad");
-      name.setAttribute("aria-invalid", "true");
-      name.focus();
-      name.select();
+      // The engine's refusals are Excel's words. A message box over the
+      // dialog; OK returns to the field it is about — the name, unless the
+      // refusal is about what the name refers to.
+      const message = errText(e);
+      messageBox(message, { field: /\bname\b/i.test(message) ? name : ref });
       return;
     }
     frame.close();
@@ -4407,14 +4404,6 @@ function passwordField(id) {
   // Excel's dialog takes at most 255 characters; the legacy hash reads 15.
   input.maxLength = 255;
   return input;
-}
-
-function protectError() {
-  const err = el("div", "oc-form-error");
-  err.id = "oc-prot-error";
-  err.setAttribute("role", "alert");
-  err.hidden = true;
-  return err;
 }
 
 /// Review ▸ Protect Sheet — which on a protected sheet is Unprotect Sheet, as
@@ -4499,23 +4488,21 @@ function confirmPasswordDialog(index, password, allowed) {
   const label = el("label", "oc-form-label", "Reenter password to proceed.");
   label.htmlFor = "oc-prot-confirm";
   const again = passwordField("oc-prot-confirm");
-  const err = protectError();
   const note = el("p", "oc-prot-note",
     "Caution: If you lose or forget the password, it cannot be recovered. Passwords are case-sensitive.");
-  form.append(label, again, err, note);
+  form.append(label, again, note);
   const actions = el("div", "oc-confirm-actions");
   const ok = el("button", "oc-btn primary", "OK");
   const cancel = el("button", "oc-btn", "Cancel");
   actions.append(ok, cancel);
   body.append(form, actions);
-  again.addEventListener("input", () => { err.hidden = true; });
   cancel.addEventListener("click", () => { frame.close(); canvas.focus(); });
   function apply() {
     if (again.value !== password) {
-      err.textContent = "Confirmation password is not identical.";
-      err.hidden = false;
+      // Excel's message box [unverified wording]; the box is cleared for
+      // another try.
       again.value = "";
-      again.focus();
+      messageBox("The confirmation password is not identical.", { field: again });
       return;
     }
     frame.close();
@@ -4533,22 +4520,18 @@ function unprotectSheetDialog(index) {
   const label = el("label", "oc-form-label", "Password:");
   label.htmlFor = "oc-prot-unpw";
   const pw = passwordField("oc-prot-unpw");
-  const err = protectError();
-  form.append(label, pw, err);
+  form.append(label, pw);
   const actions = el("div", "oc-confirm-actions");
   const ok = el("button", "oc-btn primary", "OK");
   const cancel = el("button", "oc-btn", "Cancel");
   actions.append(ok, cancel);
   body.append(form, actions);
-  pw.addEventListener("input", () => { err.hidden = true; });
   cancel.addEventListener("click", () => { frame.close(); canvas.focus(); });
   function apply() {
     try { wasm.session_unprotect_sheet(index, pw.value); }
     catch (e) {
-      err.textContent = errText(e);
-      err.hidden = false;
-      pw.select();
-      pw.focus();
+      // The engine's refusal is Excel's words, in Excel's message box.
+      messageBox(errText(e), { field: pw });
       return;
     }
     frame.close();
@@ -4579,7 +4562,8 @@ function goalSeekCell(text) {
 /// in the engine on a scratch copy of the workbook (`session_goal_seek`), so
 /// nothing changes until the Goal Seek Status step's OK — and then once, as
 /// one ordinary edit and one undo step. Anything wrong with what was typed is
-/// said in the dialog, with the typing kept (docs/95 rule 8).
+/// said in Excel's message box over the dialog, with the typing kept
+/// (docs/95 rule 8).
 export function goalSeekDialog() {
   const { body, close } = modalFrame("Goal Seek", { onEnter: () => run() });
   const form = el("div", "oc-gs-form");
@@ -4599,24 +4583,8 @@ export function goalSeekDialog() {
   const setIn = field("oc-gs-set", "Set cell:", A1(state.sel.row, state.sel.col));
   const toIn = field("oc-gs-to", "To value:", gsLast.to);
   const changeIn = field("oc-gs-change", "By changing cell:", gsLast.change);
-  const err = el("div", "oc-form-error");
-  err.id = "oc-gs-error";
-  err.setAttribute("role", "alert");
-  err.hidden = true;
-  const clear = () => {
-    err.hidden = true;
-    err.textContent = "";
-    for (const i of [setIn, toIn, changeIn]) { i.classList.remove("bad"); i.removeAttribute("aria-invalid"); }
-  };
-  for (const i of [setIn, toIn, changeIn]) i.addEventListener("input", clear);
-  const fail = (input, message) => {
-    err.textContent = message;
-    err.hidden = false;
-    input.classList.add("bad");
-    input.setAttribute("aria-invalid", "true");
-    input.focus();
-    input.select();
-  };
+  // Excel's message box over the dialog; OK returns to the field at fault.
+  const fail = (input, message) => { messageBox(message, { field: input }); };
 
   const actions = el("div", "oc-confirm-actions");
   const ok = el("button", "oc-btn primary", "OK");
@@ -4624,12 +4592,11 @@ export function goalSeekDialog() {
   ok.addEventListener("click", () => run());
   cancel.addEventListener("click", () => { close(); canvas.focus(); });
   actions.append(ok, cancel);
-  body.append(form, err, actions);
+  body.append(form, actions);
   setIn.focus();
   setIn.select();
 
   function run() {
-    clear();
     gsLast.to = toIn.value;
     gsLast.change = changeIn.value;
     // Excel checks in the order the fields are read: Set cell, To value, By
@@ -4666,17 +4633,13 @@ function goalSeekStatus(set, target, change, res) {
   const cur = el("span", "oc-gs-num", res.display);
   cur.id = "oc-gs-current";
   grid.append(el("span", "oc-form-label", "Target value:"), t, el("span", "oc-form-label", "Current value:"), cur);
-  const err = el("div", "oc-form-error");
-  err.id = "oc-gs-error";
-  err.setAttribute("role", "alert");
-  err.hidden = true;
   const actions = el("div", "oc-confirm-actions");
   const ok = el("button", "oc-btn primary", "OK");
   const cancel = el("button", "oc-btn", "Cancel");
   ok.addEventListener("click", keep);
   cancel.addEventListener("click", () => { close(); canvas.focus(); });
   actions.append(ok, cancel);
-  body.append(head, grid, err, actions);
+  body.append(head, grid, actions);
   ok.focus();
 
   function keep() {
@@ -4684,9 +4647,9 @@ function goalSeekStatus(set, target, change, res) {
     syncVolatileClock();
     try { wasm.session_set_cell(state.sheet, change.r, change.c, res.inputText); }
     catch (e) {
-      // A protected changing cell, say: refused here, in the dialog.
-      err.textContent = errText(e);
-      err.hidden = false;
+      // A protected changing cell, say: refused in a message box over the
+      // status step, which stays open.
+      messageBox(errText(e), { field: ok });
       return;
     }
     close();

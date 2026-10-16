@@ -91,7 +91,11 @@ test("an invalid reference says so and keeps the dialog open", async ({ page }) 
     await reference(page).fill(bad);
     await page.keyboard.press("Enter");
     await expect(modal(page), `${bad} closed the dialog`).toBeVisible();
-    await expect(page.locator("#oc-goto-error")).toHaveText("Reference isn't valid.");
+    // Excel's message box over the dialog (XL-UX-168); OK returns to the box.
+    await expect(page.locator("#oc-msgbox-text")).toHaveText("Reference isn't valid.");
+    await page.keyboard.press("Enter");
+    await expect(page.locator("#oc-msgbox")).toBeHidden();
+    await expect(reference(page)).toBeFocused();
   }
   expect(await sel(page), "an invalid reference moved the selection").toEqual({ r0: 0, c0: 0, r1: 0, c1: 0 });
   // A refused Go To defines nothing either — the name box's habit of turning an

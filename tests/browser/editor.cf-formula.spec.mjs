@@ -60,7 +60,7 @@ async function seed(page) {
 const panelBody = (page) => page.locator("#side-panel-body");
 const kindSelect = (page) => page.locator("#side-panel-body select.panel-select").first();
 const formulaField = (page) => page.locator("#side-panel-body .cf-formula");
-const problem = (page) => page.locator("#side-panel-body .panel-error");
+const problem = (page) => page.locator("#oc-msgbox-text");
 const applyButton = (page) => page.locator("#side-panel-body button", { hasText: /^Apply$/ });
 
 /// Through the command the Format menu dispatches, which is the route a user
@@ -153,8 +153,10 @@ test("the panel names the cell the formula is written for", async ({ page }) => 
   await expect(anchor).toContainText("C10:F13");
 });
 
-/// A refusal has to land where the formula was typed.
-test("a formula that cannot parse is refused, visibly, beside the field", async ({ page }) => {
+/// A refusal has to be seen, and has to hand the author back to the formula.
+/// `docs/82` found a dialog whose validation message appeared nowhere useful;
+/// Excel's answer is a message box over the rule (docs/95 rule 8, XL-UX-168).
+test("a formula that cannot parse is refused in a message box, back at the field", async ({ page }) => {
   await boot(page);
   await seed(page);
   await openCfPanel(page);
@@ -166,36 +168,28 @@ test("a formula that cannot parse is refused, visibly, beside the field", async 
   const message = problem(page);
   await expect(message).toBeVisible();
   await expect(message).toHaveText(/does not parse/);
-  // Beside the field, not merely somewhere on the page: `docs/82` found a
-  // dialog whose validation message appeared nowhere useful.
-  const fieldBox = await formulaField(page).boundingBox();
-  const messageBox = await message.boundingBox();
-  expect(messageBox, "the message has no box, so it is not on screen").not.toBeNull();
-  expect(
-    Math.abs(messageBox.y - fieldBox.y),
-    "the refusal is not within sight of the field it is about",
-  ).toBeLessThan(200);
-  await expect(formulaField(page)).toHaveAttribute("aria-invalid", "true");
+  await page.keyboard.press("Enter");
+  await expect(page.locator("#oc-msgbox")).toBeHidden();
+  await expect(formulaField(page)).toBeFocused();
+  await expect(formulaField(page)).toHaveValue("=$D2>");
 
   // And the rule was not stored. A rule holding a formula that cannot parse is
   // a highlight that never appears and never says why.
   expect(await cfRules(page)).toEqual([]);
 
-  // An empty formula is refused too, in the same place.
+  // An empty formula is refused too, the same way.
   await formulaField(page).fill("");
   await applyButton(page).click();
   await expect(message).toBeVisible();
   await expect(message).toHaveText(/needs a formula/);
+  await page.keyboard.press("Escape");
   expect(await cfRules(page)).toEqual([]);
 
-  // And a later success takes the refusal away — in both places. A "does not
-  // parse" left standing over a rule that has since applied cleanly is the
-  // same failure moved one control along.
+  // And a later success raises nothing.
   await formulaField(page).fill("=$D2>100");
   await applyButton(page).click();
-  await expect(message).toBeHidden();
   await expect(page.locator("#tb-status")).toHaveText("rule applied to B2:E6");
-  await expect(formulaField(page)).not.toHaveAttribute("aria-invalid", "true");
+  await expect(page.locator("#oc-msgbox")).toBeHidden();
 });
 
 /// `DV-04` again: a dialog that cannot show what is set can only replace it.
