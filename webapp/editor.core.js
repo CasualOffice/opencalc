@@ -2893,6 +2893,12 @@ export function draw() {
       if (list.some((m) => c >= m.c0 && c <= m.c1)) occupied.add(r + "," + c);
     }
   }
+  // What stops a spill: text, or any merged block — asked of the merge list
+  // itself, not only of `occupied`, whose merge entries cover the *window's*
+  // columns. A label whose path crosses an empty merge that has scrolled out
+  // used to run straight through it into the window (`XL-UX-183`), while the
+  // same merge on screen stopped it.
+  const blocks = (r, c) => occupied.has(r + "," + c) || drawnMergeAt(r, c) !== undefined;
   // Cells carrying centre-across, so a label can find the extent of its run.
   const contCols = new Set();
   for (const it of items) if (it.a === "cont") contCols.add(it.r + "," + it.c);
@@ -3129,7 +3135,7 @@ export function draw() {
         // first undrawn column would stop at the very first step. `fscreen*`
         // has a position for any column, drawn or not. The pane bounds still
         // apply, so a frozen cell cannot borrow the body's columns.
-        while (clipR - x < tw + 8 && c + 1 < spillHi && !occupied.has(it.r + "," + (c + 1))) {
+        while (clipR - x < tw + 8 && c + 1 < spillHi && !blocks(it.r, c + 1)) {
           c += 1;
           clipR = fscreenXEnd(c);
         }
@@ -3139,7 +3145,7 @@ export function draw() {
         // Same reasoning as the rightward scan: a right-aligned label whose
         // cell is off the *right* edge spills back into the window, and the
         // columns it crosses on the way are not drawn either.
-        while (x + w - clipL < tw + 8 && c - 1 >= spillLo && !occupied.has(it.r + "," + (c - 1))) {
+        while (x + w - clipL < tw + 8 && c - 1 >= spillLo && !blocks(it.r, c - 1)) {
           c -= 1;
           clipL = fscreenX(c);
         }
