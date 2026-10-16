@@ -225,3 +225,255 @@ test.describe("following a link (XL-FEAT-139)", () => {
     expect(cells).toEqual([{ r: 2, c: 2 }]);
   });
 });
+
+// ---- Excel's Insert Hyperlink dialog (XL-UX-164) -----------------------------
+//
+// Reference: support.microsoft.com, "Work with links in Excel". Ours was two
+// free text boxes; Excel's has a "Link to:" rail, Text to display, ScreenTip…,
+// and a pane per kind of destination.
+
+const linkAt = (page, r, c, s = 0) =>
+  ed(page, ([s, r, c]) => JSON.parse(window.opencalcEditor.wasmApi().session_hyperlink_at(s, r, c)), [s, r, c]);
+const cellText = (page, r, c) =>
+  ed(page, ([r, c]) => window.opencalcEditor.wasmApi().session_cell_input(0, r, c), [r, c]);
+const modal = (page) => page.locator("#oc-modal");
+
+async function openDialog(page, r, c) {
+  await ed(page, ([r, c]) => window.opencalcEditor.selectForTest(r, c), [r, c]);
+  await page.locator("#grid").focus();
+  await page.keyboard.press("Control+k");
+  await expect(modal(page)).toBeVisible();
+}
+
+test.describe("Insert Hyperlink dialog (XL-UX-164)", () => {
+  test("Ctrl+K opens Excel's dialog: Link to rail, Text to display, ScreenTip", async ({ page }) => {
+    await boot(page);
+    await openDialog(page, 1, 1);
+    await expect(page.locator("#oc-modal-title")).toHaveText("Insert Hyperlink");
+    await expect(page.locator(".oc-link-rail")).toContainText("Link to:");
+    await expect(page.locator(".oc-link-rail [role=tab]")).toHaveText([
+      "Existing File or Web Page", "Place in This Document", "E-mail Address",
+    ]);
+    // Each rail entry carries an icon, as Excel's does — drawn, not a glyph.
+    expect(await page.locator(".oc-link-rail [role=tab] svg use").count()).toBe(3);
+    await expect(page.locator("label[for=oc-link-display]")).toHaveText("Text to display:");
+    await expect(page.locator("#oc-link-tip-btn")).toHaveText("ScreenTip…");
+    await expect(page.locator("label[for=oc-link-address]")).toHaveText("Address:");
+    await expect(page.locator("#oc-link-address")).toBeFocused();
+  });
+
+  test("a web address: http:// is assumed, the text to display follows it", async ({ page }) => {
+    await boot(page);
+    await openDialog(page, 1, 1);
+    await page.locator("#oc-link-address").fill("example.com/docs");
+    await expect(page.locator("#oc-link-display")).toHaveValue("example.com/docs");
+    await page.keyboard.press("Enter");
+    await expect(modal(page)).toBeHidden();
+    const l = await linkAt(page, 1, 1);
+    expect(l.target).toBe("http://example.com/docs");
+    expect(await cellText(page, 1, 1)).toBe("example.com/docs");
+  });
+
+  test("an address that is not web or e-mail is refused inline, dialog kept", async ({ page }) => {
+    await boot(page);
+    await openDialog(page, 1, 1);
+    await page.locator("#oc-link-address").fill("javascript:alert(1)");
+    await page.locator("#oc-modal .oc-btn.primary").click();
+    await expect(modal(page)).toBeVisible();
+    await expect(page.locator("#oc-link-address-error")).toBeVisible();
+    await expect(page.locator("#oc-link-address")).toHaveValue("javascript:alert(1)");
+    expect(await linkAt(page, 1, 1)).toBeNull();
+  });
+
+  test("place in this document, chosen from the tree", async ({ page }) => {
+    await boot(page);
+    await openDialog(page, 1, 1);
+    await page.locator("#oc-link-to-place").click();
+    await expect(page.locator("label[for=oc-link-ref]")).toHaveText("Type the cell reference:");
+    await expect(page.locator(".oc-link-tree-label")).toHaveText("Or select a place in this document:");
+    const tree = page.locator("#oc-link-tree");
+    await expect(tree.locator(".oc-link-node")).toHaveText(["Cell Reference", "Defined Names"]);
+    await tree.getByRole("treeitem", { name: "Sheet2", exact: true }).click();
+    await page.locator("#oc-link-ref").fill("c4");
+    await page.locator("#oc-modal .oc-btn.primary").click();
+    await expect(modal(page)).toBeHidden();
+    expect((await linkAt(page, 1, 1)).location).toBe("Sheet2!C4");
+    // …and the link it made goes there.
+    await clickCell(page, 1, 1);
+    expect(await sheet(page)).toBe(1);
+    expect(await sel(page)).toEqual({ r0: 3, c0: 2, r1: 3, c1: 2 });
+  });
+
+  test("a quoted sheet and a defined name from the tree", async ({ page }) => {
+    await boot(page);
+    await ed(page, () => window.opencalcEditor.wasmApi().session_define_name("Totals", "Sheet2!$B$3:$D$5"));
+    await openDialog(page, 1, 1);
+    await page.locator("#oc-link-to-place").click();
+    const tree = page.locator("#oc-link-tree");
+    await tree.getByRole("treeitem", { name: "It's", exact: true }).click();
+    await page.locator("#oc-link-ref").fill("B2");
+    await page.keyboard.press("Enter");
+    expect((await linkAt(page, 1, 1)).location).toBe("'It''s'!B2");
+
+    await openDialog(page, 2, 2);
+    await page.locator("#oc-link-to-place").click();
+    await tree.getByRole("treeitem", { name: "Totals", exact: true }).click();
+    // A name is its own place: the cell reference does not apply to it.
+    await expect(page.locator("#oc-link-ref")).toBeDisabled();
+    await page.locator("#oc-modal .oc-btn.primary").click();
+    expect((await linkAt(page, 2, 2)).location).toBe("Totals");
+  });
+
+  test("an invalid cell reference is answered inline in Excel's words", async ({ page }) => {
+    await boot(page);
+    await openDialog(page, 1, 1);
+    await page.locator("#oc-link-to-place").click();
+    await page.locator("#oc-link-ref").fill("not a ref");
+    await page.locator("#oc-modal .oc-btn.primary").click();
+    await expect(modal(page)).toBeVisible();
+    await expect(page.locator("#oc-link-ref-error")).toHaveText("Reference isn't valid.");
+    await expect(page.locator("#oc-link-ref")).toHaveValue("not a ref");
+    await expect(page.locator("#oc-link-ref")).toHaveAttribute("aria-invalid", "true");
+    // One dialog: the message is not a box over it.
+    expect(await page.locator(".oc-modal:visible, #oc-modal:visible").count()).toBe(1);
+    expect(await linkAt(page, 1, 1)).toBeNull();
+  });
+
+  test("an e-mail address with a subject becomes an encoded mailto:", async ({ page }) => {
+    await boot(page);
+    await openDialog(page, 1, 1);
+    await page.locator("#oc-link-to-email").click();
+    await expect(page.locator("label[for=oc-link-email]")).toHaveText("E-mail address:");
+    await expect(page.locator("label[for=oc-link-subject]")).toHaveText("Subject:");
+    await page.locator("#oc-link-email").fill("ops@example.com");
+    await page.locator("#oc-link-subject").fill("Q3 report & plan?");
+    await expect(page.locator("#oc-link-display")).toHaveValue("mailto:ops@example.com");
+    await page.locator("#oc-modal .oc-btn.primary").click();
+    const l = await linkAt(page, 1, 1);
+    expect(l.target).toBe("mailto:ops@example.com?subject=Q3%20report%20%26%20plan%3F");
+  });
+
+  test("ScreenTip… opens its box inline, not a dialog over this one", async ({ page }) => {
+    await boot(page);
+    await openDialog(page, 1, 1);
+    await page.locator("#oc-link-address").fill("https://example.com/");
+    await page.locator("#oc-link-tip-btn").click();
+    await expect(page.locator("label[for=oc-link-tip]")).toHaveText("ScreenTip text:");
+    await page.locator("#oc-link-tip").fill("Opens the site");
+    await page.locator("#oc-modal .oc-btn.primary").click();
+    expect((await linkAt(page, 1, 1)).tooltip).toBe("Opens the site");
+  });
+
+  test("Edit Hyperlink is the same dialog, prefilled, with Remove Link", async ({ page }) => {
+    await boot(page);
+    await ed(page, () => {
+      const a = window.opencalcEditor.wasmApi();
+      a.session_set_cell(0, 1, 1, "Go there");
+      a.session_set_hyperlink(0, 1, 1, "", "Sheet2!D7", "a tip", "Go there");
+    });
+    await openDialog(page, 1, 1);
+    await expect(page.locator("#oc-modal-title")).toHaveText("Edit Hyperlink");
+    await expect(page.locator("#oc-link-to-place")).toHaveAttribute("aria-selected", "true");
+    await expect(page.locator("#oc-link-ref")).toHaveValue("D7");
+    await expect(page.locator("#oc-link-tree").getByRole("treeitem", { name: "Sheet2", exact: true }))
+      .toHaveAttribute("aria-selected", "true");
+    await expect(page.locator("#oc-link-display")).toHaveValue("Go there");
+    await expect(page.locator("#oc-link-tip")).toHaveValue("a tip");
+    const remove = page.locator("#oc-modal .oc-btn", { hasText: "Remove Link" });
+    await remove.click();
+    await expect(modal(page)).toBeHidden();
+    expect(await linkAt(page, 1, 1)).toBeNull();
+    expect(await cellText(page, 1, 1), "Remove Link keeps the text").toBe("Go there");
+  });
+
+  test("Escape cancels without a change", async ({ page }) => {
+    await boot(page);
+    await openDialog(page, 1, 1);
+    await page.locator("#oc-link-address").fill("https://example.com/");
+    await page.keyboard.press("Escape");
+    await expect(modal(page)).toBeHidden();
+    expect(await linkAt(page, 1, 1)).toBeNull();
+  });
+
+  test("one undo takes back the link and the text it wrote", async ({ page }) => {
+    await boot(page);
+    await openDialog(page, 1, 1);
+    await page.locator("#oc-link-address").fill("https://example.com/");
+    await page.keyboard.press("Enter");
+    expect(await cellText(page, 1, 1)).toBe("https://example.com/");
+    await ed(page, () => window.opencalcEditor.wasmApi().session_undo());
+    expect(await linkAt(page, 1, 1)).toBeNull();
+    expect(await cellText(page, 1, 1)).toBe("");
+  });
+
+  test("the cell menu: Edit Hyperlink…, Open Hyperlink, Remove Hyperlink", async ({ page }) => {
+    await boot(page);
+    await link(page, 1, 1, "https://example.com/", "");
+    const p = await cellCenter(page, 1, 1);
+    await page.mouse.click(p.x, p.y, { button: "right" });
+    const menu = page.locator("#sheet-ctx");
+    await expect(menu).toBeVisible();
+    for (const label of ["Edit Hyperlink…", "Open Hyperlink", "Remove Hyperlink"]) {
+      await expect(menu.getByRole("button", { name: label, exact: true })).toBeVisible();
+    }
+    await menu.getByRole("button", { name: "Open Hyperlink", exact: true }).click();
+    expect(await opened(page)).toEqual([["https://example.com/", "_blank", "noopener,noreferrer"]]);
+
+    await page.mouse.click(p.x, p.y, { button: "right" });
+    await menu.getByRole("button", { name: "Remove Hyperlink", exact: true }).click();
+    expect(await linkAt(page, 1, 1)).toBeNull();
+    expect(await cellText(page, 1, 1)).toBe("link");
+
+    // A cell without a link offers to make one.
+    await page.mouse.click(p.x, p.y, { button: "right" });
+    await expect(menu.getByRole("button", { name: "Link", exact: true })).toBeVisible();
+    await expect(menu.getByRole("button", { name: "Open Hyperlink", exact: true })).toHaveCount(0);
+  });
+
+  test("xlsx keeps a location link's place, text and tip, and a HYPERLINK formula", async ({ page }) => {
+    await boot(page);
+    const after = await ed(page, () => {
+      const a = window.opencalcEditor.wasmApi();
+      a.session_set_cell(0, 1, 1, "Go");
+      a.session_set_hyperlink(0, 1, 1, "", "'It''s'!B2", "the tip", "Go");
+      a.session_set_cell(0, 2, 2, '=HYPERLINK("#Sheet2!D4","Jump")');
+      a.session_set_cell(0, 3, 3, "web");
+      a.session_set_hyperlink(0, 3, 3, "https://example.com/a#part", "", "", "");
+      const bytes = a.session_save_as("xlsx");
+      a.session_new();
+      a.session_open(bytes);
+      return [1, 2, 3].map((i) => JSON.parse(a.session_hyperlink_at(0, i, i)));
+    });
+    expect(after[0]).toMatchObject({ location: "'It''s'!B2", tooltip: "the tip", display: "Go", formula: false });
+    expect(after[1]).toMatchObject({ location: "Sheet2!D4", formula: true });
+    expect(after[2]).toMatchObject({ target: "https://example.com/a#part" });
+  });
+});
+
+test.describe("Insert Hyperlink from the keyboard (XL-UX-164)", () => {
+  test("the arrows move along the rail; Enter on a place is OK", async ({ page }) => {
+    await boot(page);
+    await openDialog(page, 1, 1);
+    await page.locator("#oc-link-to-web").focus();
+    await page.keyboard.press("ArrowDown");
+    await expect(page.locator("#oc-link-to-place")).toHaveAttribute("aria-selected", "true");
+    await expect(page.locator("#oc-link-to-place")).toBeFocused();
+    const leaf = page.locator("#oc-link-tree").getByRole("treeitem", { name: "Sheet2", exact: true });
+    await leaf.focus();
+    await page.keyboard.press("Enter");
+    await expect(modal(page)).toBeHidden();
+    expect((await linkAt(page, 1, 1)).location).toBe("Sheet2!A1");
+  });
+
+  test("a formula cell's text is not the dialog's to replace", async ({ page }) => {
+    await boot(page);
+    await ed(page, () => window.opencalcEditor.wasmApi().session_set_cell(0, 1, 1, "=1+2"));
+    await openDialog(page, 1, 1);
+    await expect(page.locator("#oc-link-display")).toBeDisabled();
+    await expect(page.locator("#oc-link-display")).toHaveValue("<<Selection in Document>>");
+    await page.locator("#oc-link-address").fill("https://example.com/");
+    await page.keyboard.press("Enter");
+    expect(await cellText(page, 1, 1)).toBe("=1+2");
+    expect((await linkAt(page, 1, 1)).target).toBe("https://example.com/");
+  });
+});

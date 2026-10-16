@@ -1428,9 +1428,9 @@ export function followHyperlink(row, col) {
   let link = null;
   try { link = JSON.parse(wasm.session_hyperlink_at(state.sheet, row, col)); } catch {}
   if (!link) return false;
-  // A link with both is "open that document at this anchor": the document is
-  // the destination, so the target decides.
-  if (link.target) return openLinkTarget(link.target);
+  // A link with both is "open that document at this anchor" — Excel writes a
+  // web page's `#part` as the location — so the two are joined.
+  if (link.target) return openLinkTarget(link.location ? `${link.target}#${link.location}` : link.target);
   if (link.location) return goToLinkLocation(link.location);
   return false;
 }

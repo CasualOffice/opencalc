@@ -61,6 +61,26 @@ for (const id of DIALOGS) {
   });
 }
 
+// Edit Hyperlink (XL-UX-164) is Insert Hyperlink prefilled, with Excel's
+// Remove Link added to the footer — a third button that must not break the
+// frame or take OK's place as the first action.
+test("dialog Edit Hyperlink uses the shared frame", async ({ page }) => {
+  await boot(page);
+  await page.evaluate(() => {
+    const ed = window.opencalcEditor;
+    ed.wasmApi().session_set_hyperlink(0, 0, 0, "https://example.com/", "", "", "");
+    ed.selectForTest(0, 0);
+    ed.runCommand("insert.hyperlink");
+  });
+  await expect(page.locator("#oc-modal-title")).toHaveText("Edit Hyperlink");
+  const m = await measure(page, ".oc-modal-box");
+  expect(m.radius).toBe("8px");
+  expect(m.width).toBeGreaterThanOrEqual(359);
+  expect(m.width).toBeLessThanOrEqual(561);
+  expect(m.buttons.map((b) => b.cls)).toEqual(["oc-btn primary", "oc-btn", "oc-btn oc-link-remove"]);
+  for (const b of m.buttons) expect(b.h).toBe(32);
+});
+
 for (const id of PANELS) {
   test(`panel ${id} uses the shared frame`, async ({ page }) => {
     await boot(page);
