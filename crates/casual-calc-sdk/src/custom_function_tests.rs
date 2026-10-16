@@ -246,3 +246,67 @@ fn a_change_to_the_function_sources_is_announced_for_re_registration() {
         "and so does its undo"
     );
 }
+
+fn with_source(s: &mut WorkbookSession, source: &str) {
+    let mut lib = s.workbook().macros.clone();
+    lib.custom_functions
+        .push(casual_calc_model::CustomFunctionSource {
+            guid: "f1".to_owned(),
+            name: "Function 1".to_owned(),
+            source: source.to_owned(),
+        });
+    s.edit(crate::EditOperation::SetMacros(lib)).unwrap();
+}
+
+const DOUBLE_SOURCE: &str = "/**\n * Doubles.\n * @customfunction\n * @param {number} x\n * @returns {number}\n */\nfunction double(x) { return x * 2; }\nApi.AddCustomFunction(double);\nApi.AddCustomFunction(async function HALF(x) { return x / 2; });";
+
+#[test]
+fn the_sources_name_the_functions_they_declare() {
+    let mut s = session();
+    with_source(&mut s, DOUBLE_SOURCE);
+    assert_eq!(
+        s.workbook().macros.declared_custom_function_names(),
+        ["DOUBLE", "HALF"]
+    );
+}
+
+#[test]
+fn saving_names_each_custom_function_a_reader_without_it_shows_as_name_error() {
+    let mut s = session();
+    with_source(&mut s, DOUBLE_SOURCE);
+    type_in(&mut s, 0, 0, "=DOUBLE(21)");
+    type_in(&mut s, 1, 0, "=DOUBLE(2)+HALF(4)");
+    let loss = s.loss_writing(crate::SessionFormat::Xlsx);
+    let entries = loss.entries();
+    let named = |f: &str| entries.iter().find(|e| e.feature == f).map(|e| e.count);
+    assert_eq!(
+        named("custom function DOUBLE (Excel shows #NAME?)"),
+        Some(2),
+        "{entries:?}"
+    );
+    assert_eq!(named("custom function HALF (Excel shows #NAME?)"), Some(1));
+}
+
+#[test]
+fn opening_a_file_that_uses_its_own_custom_functions_names_them_as_such() {
+    let mut s = session();
+    with_source(&mut s, DOUBLE_SOURCE);
+    s.set_custom_functions(vec![spec("DOUBLE", 1, false)])
+        .unwrap();
+    type_in(&mut s, 0, 0, "=DOUBLE(21)");
+    let calls = s.take_custom_calls();
+    s.set_custom_results(vec![(calls[0].ticket, CustomValue::Number(42.0))]);
+    let reopened = WorkbookSession::open(s.save().unwrap()).unwrap();
+    let entries = reopened.compatibility_report().entries();
+    assert!(
+        entries
+            .iter()
+            .any(|e| e.feature == "f/custom-function:DOUBLE"),
+        "named as the workbook's own function: {entries:?}"
+    );
+    assert!(
+        !entries.iter().any(|e| e.feature == "f/unsupported:DOUBLE"),
+        "not as a function this engine lacks: {entries:?}"
+    );
+    assert_eq!(value(&reopened, 0, 0), CellValue::Number(42.0));
+}
