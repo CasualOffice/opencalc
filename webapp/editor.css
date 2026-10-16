@@ -2548,6 +2548,8 @@ html, .editor-body { overscroll-behavior: none; }
 .oc-mw-tag { flex: 0 0 auto; font-size: 10.5px; color: var(--oc-muted-text-color); }
 .oc-mw-rename-input { width: 100%; min-height: 24px !important; font-size: 12px !important; }
 .oc-mw-empty { padding: 8px; }
+/* MACRO-04: Macros and Custom functions, each under its own heading (ONLYOFFICE). */
+.oc-mw-heading { padding: 6px 8px 2px; font-size: 11px; font-weight: 600; color: var(--oc-muted-text-color); text-transform: none; }
 .oc-mw-pane { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
 .oc-mw-editor {
   display: flex; height: 220px; border: 1px solid var(--oc-control-border-color); border-radius: 6px;

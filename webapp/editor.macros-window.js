@@ -23,6 +23,7 @@
 
 import { modalFrame, confirmModal } from "./editor.dialogs.js";
 import { runMacro } from "./editor.macros.js";
+import { customFunctionErrors, customFunctionInfo, customFunctionsSettledForTest, trustCustomFunctions } from "./editor.custom-functions.js";
 import {
   byId,
   canvas,
@@ -37,6 +38,9 @@ import {
 /// What ONLYOFFICE's Macros window puts in a new macro, so a macro started
 /// here looks like one started there.
 const NEW_MACRO = "(function()\n{\n    // Enter your code here.\n})();\n";
+/// A new custom function (`MACRO-04`): ONLYOFFICE's shape — a JSDoc block with
+/// the required `@customfunction` tag, then `Api.AddCustomFunction`.
+const NEW_FUNCTION = "(function()\n{\n    /**\n     * Function that returns the argument\n     * @customfunction\n     * @param {any} arg Any data.\n     * @returns {any} The argument of the function.\n     */\n    function myFunction(arg) {\n        return arg;\n    }\n    Api.AddCustomFunction(myFunction);\n})();\n";
 const INDENT = "    ";
 
 /// Selection and scroll survive closing and reopening, as the Name Manager's do
@@ -53,6 +57,17 @@ function library() {
   }
 }
 
+/// Macros, then custom-function sources (`MACRO-04`), as the window lists
+/// them — ONLYOFFICE's Macros window keeps the two under their own headings.
+function entries() {
+  let lib = { macros: [], customFunctions: [] };
+  try { lib = JSON.parse(wasm.session_macros()); } catch {}
+  return [
+    ...(lib.macros || []).map((m) => ({ ...m, kind: "macro" })),
+    ...(lib.customFunctions || []).map((f) => ({ ...f, autostart: false, kind: "function" })),
+  ];
+}
+
 function newGuid() {
   try { if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID(); } catch {}
   let s = "";
@@ -60,10 +75,11 @@ function newGuid() {
   return s;
 }
 
-/// "Macro 1", "Macro 2", … — ONLYOFFICE's naming, first number not taken.
-function nextName(macros) {
+/// "Macro 1", "Macro 2", … — ONLYOFFICE's naming, first number not taken;
+/// "Function 1", … for custom functions.
+function nextName(macros, word = "Macro") {
   const taken = new Set(macros.map((m) => m.name.toLowerCase()));
-  for (let n = 1; ; n++) if (!taken.has(`macro ${n}`)) return `Macro ${n}`;
+  for (let n = 1; ; n++) if (!taken.has(`${word.toLowerCase()} ${n}`)) return `${word} ${n}`;
 }
 
 function editable() {
@@ -122,11 +138,13 @@ export function openMacrosWindow() {
   const bar = el("div", "oc-mw-bar");
   const neu = el("button", "oc-btn", "New");
   neu.id = "oc-mw-new";
+  const neuFn = el("button", "oc-btn", "New function");
+  neuFn.id = "oc-mw-new-function";
   const ren = el("button", "oc-btn", "Rename");
   ren.id = "oc-mw-rename";
   const del = el("button", "oc-btn", "Delete");
   del.id = "oc-mw-delete";
-  if (canEdit) bar.append(neu, ren, del);
+  if (canEdit) bar.append(neu, neuFn, ren, del);
 
   const split = el("div", "oc-mw-split");
   const list = el("div", "oc-mw-list");
@@ -177,6 +195,17 @@ export function openMacrosWindow() {
   let macros = [];
   const selected = () => macros.find((m) => m.guid === mwState.selected) ?? null;
 
+  /// What a custom-function source registered, or why it did not.
+  function functionReport(m) {
+    const errors = customFunctionErrors().filter((e) => !e.guid || e.guid === m.guid);
+    if (errors.length) {
+      const e = errors[0];
+      return { text: e.line ? `Line ${e.line}: ${e.message}` : e.message, bad: true, line: Number(e.line) || 0 };
+    }
+    const names = customFunctionInfo().map((f) => f.name);
+    return { text: names.length ? `Registered: ${names.join(", ")}. Use them in a formula, as =${names[0]}(…).` : "No functions registered yet.", bad: false, line: 0 };
+  }
+
   function numberLines(errorLine = 0) {
     const n = Math.max(1, code.value.split("\n").length);
     gutter.textContent = "";
@@ -193,6 +222,11 @@ export function openMacrosWindow() {
     code.disabled = !m;
     auto.checked = !!m?.autostart;
     auto.disabled = !m;
+    // A custom function is not run; it is saved, and the sandbox registers it.
+    const isFn = m?.kind === "function";
+    autoRow.hidden = !canEdit || isFn;
+    runBtn.textContent = isFn ? "Save" : "Run";
+    code.setAttribute("aria-label", isFn ? "Custom function code" : "Macro code");
     runBtn.disabled = !m;
     ren.disabled = !m;
     del.disabled = !m;
@@ -201,14 +235,29 @@ export function openMacrosWindow() {
   }
 
   function render() {
-    macros = library();
+    macros = entries();
     if (!macros.some((m) => m.guid === mwState.selected)) mwState.selected = macros[0]?.guid ?? null;
     list.textContent = "";
+    const heading = (text) => {
+      const h = el("div", "oc-mw-heading", text);
+      h.setAttribute("role", "presentation");
+      list.appendChild(h);
+    };
+    const anyMacros = macros.some((m) => m.kind === "macro");
+    const anyFns = macros.some((m) => m.kind === "function");
+    if (anyFns) heading("Macros");
+    let fnHeading = false;
     for (const m of macros) {
+      if (m.kind === "function" && !fnHeading) {
+        if (!anyMacros) list.appendChild(el("div", "panel-hint oc-mw-empty", "No macros."));
+        heading("Custom functions");
+        fnHeading = true;
+      }
       const row = el("div", "oc-mw-row");
       row.setAttribute("role", "option");
       row.tabIndex = -1;
       row.dataset.guid = m.guid;
+      row.dataset.kind = m.kind;
       // Text nodes: a macro name is workbook text.
       const name = el("span", "oc-mw-name", m.name);
       name.title = m.name;
@@ -245,6 +294,7 @@ export function openMacrosWindow() {
       wasm.session_set_macro_source(m.guid, code.value);
       m.source = code.value;
       dirty = false;
+      if (m.kind === "function") trustCustomFunctions();
       return true;
     } catch (e) {
       say(`Not saved: ${errText(e)}`, true);
@@ -311,6 +361,24 @@ export function openMacrosWindow() {
     render();
   });
 
+  neuFn.addEventListener("click", () => {
+    if (renaming) endRename(true);
+    commitSource();
+    const guid = newGuid();
+    try {
+      wasm.session_set_custom_function_source(guid, nextName(macros.filter((m) => m.kind === "function"), "Function"), NEW_FUNCTION);
+    } catch (e) {
+      say(`Not created: ${errText(e)}`, true);
+      return;
+    }
+    // Written here, by the person: this workbook's functions may run.
+    trustCustomFunctions();
+    mwState.selected = guid;
+    render();
+    result.hidden = true;
+    code.focus();
+  });
+
   neu.addEventListener("click", () => {
     if (renaming) endRename(true);
     commitSource();
@@ -339,7 +407,8 @@ export function openMacrosWindow() {
     // Closed for the question and reopened after it: no message box over a
     // dialog (docs/95 rule 8), the Name Manager's pattern.
     frame.close();
-    confirmModal("Macros", `Delete the macro "${m.name}"? This can be undone with Undo.`, "Delete").then((yes) => {
+    const what = m.kind === "function" ? "custom function source" : "macro";
+    confirmModal("Macros", `Delete the ${what} "${m.name}"? This can be undone with Undo.`, "Delete").then((yes) => {
       if (yes) {
         try { wasm.session_delete_macro(m.guid); mwState.selected = null; }
         catch (e) { statusError(errText(e)); }
@@ -352,6 +421,17 @@ export function openMacrosWindow() {
     const m = selected();
     if (!m) return;
     if (!commitSource()) return;
+    if (m.kind === "function") {
+      runBtn.disabled = true;
+      say(`Registering ${m.name}…`);
+      trustCustomFunctions();
+      try { await customFunctionsSettledForTest(); } finally { runBtn.disabled = false; }
+      if (!root.isConnected) return;
+      const r = functionReport(selected() ?? m);
+      say(r.text, r.bad, r.line);
+      if (r.line) selectLine(r.line);
+      return;
+    }
     runBtn.disabled = true;
     say(`Running ${m.name}…`);
     let res;

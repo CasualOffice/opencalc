@@ -98,20 +98,60 @@ pub fn session_set_macro(
     })
 }
 
-/// Replace one macro's source.
+/// The name and source of the macro **or custom-function source** with this
+/// guid — guids are unique across both lists (`MacroLibrary::check`), so the
+/// Macros window renames and edits either through one call.
+fn find_any<'a>(
+    lib: &'a mut MacroLibrary,
+    guid: &str,
+) -> Result<(&'a mut String, &'a mut String), JsError> {
+    if let Some(m) = lib.macros.iter_mut().find(|m| m.guid == guid) {
+        return Ok((&mut m.name, &mut m.source));
+    }
+    lib.custom_functions
+        .iter_mut()
+        .find(|f| f.guid == guid)
+        .map(|f| (&mut f.name, &mut f.source))
+        .ok_or_else(|| JsError::new("no macro with that id"))
+}
+
+/// Replace one macro's (or custom-function source's) source.
 #[wasm_bindgen]
 pub fn session_set_macro_source(guid: &str, source: &str) -> Result<(), JsError> {
     edit_library(|lib| {
-        find(lib, guid)?.source = source.to_owned();
+        *find_any(lib, guid)?.1 = source.to_owned();
         Ok(())
     })
 }
 
-/// Rename one macro.
+/// Rename one macro (or custom-function source).
 #[wasm_bindgen]
 pub fn session_rename_macro(guid: &str, name: &str) -> Result<(), JsError> {
     edit_library(|lib| {
-        find(lib, guid)?.name = name.trim().to_owned();
+        *find_any(lib, guid)?.0 = name.trim().to_owned();
+        Ok(())
+    })
+}
+
+/// Create the custom-function source `guid` (`MACRO-04`), or replace its name
+/// and source if it exists. One edit, like every library change: undoable,
+/// sent to collaborators, refused read-only.
+#[wasm_bindgen]
+pub fn session_set_custom_function_source(
+    guid: &str,
+    name: &str,
+    source: &str,
+) -> Result<(), JsError> {
+    edit_library(|lib| {
+        let entry = casual_calc_model::CustomFunctionSource {
+            guid: guid.to_owned(),
+            name: name.trim().to_owned(),
+            source: source.to_owned(),
+        };
+        match lib.custom_functions.iter_mut().find(|f| f.guid == guid) {
+            Some(existing) => *existing = entry,
+            None => lib.custom_functions.push(entry),
+        }
         Ok(())
     })
 }
@@ -125,13 +165,14 @@ pub fn session_set_macro_autostart(guid: &str, on: bool) -> Result<(), JsError> 
     })
 }
 
-/// Delete one macro.
+/// Delete one macro (or custom-function source).
 #[wasm_bindgen]
 pub fn session_delete_macro(guid: &str) -> Result<(), JsError> {
     edit_library(|lib| {
-        let before = lib.macros.len();
+        let before = lib.macros.len() + lib.custom_functions.len();
         lib.macros.retain(|m| m.guid != guid);
-        if lib.macros.len() == before {
+        lib.custom_functions.retain(|f| f.guid != guid);
+        if lib.macros.len() + lib.custom_functions.len() == before {
             return Err(JsError::new("no macro with that id"));
         }
         Ok(())
