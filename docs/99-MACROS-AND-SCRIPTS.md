@@ -86,6 +86,69 @@ API as the only capability; a runaway script is terminated and its edits
 rolled back as one step. Script source is untrusted input everywhere it is
 displayed.
 
+### 5a. Network access, only when the user allows it (`MACRO-13`)
+
+Owner decision, 2026-10-17: a macro or custom function may reach the network
+**only after the user is warned and allows it**, and it must not become a
+security hole. Without consent, §5's "no network" holds unchanged.
+
+- **The sandbox never holds a network primitive.** `fetch`, `XMLHttpRequest`,
+  `WebSocket`, `EventSource`, `importScripts` and `navigator.sendBeacon` stay
+  removed by the lockdown. What a script calls `fetch` is a stub that posts
+  the request to the host page. The host checks it, asks the user, makes the
+  request itself with fixed options, and returns a bounded copy of the reply.
+  Untrusted code can never touch a real `fetch`, so no lockdown escape turns
+  into network access.
+- **The request is fixed by us, not by the script:**
+  - methods: `GET`, `HEAD`, `POST`;
+  - `credentials: "omit"`, so no cookies and no HTTP auth;
+  - `referrerPolicy: "no-referrer"`, `cache: "no-store"`, `mode: "cors"`;
+  - `redirect: "error"`, so a redirect cannot carry the request to a site the
+    user did not allow;
+  - headers: only `Accept` and `Content-Type`;
+  - body up to 1 MB;
+  - the reply is read as text up to 5 MB, with only `status`, `ok`, `text()`
+    and `json()` exposed, and no response headers;
+  - 10 s per request, 4 at once, and 60 a minute per workbook.
+- **Which addresses can be asked for at all:**
+  - `https:` only;
+  - no user name or password in the URL, and only the default port;
+  - no IP addresses (v4 or v6) and no single-label hosts;
+  - no `localhost` and none of `.local`, `.localhost`, `.internal`, `.lan`,
+    `.home.arpa` or `.test`;
+  - never OpenCalc's own origin, nor the collaboration server's.
+
+  This keeps a workbook from probing the user's local network or acting as
+  them on our own server. DNS that points a public name at a private address
+  cannot be detected from a page; that limit is stated, and browsers' Private
+  Network Access checks are the backstop.
+- **The host's policy comes first.** An embedder's Content-Security-Policy
+  (`connect-src`) applies to the host's request as to any other, and is never
+  worked around. A host capability `canUseNetwork` turns the feature off
+  entirely, and an optional host allowlist limits it to named sites. Nothing
+  is ever allowed without `canRunMacros`, or in read-only.
+- **Consent, in Excel's shape.** The first request to a site pauses the call
+  (a custom function shows `#BUSY!`) and shows Excel's security pattern:
+  - a *Security Warning* message bar;
+  - a *Security Notice* dialog naming the function or macro and the site
+    (scheme and host only), saying that data from this workbook can be sent
+    to it, with **Enable** and **Disable**.
+
+  Disable makes the stub's promise reject with a `NetworkBlocked` error, so an
+  unhandled call is `#VALUE!` as in Excel. Asks for the same site are
+  combined into one prompt.
+- **Where a grant lives.** A grant covers one site, for one workbook (its
+  document id, XL-FEAT-113) and the exact sources that asked (a hash).
+  - It is kept **on this device only**, never in the file and never sent to
+    co-editors, so a file cannot grant itself and one user cannot grant for
+    another.
+  - Editing a function's or macro's source invalidates its grants.
+  - Grants are listed in File ▸ Options ▸ Trust Center, where each can be
+    removed.
+- **Untrusted output.** A reply is data: it reaches cells only through the
+  function's return value or the macro API, never as HTML, script or a
+  formula.
+
 ## 6. Phases
 
 | Row | Scope |
@@ -94,4 +157,5 @@ displayed.
 | `MACRO-02` | Macros window (View ▸ Macros, Alt+F8) with editor, autostart; macros stored in the workbook (read OnlyOffice's storage too, if documented) |
 | `MACRO-03` | Record Actions → script |
 | `MACRO-04` | Custom functions via `Api.AddCustomFunction` with JSDoc `@customfunction` (async allowed), recalc-safe and sandboxed |
+| `MACRO-13` | Network access only after the user allows it (§5a) |
 | `MACRO-05` | Read-only VBA viewer for `.xlsm`, and Convert VBA → macro through the user's AI assistant |
