@@ -67,7 +67,6 @@ import {
   mirrorEdit,
   modeEl,
   needsRecalc,
-  parseNameRange,
   pointMode,
   qs,
   qsa,
@@ -1424,37 +1423,72 @@ export function applyCommandRules() {
   document.dispatchEvent(new Event("oc:command-rules"));
 }
 
+/// Follow the link on a cell, as Excel does (`XL-FEAT-139`).
+///
+/// A stored link or a `HYPERLINK()` formula — the engine answers for both, the
+/// formula's target evaluated. An external target opens in a new window when
+/// it is safe to; otherwise the location is a place in this workbook.
 export function followHyperlink(row, col) {
   let link = null;
   try { link = JSON.parse(wasm.session_hyperlink_at(state.sheet, row, col)); } catch {}
   if (!link) return false;
-  if (link.location) {
-    const [sheetName, cellRef] = link.location.includes("!")
-      ? link.location.split("!")
-      : [null, link.location];
-    if (sheetName) {
-      let names = [];
-      try { names = JSON.parse(wasm.session_sheet_names()); } catch {}
-      const i = names.findIndex((n) => n.toLowerCase() === sheetName.replace(/^'|'$/g, "").toLowerCase());
-      if (i >= 0 && i !== state.sheet) switchSheet(i);
-    }
-    // `parseNameRange` is what the name box already uses, so a link's anchor
-    // accepts exactly the references a user can type there.
-    const at = parseNameRange(cellRef);
-    if (at) {
-      select(at.r0, at.c0);
-      ensureVisible(at.r0, at.c0);
-      draw();
-    }
-    return true;
-  }
-  if (link.target) {
-    // `noopener` matters: without it the opened page can reach back through
-    // `window.opener` and navigate this one.
-    window.open(link.target, "_blank", "noopener,noreferrer");
-    return true;
-  }
+  // A link with both is "open that document at this anchor" — Excel writes a
+  // web page's `#part` as the location — so the two are joined.
+  if (link.target) return openLinkTarget(link.location ? `${link.target}#${link.location}` : link.target);
+  if (link.location) return goToLinkLocation(link.location);
   return false;
+}
+
+/// The URL a link may open, or `null` when it must not be opened.
+///
+/// Only web pages and e-mail. A workbook carries its links from wherever it
+/// was written, and `javascript:` run from here would run *as this page*;
+/// `data:` and `file:` are the same hazard by another route. `URL` does the
+/// parsing, so a scheme dressed up with case, whitespace or control
+/// characters is read the way the browser will read it.
+export function safeLinkUrl(target) {
+  const text = String(target ?? "").trim();
+  let url;
+  try { url = new URL(text); } catch { return null; }
+  return ["http:", "https:", "mailto:"].includes(url.protocol) ? url.href : null;
+}
+
+function openLinkTarget(target) {
+  const url = safeLinkUrl(target);
+  if (!url) {
+    // Excel's words for a link it cannot open.
+    statusError("Cannot open the specified file.");
+    return false;
+  }
+  // `noopener` matters: without it the opened page can reach back through
+  // `window.opener` and navigate this one.
+  window.open(url, "_blank", "noopener,noreferrer");
+  return true;
+}
+
+/// Select a link's in-document place: a cell, a range or a defined name,
+/// resolved by the engine — the same resolver the Insert Hyperlink dialog
+/// validates with. A place that does not resolve leaves the selection where it
+/// is and says so, in Excel's words; there is no dialog here, so the status
+/// bar carries the message.
+export function goToLinkLocation(text) {
+  let place = null;
+  try { place = JSON.parse(wasm.session_resolve_location(state.sheet, text)); } catch {}
+  if (!place) {
+    statusError("Reference isn't valid.");
+    return false;
+  }
+  if (place.sheet !== state.sheet) switchSheet(place.sheet);
+  select(place.r0, place.c0);
+  // A range is selected whole, the active cell at its top-left as in Excel.
+  // `state.sel` is the active cell and `state.anchor` the far corner.
+  if (place.r1 !== place.r0 || place.c1 !== place.c0) {
+    state.anchor = { row: place.r1, col: place.c1 };
+  }
+  ensureVisible(place.r0, place.c0);
+  updateNameBox();
+  draw();
+  return true;
 }
 
 export function autoSum() {

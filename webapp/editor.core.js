@@ -1682,6 +1682,12 @@ let commentCells = new Set(); // "r,c" of cells with a note in view (for hover t
 // screenful of links costs one call, and so the click handler can tell in O(1)
 // whether a click is on a link before doing anything slower.
 let linkCells = new Set();
+/// A mouse press on a linked cell, waiting to learn whether it is a click
+/// (follow the link) or a hold (just select the cell). `XL-FEAT-139`.
+let linkPress = null;
+/// How long a press must last to be a hold rather than a click. Excel does not
+/// document its figure; this is about the point the pointer changes there.
+const LINK_HOLD_MS = 600;
 // Tables on the current sheet, refreshed each draw. Held so the header
 // filter-button hit test does not have to ask the engine on every mousedown.
 let tablesInView = [];
@@ -7739,23 +7745,26 @@ function wireEvents() {
     // While editing a formula at a reference position, clicking a cell inserts
     // its reference instead of moving the selection. preventDefault keeps the
     // inline input focused (no blur/commit); a drag turns it into a range.
-    // A plain click on a linked cell follows it, as Excel does. Guarded three
-    // ways so it cannot hijack ordinary work: not while picking a formula
-    // reference, not with a modifier held (Ctrl-click is how you select a
-    // linked cell without leaving), and not on a second click of a cell that is
-    // already selected — that is someone starting a drag or a rename, not
-    // asking to navigate.
+    // Excel's click model for a linked cell (`XL-FEAT-139`): a plain click
+    // follows the link — on release, and every time, whether or not the cell
+    // is already selected — while click-and-hold selects the cell without
+    // following it; the pointer turns to the cell cross when the hold has
+    // taken. The press selects the cell either way, so the hold is how a
+    // linked cell is selected for editing. Not while picking a formula
+    // reference, and not with a modifier held: Shift and Ctrl keep extending
+    // and adding to the selection, as they do on any other cell.
     if (!refAcceptable() && !e.ctrlKey && !e.metaKey && !e.shiftKey && e.button === 0) {
       const hit = cellAt(px, py);
-      if (
-        hit
-        && linkCells.has(hit.row + "," + hit.col)
-        && !(hit.row === state.sel.row && hit.col === state.sel.col)
-      ) {
+      if (hit && linkCells.has(hit.row + "," + hit.col)) {
         e.preventDefault();
         select(hit.row, hit.col);
-        followHyperlink(hit.row, hit.col);
         draw();
+        const press = { row: hit.row, col: hit.col, held: false };
+        press.timer = setTimeout(() => {
+          press.held = true;
+          canvas.style.cursor = "cell";
+        }, LINK_HOLD_MS);
+        linkPress = press;
         return;
       }
     }
@@ -8103,6 +8112,20 @@ function wireEvents() {
     }
   });
   window.addEventListener("mouseup", (e) => {
+    if (linkPress) {
+      // A press on a link: follow it if it was a click — released before the
+      // hold took, over the cell it started on.
+      const press = linkPress;
+      linkPress = null;
+      clearTimeout(press.timer);
+      const rect = canvas.getBoundingClientRect();
+      const at = cellAt((e.clientX - rect.left) / state.zoom, (e.clientY - rect.top) / state.zoom);
+      if (!press.held && at && at.row === press.row && at.col === press.col) {
+        followHyperlink(press.row, press.col);
+        draw();
+      }
+      return;
+    }
     if (chartDrag) { chartMouseUp(); return; }
     if (state.moveDrag) {
       const d = state.moveDrag;

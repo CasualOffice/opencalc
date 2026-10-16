@@ -89,6 +89,7 @@ import {
   wrap,
 } from "./editor.core.js";
 import { syncVolatileClock } from "./editor.selection.js";
+import { followHyperlink, safeLinkUrl } from "./editor.selection.js";
 
 export function manageCfRules() {
   const modal = byId("oc-modal");
@@ -1932,59 +1933,407 @@ export function buildCfPanel(body) {
   setTimeout(() => (op.value === "formula" ? formula : a).focus(), 0);
 }
 
+/// Excel's Insert Hyperlink dialog (Ctrl+K, Insert ▸ Link, the cell menu), and
+/// Edit Hyperlink — the same dialog, prefilled (`XL-UX-164`).
+///
+/// Reference: support.microsoft.com, "Work with links in Excel". A "Link to:"
+/// rail picks the kind of destination; Text to display and ScreenTip… sit
+/// above it. Deliberate differences, each for a stated reason:
+///
+/// - **Create New Document is not offered.** A browser page cannot create a
+///   file beside this one, and a rail entry that cannot work is worse than
+///   none.
+/// - **Existing File or Web Page is the Address box only** — no Look in,
+///   Current Folder or Browsed Pages, which are the local file system.
+/// - **ScreenTip… opens its box inline**, and an invalid reference is
+///   answered inline: docs/95 rule 8, never a message box over a dialog.
+/// - **Only web and e-mail addresses are accepted**, because those are the only
+///   ones a click will open (`safeLinkUrl`) — a link stored here that could
+///   never be followed would be a silent failure later.
 export function hyperlinkDialog() {
   const { row, col } = state.sel;
+  const sheet = state.sheet;
   let existing = null;
-  try { existing = JSON.parse(wasm.session_hyperlink_at(state.sheet, row, col)); } catch {}
-  const modal = byId("oc-modal");
-  const body = byId("oc-modal-body");
-  byId("oc-modal-title").textContent =
-    existing ? "Edit Hyperlink" : "Insert Hyperlink";
-  body.textContent = "";
+  try { existing = JSON.parse(wasm.session_hyperlink_at(sheet, row, col)); } catch {}
+  // A HYPERLINK() formula is edited in the formula, as Excel says; Ctrl+K on
+  // one adds a stored link like on any other cell.
+  if (existing?.formula) existing = null;
+  const editing = !!existing;
 
-  const field = (label, value, placeholder) => {
-    body.appendChild(el("div", "panel-label", label));
-    const input = el("input", "panel-field");
+  let sheetNames = [];
+  try { sheetNames = JSON.parse(wasm.session_sheet_names()); } catch {}
+  let visibility = [];
+  try { visibility = JSON.parse(wasm.session_sheet_visibility()); } catch {}
+  let names = [];
+  try { names = JSON.parse(wasm.session_names()).filter((n) => !n.hidden && n.name); } catch {}
+  names.sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: "base" }));
+
+  // What the cell shows now. A formula or a number is not text the dialog can
+  // replace, so Excel shows the box disabled with this placeholder.
+  let shown = "";
+  let fixed = false;
+  try {
+    const input = wasm.session_cell_input(sheet, row, col);
+    const cell = JSON.parse(wasm.session_cells(sheet, row, col, row, col))[0];
+    shown = cell?.t ?? "";
+    fixed = input.startsWith("=") || cell?.n === 1;
+  } catch {}
+
+  const frame = modalFrame(editing ? "Edit Hyperlink" : "Insert Hyperlink", {
+    onEnter: () => commit(),
+    onKey: (e) => {
+      const at = document.activeElement;
+      // Enter on a place in the tree picks it and is OK — Enter is OK
+      // everywhere in Excel's dialog but on its buttons.
+      if (e.key === "Enter" && at?.classList?.contains("oc-link-leaf")) {
+        e.stopPropagation(); e.preventDefault();
+        at.click();
+        commit();
+        return true;
+      }
+      // The rail is a tab list: the arrows move along it, as in Excel.
+      if (at?.getAttribute?.("role") === "tab" && /^Arrow(Up|Down|Left|Right)$/.test(e.key)) {
+        e.stopPropagation(); e.preventDefault();
+        const keys = Object.keys(modes);
+        const step = /Up|Left/.test(e.key) ? -1 : 1;
+        const next = keys[(keys.indexOf(mode) + step + keys.length) % keys.length];
+        setMode(next, false);
+        modes[next].tab.focus();
+        return true;
+      }
+      return false;
+    },
+  });
+  const { body } = frame;
+  const fieldId = (id, label, attrs = {}) => {
+    const l = el("label", "oc-form-label", label);
+    l.htmlFor = id;
+    const input = document.createElement("input");
     input.type = "text";
-    input.value = value || "";
-    input.placeholder = placeholder;
-    body.appendChild(input);
-    return input;
+    input.id = id;
+    input.className = "oc-form-field";
+    input.spellcheck = false;
+    input.autocomplete = "off";
+    Object.assign(input, attrs);
+    return [l, input];
   };
-  const target = field("Web address", existing && existing.target, "https://example.com");
-  const location = field("Place in this workbook", existing && existing.location, "Sheet2!A1");
-  const display = field("Text to display", existing && existing.display, "leave empty to keep the cell's own text");
-  const tooltip = field("Tooltip", existing && existing.tooltip, "shown on hover");
+  const errorFor = (input) => {
+    const err = el("div", "oc-form-error");
+    err.id = `${input.id}-error`;
+    err.setAttribute("role", "alert");
+    err.hidden = true;
+    input.addEventListener("input", () => clearError(input, err));
+    return err;
+  };
+  const clearError = (input, err) => {
+    err.hidden = true;
+    err.textContent = "";
+    input.classList.remove("bad");
+    input.removeAttribute("aria-invalid");
+  };
+  const showError = (input, err, text) => {
+    err.textContent = text;
+    err.hidden = false;
+    input.classList.add("bad");
+    input.setAttribute("aria-invalid", "true");
+    input.focus();
+    input.select();
+  };
+  const svgIcon = (name) => {
+    const ns = "http://www.w3.org/2000/svg";
+    const svg = document.createElementNS(ns, "svg");
+    svg.setAttribute("viewBox", "0 0 20 20");
+    svg.setAttribute("width", "20");
+    svg.setAttribute("height", "20");
+    svg.setAttribute("aria-hidden", "true");
+    const use = document.createElementNS(ns, "use");
+    use.setAttribute("href", `#fi-${name}`);
+    svg.appendChild(use);
+    return svg;
+  };
 
-  const row2 = el("div", "oc-confirm-actions");
-  const commit = (clear) => {
-    try {
-      wasm.session_set_hyperlink(
-        state.sheet, row, col,
-        clear ? "" : target.value,
-        clear ? "" : location.value,
-        clear ? "" : tooltip.value,
-        clear ? "" : display.value,
-      );
-      status.textContent = clear ? "link removed" : "link set";
-    } catch (e) { statusError(errText(e)); }
-    modal.hidden = true;
-    draw();
-  };
-  if (existing) {
-    const remove = el("button", "oc-btn danger", "Remove Link");
-    remove.addEventListener("click", () => commit(true));
-    row2.appendChild(remove);
+  // ── Text to display and ScreenTip…, above the rail as in Excel ──
+  const [displayLabel, display] = fieldId("oc-link-display", "Text to display:");
+  const tipBtn = el("button", "oc-btn", "ScreenTip…");
+  tipBtn.type = "button";
+  tipBtn.id = "oc-link-tip-btn";
+  const top = el("div", "oc-link-top");
+  const displayCell = el("div", "oc-form-cell");
+  displayCell.append(display);
+  top.append(displayLabel, displayCell, tipBtn);
+  const [tipLabel, tip] = fieldId("oc-link-tip", "ScreenTip text:");
+  const tipRow = el("div", "oc-link-top oc-link-tipline");
+  const tipCell = el("div", "oc-form-cell");
+  tipCell.append(tip);
+  tipRow.append(tipLabel, tipCell);
+  tip.value = existing?.tooltip ?? "";
+  tipRow.hidden = !tip.value;
+  tipBtn.addEventListener("click", () => { tipRow.hidden = false; tip.focus(); });
+
+  if (fixed) {
+    display.value = "<<Selection in Document>>";
+    display.disabled = true;
+  } else {
+    display.value = shown;
   }
+  // An empty box follows the address as it is typed, as Excel's does, until
+  // somebody types in it.
+  let displayFollows = !fixed && !display.value;
+  display.addEventListener("input", () => { displayFollows = false; });
+
+  // ── The rail ──
+  const rail = el("div", "oc-link-rail");
+  rail.appendChild(el("div", "oc-form-label", "Link to:"));
+  const tabs = el("div", "oc-link-tabs");
+  tabs.setAttribute("role", "tablist");
+  tabs.setAttribute("aria-orientation", "vertical");
+  tabs.setAttribute("aria-label", "Link to");
+  rail.appendChild(tabs);
+  const panes = el("div", "oc-link-panes");
+  const modes = {};
+  const addMode = (key, label, iconName) => {
+    const tab = el("button", "oc-link-tab");
+    tab.type = "button";
+    tab.id = `oc-link-to-${key}`;
+    tab.setAttribute("role", "tab");
+    tab.append(svgIcon(iconName), el("span", null, label));
+    const pane = el("div", "oc-link-pane");
+    pane.setAttribute("role", "tabpanel");
+    pane.setAttribute("aria-labelledby", tab.id);
+    tab.addEventListener("click", () => setMode(key, true));
+    tabs.appendChild(tab);
+    panes.appendChild(pane);
+    modes[key] = { tab, pane };
+    return pane;
+  };
+
+  // Existing File or Web Page.
+  const webPane = addMode("web", "Existing File or Web Page", "globe");
+  const [addressLabel, address] = fieldId("oc-link-address", "Address:");
+  const addressErr = errorFor(address);
+  const addressCell = el("div", "oc-form-cell");
+  addressCell.append(address, addressErr);
+  webPane.append(addressLabel, addressCell);
+
+  // Place in This Document.
+  const placePane = addMode("place", "Place in This Document", "book_open");
+  const [refLabel, ref] = fieldId("oc-link-ref", "Type the cell reference:");
+  ref.classList.add("mono");
+  ref.value = "A1";
+  const refErr = errorFor(ref);
+  const refCell = el("div", "oc-form-cell");
+  refCell.append(ref, refErr);
+  const treeLabel = el("div", "oc-form-label oc-link-tree-label", "Or select a place in this document:");
+  const tree = el("div", "fn-list oc-link-tree");
+  tree.id = "oc-link-tree";
+  tree.setAttribute("role", "tree");
+  tree.setAttribute("aria-label", "Or select a place in this document");
+  placePane.append(refLabel, refCell, treeLabel, tree);
+  // The chosen place: a sheet (with the typed reference) or a defined name.
+  let place = { kind: "sheet", sheet };
+  const items = [];
+  const choose = (p, item) => {
+    place = p;
+    for (const it of items) {
+      const on = it === item;
+      it.classList.toggle("on", on);
+      it.setAttribute("aria-selected", on ? "true" : "false");
+    }
+    // A name is its own place; Excel greys the reference box out for one.
+    ref.disabled = p.kind === "name";
+    clearError(ref, refErr);
+    follow();
+  };
+  const group = (label) => {
+    const node = el("div", "oc-link-node", label);
+    node.setAttribute("role", "presentation");
+    tree.appendChild(node);
+  };
+  const leaf = (label, p) => {
+    const it = el("button", "fn-row oc-link-leaf", label);
+    it.type = "button";
+    it.setAttribute("role", "treeitem");
+    it.setAttribute("aria-selected", "false");
+    it.addEventListener("click", () => choose(p, it));
+    // A double-click picks the place and is OK, as in Excel's list.
+    it.addEventListener("dblclick", () => { choose(p, it); commit(); });
+    tree.appendChild(it);
+    items.push(it);
+    return it;
+  };
+  group("Cell Reference");
+  const sheetItems = sheetNames.map((n, i) =>
+    (visibility[i] && visibility[i] !== "visible") ? null : leaf(n, { kind: "sheet", sheet: i }));
+  group("Defined Names");
+  const nameItems = names.map((n) => leaf(n.name, { kind: "name", name: n.name, scope: n.sheet }));
+
+  // E-mail Address.
+  const emailPane = addMode("email", "E-mail Address", "mail");
+  const [emailLabel, email] = fieldId("oc-link-email", "E-mail address:");
+  const emailErr = errorFor(email);
+  const emailCell = el("div", "oc-form-cell");
+  emailCell.append(email, emailErr);
+  const [subjectLabel, subject] = fieldId("oc-link-subject", "Subject:");
+  emailPane.append(emailLabel, emailCell, subjectLabel, subject);
+
+  let mode = "web";
+  function setMode(key, focus) {
+    mode = key;
+    for (const [k, { tab, pane }] of Object.entries(modes)) {
+      tab.setAttribute("aria-selected", k === key ? "true" : "false");
+      tab.tabIndex = k === key ? 0 : -1;
+      pane.hidden = k !== key;
+    }
+    follow();
+    if (focus) ({ web: address, place: ref.disabled ? tree : ref, email }[key]).focus();
+  }
+
+  /// The address a mode would link to, as Excel shows it in Text to display.
+  const sheetPrefix = (i) => {
+    const n = sheetNames[i] ?? "";
+    return /^[A-Za-z_][A-Za-z0-9_.]*$/.test(n) && !/^[A-Za-z]{1,3}\d+$/.test(n) ? n : `'${n.replace(/'/g, "''")}'`;
+  };
+  const locationText = () => {
+    if (place.kind === "name") {
+      return place.scope >= 0 ? `${sheetPrefix(place.scope)}!${place.name}` : place.name;
+    }
+    return `${sheetPrefix(place.sheet)}!${ref.value.trim().replace(/\$/g, "").toUpperCase()}`;
+  };
+  const mailto = () => {
+    const to = email.value.trim().replace(/^mailto:/i, "");
+    if (!to) return "";
+    const s = subject.value.trim();
+    return `mailto:${to}${s ? `?subject=${encodeURIComponent(s)}` : ""}`;
+  };
+  function follow() {
+    if (!displayFollows) return;
+    display.value = mode === "web" ? address.value.trim()
+      : mode === "place" ? locationText()
+      : mailto().replace(/\?.*$/, "");
+  }
+  for (const input of [address, ref, email]) input.addEventListener("input", follow);
+
+  // ── Prefill from the link being edited ──
+  const target = existing?.target ?? "";
+  if (/^mailto:/i.test(target)) {
+    const [to, query = ""] = target.slice(7).split("?");
+    email.value = to;
+    const s = new URLSearchParams(query).get("subject");
+    if (s) subject.value = s;
+    mode = "email";
+  } else if (target) {
+    // A web link stored as target + location is a page and its anchor (that
+    // is how Excel writes `page#part`), so the Address shows them joined.
+    address.value = existing.location ? `${target}#${existing.location}` : target;
+  } else if (existing?.location) {
+    mode = "place";
+    const loc = existing.location.replace(/^#/, "");
+    const named = names.find((n) => {
+      const full = n.sheet >= 0 ? `${sheetPrefix(n.sheet)}!${n.name}` : n.name;
+      return full.toLowerCase() === loc.toLowerCase() || (n.sheet < 0 && n.name.toLowerCase() === loc.toLowerCase());
+    });
+    if (named) {
+      choose({ kind: "name", name: named.name, scope: named.sheet }, nameItems[names.indexOf(named)]);
+    } else {
+      const m = loc.match(/^(?:'((?:[^']|'')+)'|([^'!]+))!(.*)$/);
+      const sheetName = m ? (m[1] ?? m[2]).replace(/''/g, "'") : null;
+      const i = sheetName == null ? sheet : sheetNames.findIndex((n) => n.toLowerCase() === sheetName.toLowerCase());
+      ref.value = m ? m[3] : loc;
+      if (i >= 0) choose({ kind: "sheet", sheet: i }, sheetItems[i]);
+    }
+  }
+  if (place.kind === "sheet" && !items.some((it) => it.classList.contains("on")) && sheetItems[place.sheet]) {
+    choose(place, sheetItems[place.sheet]);
+  }
+
+  const main = el("div", "oc-link-main");
+  main.append(rail, panes);
+  const form = el("div", "oc-link-form");
+  form.append(top, tipRow, main);
+
+  const actions = el("div", "oc-confirm-actions");
+  const ok = el("button", "oc-btn primary", "OK");
   const cancel = el("button", "oc-btn", "Cancel");
-  cancel.addEventListener("click", () => { modal.hidden = true; });
-  const ok = el("button", "oc-btn primary", existing ? "OK" : "Insert");
-  ok.addEventListener("click", () => commit(false));
-  row2.appendChild(ok);
-  row2.appendChild(cancel);
-  body.appendChild(row2);
-  modal.hidden = false;
-  setTimeout(() => target.focus(), 0);
+  ok.addEventListener("click", () => commit());
+  cancel.addEventListener("click", () => { frame.close(); canvas.focus(); });
+  actions.append(ok, cancel);
+  if (editing) {
+    // Excel's Remove Link sits at the footer's left; last in the DOM so OK
+    // stays the first action, and CSS moves it across.
+    const remove = el("button", "oc-btn oc-link-remove", "Remove Link");
+    remove.addEventListener("click", () => {
+      tryEdit(() => wasm.session_set_hyperlink(sheet, row, col, "", "", "", ""));
+      frame.close();
+      canvas.focus();
+      draw();
+    });
+    actions.appendChild(remove);
+  }
+  body.append(form, actions);
+  setMode(mode, false);
+  ({ web: address, place: ref.disabled ? tree : ref, email }[mode]).focus();
+
+  function commit() {
+    let linkTarget = "";
+    let linkLocation = "";
+    if (mode === "web") {
+      const typed = address.value.trim();
+      if (typed) {
+        // Excel assumes the web for an address without a scheme.
+        linkTarget = /^[a-z][a-z0-9+.-]*:/i.test(typed) ? typed : `http://${typed}`;
+        if (!safeLinkUrl(linkTarget)) {
+          showError(address, addressErr, "Only web (http, https) and e-mail addresses can be linked.");
+          return;
+        }
+      }
+    } else if (mode === "place") {
+      linkLocation = locationText();
+      let at = null;
+      try { at = JSON.parse(wasm.session_resolve_location(sheet, linkLocation)); } catch {}
+      if (!at) {
+        showError(ref.disabled ? address : ref, refErr, "Reference isn't valid.");
+        return;
+      }
+    } else {
+      linkTarget = mailto();
+      if (linkTarget && !safeLinkUrl(linkTarget)) {
+        showError(email, emailErr, "That isn't an e-mail address that can be linked.");
+        return;
+      }
+    }
+    if (!linkTarget && !linkLocation) {
+      // Nothing to link to: Excel's OK leaves the cell alone (and an edited
+      // link with its address cleared is removed).
+      if (editing) tryEdit(() => wasm.session_set_hyperlink(sheet, row, col, "", "", "", ""));
+      frame.close();
+      canvas.focus();
+      draw();
+      return;
+    }
+    const text = fixed ? "" : display.value;
+    const mark = wasm.session_undo_mark();
+    tryEdit(() => {
+      if (!fixed && text !== shown) {
+        // Written as text whatever it looks like: a link's label that happens
+        // to read as a number or a formula must stay the label.
+        const literal = /^[=+\-@]|^\d|^(true|false)$/i.test(text) ? `'${text}` : text;
+        wasm.session_set_cell(sheet, row, col, literal);
+      }
+      wasm.session_set_hyperlink(sheet, row, col, linkTarget, linkLocation, tip.value, text);
+    });
+    // The text and the link are one gesture, so one undo.
+    wasm.session_group_undo_since(mark);
+    frame.close();
+    canvas.focus();
+    draw();
+  }
+}
+
+/// Remove the link on the active cell and keep its text — the cell menu's
+/// Remove Hyperlink.
+function removeHyperlink() {
+  tryEdit(() => wasm.session_set_hyperlink(state.sheet, state.sel.row, state.sel.col, "", "", "", ""));
+  draw();
 }
 
 // Create a table under the cursor — Excel's Ctrl+T dialog, not a silent create.
@@ -2714,15 +3063,18 @@ export function cellMenu(x, y, fromKeyboard = false) {
     false,
     () => { if (activePanel !== "note") togglePanel("note"); else panelNote?.refresh(); },
   );
-  item(
-    (() => {
-      let has = null;
-      try { has = JSON.parse(wasm.session_hyperlink_at(state.sheet, state.sel.row, state.sel.col)); } catch {}
-      return has ? "Edit link…" : "Insert link…";
-    })(),
-    false,
-    () => hyperlinkDialog(),
-  );
+  // Excel's link entries: "Link" on a plain cell; on a linked one Edit
+  // Hyperlink…, Open Hyperlink and Remove Hyperlink (XL-UX-164). A HYPERLINK()
+  // formula is edited in its formula, so it offers only to open.
+  (() => {
+    const { row, col } = state.sel;
+    let has = null;
+    try { has = JSON.parse(wasm.session_hyperlink_at(state.sheet, row, col)); } catch {}
+    if (!has || has.formula) item("Link", false, () => hyperlinkDialog());
+    if (has && !has.formula) item("Edit Hyperlink…", false, () => hyperlinkDialog());
+    if (has) item("Open Hyperlink", false, () => followHyperlink(row, col));
+    if (has && !has.formula) item("Remove Hyperlink", false, () => removeHyperlink());
+  })();
   item(
     (() => {
       let t = null;
