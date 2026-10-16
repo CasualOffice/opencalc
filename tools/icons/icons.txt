@@ -52,6 +52,7 @@ filter_dismiss
 folder_open
 font_decrease
 font_increase
+globe
 grid
 history
 image
@@ -59,6 +60,7 @@ info
 keyboard
 link
 lock_closed
+mail
 math_formula
 more_horizontal
 number_symbol

@@ -2498,6 +2498,41 @@ html, .editor-body { overscroll-behavior: none; }
 /* Excel's Special… sits at the far left of the footer; it is last in the DOM so
    OK stays the first action. */
 .oc-confirm-actions .oc-goto-special { order: -1; margin-right: auto; }
+/* Insert Hyperlink (XL-UX-164): Excel's layout — Text to display and
+   ScreenTip… on top, the "Link to:" rail down the left, the chosen pane right.
+   Fixed width so switching panes does not resize the dialog under the pointer. */
+.oc-link-form { display: flex; flex-direction: column; gap: 10px; margin: 0 0 14px; width: min(512px, 80vw); }
+.oc-link-top { display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 8px; }
+.oc-link-tipline { grid-template-columns: auto 1fr; }
+.oc-link-tipline[hidden] { display: none; }
+.oc-link-main { display: grid; grid-template-columns: 132px 1fr; gap: 12px; min-height: 236px; }
+.oc-link-rail { display: flex; flex-direction: column; gap: 6px; }
+.oc-link-tabs {
+  display: flex; flex-direction: column; gap: 2px; padding: 2px;
+  border: 1px solid var(--oc-control-border-color); border-radius: 6px;
+}
+.oc-link-tab {
+  display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 8px 4px;
+  border: 0; border-radius: 4px; background: transparent; color: var(--oc-text-color);
+  font: inherit; font-size: 12px; line-height: 1.25; text-align: center; cursor: pointer;
+}
+.oc-link-tab svg { fill: currentColor; }
+.oc-link-tab:hover { background: var(--oc-popover-background-color); }
+.oc-link-tab[aria-selected="true"] { background: var(--oc-accent-soft); color: var(--oc-accent-color); font-weight: 600; }
+.oc-link-pane { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.oc-link-pane[hidden] { display: none; }
+.oc-link-tree {
+  height: 150px; max-height: none; padding: 2px;
+  border: 1px solid var(--oc-control-border-color); border-radius: 6px;
+}
+.oc-link-node { padding: 4px 6px 2px; font-size: 12px; font-weight: 600; color: var(--oc-muted-text-color); }
+.oc-link-leaf { padding-left: 22px; }
+.oc-confirm-actions .oc-link-remove { order: -1; margin-right: auto; }
+@media (max-width: 520px) {
+  .oc-link-main { grid-template-columns: 1fr; }
+  .oc-link-tabs { flex-direction: row; }
+  .oc-link-tab { flex: 1; }
+}
 /* Go To Special (XL-UX-020): Excel's two columns of choices, the value-type
    checks indented under Formulas. */
 .oc-gts-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0 24px; margin: 0 0 8px; align-items: start; }
