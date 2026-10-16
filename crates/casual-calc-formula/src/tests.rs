@@ -667,3 +667,84 @@ fn an_array_constant_is_bounded() {
         "one past the cap, as rows, was accepted"
     );
 }
+
+/// The spill operator (XL-FEAT-015): `A1#` is the whole range A1 spilled.
+/// Excel stores it as `_xlfn.ANCHORARRAY(A1)`, so that is the tree; the
+/// printer shows the operator, as the formula bar does.
+#[test]
+fn the_spill_operator_parses_and_prints() {
+    for text in [
+        "A1#",
+        "$B$2#",
+        "SUM(A1#)",
+        "Sheet2!B3#",
+        "'My Sheet'!B3#",
+        "Spill#",
+        "COUNTIF(A1#,\">2\")+ROWS(A1#)",
+        "@A1#",
+    ] {
+        let expr = parse(text).unwrap_or_else(|e| panic!("{text}: {e}"));
+        assert_eq!(expr.to_string(), text, "round trip");
+    }
+    assert!(matches!(
+        parse("A1#").unwrap(),
+        Expr::Function { ref name, ref args } if name == "ANCHORARRAY" && matches!(args[..], [Expr::Reference(_)])
+    ));
+    // The file spelling reads as the same tree.
+    assert_eq!(parse("ANCHORARRAY(A1)").unwrap(), parse("A1#").unwrap());
+    // Only after a cell or a name: not after a range, a number or a call.
+    for text in ["A1:B2#", "1#", "SUM(A1)#", "A1 #", "#", "A1##"] {
+        assert!(parse(text).is_err(), "{text} parsed: {:?}", parse(text));
+    }
+}
+
+/// `#` still starts an error literal everywhere it does not follow a word.
+#[test]
+fn error_literals_are_untouched_by_the_spill_operator() {
+    for (text, error) in [
+        ("#N/A", "#N/A"),
+        ("IF(A1,#REF!)", "#REF!"),
+        ("A1#+#SPILL!", "#SPILL!"),
+        ("{#N/A,#DIV/0!}", "#N/A"),
+    ] {
+        let printed = parse(text)
+            .unwrap_or_else(|e| panic!("{text}: {e}"))
+            .to_string();
+        assert_eq!(printed, text);
+        assert!(printed.contains(error));
+    }
+}
+
+/// Implicit intersection (XL-FEAT-015): `@` before a reference, a range or a
+/// call. Stored by Excel as `_xlfn.SINGLE(...)`, which is the tree.
+#[test]
+fn the_implicit_intersection_operator_parses_and_prints() {
+    for text in [
+        "@A1:A5",
+        "@A1",
+        "@A:A",
+        "@SUM(A1:A5)",
+        "@A1:A5+1",
+        "-@A1:A5",
+        "@Sheet2!A1:A5*2",
+        "@(A1:A5+1)",
+        "@Table1[Amount]",
+        "IF(@A1:A5>0,1,0)",
+    ] {
+        let expr = parse(text).unwrap_or_else(|e| panic!("{text}: {e}"));
+        assert_eq!(expr.to_string(), text, "round trip");
+    }
+    let Expr::Binary { left, .. } = parse("@A1:A5+1").unwrap() else {
+        panic!("@ binds tighter than +")
+    };
+    assert!(matches!(*left, Expr::Function { ref name, .. } if name == "SINGLE"));
+    assert_eq!(parse("SINGLE(A1:A5)").unwrap(), parse("@A1:A5").unwrap());
+    // A structured reference's own `@` is inside its brackets, untouched.
+    assert_eq!(
+        parse("Sales[@Amount]").unwrap().to_string(),
+        "Sales[@Amount]"
+    );
+    for text in ["@", "@@A1", "A1@", "@+A1"] {
+        assert!(parse(text).is_err(), "{text} parsed: {:?}", parse(text));
+    }
+}

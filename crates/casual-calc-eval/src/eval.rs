@@ -384,6 +384,14 @@ impl<'a> Evaluator<'a> {
             Expr::Unary { op, operand } => self.eval_unary(sheet_index, *op, operand),
             Expr::Binary { op, left, right } => self.eval_binary(sheet_index, *op, left, right),
             Expr::Function { name, args } if name == "LET" => self.eval_let(sheet_index, args),
+            // `A1#` and `@x` (XL-FEAT-015), stored as these two calls because
+            // that is how the file stores them.
+            Expr::Function { name, args } if name == casual_calc_formula::parse::ANCHORARRAY => {
+                self.eval_anchor_array(sheet_index, args)
+            }
+            Expr::Function { name, args } if name == casual_calc_formula::parse::SINGLE => {
+                self.eval_single(sheet_index, args)
+            }
             // A LAMBDA evaluates to a function *value*, capturing whatever is
             // in scope where it was written. Put in a cell it shows #CALC!,
             // which happens at the point the value is written rather than here
@@ -442,6 +450,141 @@ impl<'a> Evaluator<'a> {
             cols,
             cells,
         }
+    }
+
+    /// The cell a spill operator's operand names: `A1` in `A1#`, or the cell a
+    /// defined name refers to in `Name#`. `None` for anything that cannot
+    /// anchor a spill.
+    fn spill_anchor(&self, sheet_index: usize, arg: &Expr) -> Option<(usize, CellRef)> {
+        match arg {
+            Expr::Reference(r) => {
+                let target = self.resolve_sheet(&r.sheet, sheet_index)?;
+                let at = r.resolve(self.origin())?;
+                Some((target, CellRef::new(at.row, at.col)))
+            }
+            Expr::Name(name) => {
+                let defined = defined_name_in_scope(self.workbook, sheet_index, name)?;
+                let scope = defined
+                    .sheet
+                    .and_then(|id| self.workbook.sheets.iter().position(|s| s.id == id))
+                    .unwrap_or(sheet_index);
+                let Expr::Reference(r) = &defined.formula else {
+                    return None;
+                };
+                let target = self.resolve_sheet(&r.sheet, scope)?;
+                // A name has no holding cell: its tree is the absolute form.
+                let at = r.resolve(ABSOLUTE)?;
+                Some((target, CellRef::new(at.row, at.col)))
+            }
+            _ => None,
+        }
+    }
+
+    /// `A1#` — the whole array the anchor spills.
+    ///
+    /// Read from the anchor's own result rather than from the cells it spilled
+    /// into: those are written *after* evaluation, so reading them would see
+    /// the previous pass's spill whenever the anchor has just changed. A cell
+    /// that does not spill has no spill range, and Excel answers `#REF!`.
+    fn eval_anchor_array(&mut self, sheet_index: usize, args: &[Expr]) -> Value {
+        let [arg] = args else {
+            return Value::Error(ErrorValue::Value);
+        };
+        let Some((target, at)) = self.spill_anchor(sheet_index, arg) else {
+            return Value::Error(ErrorValue::Ref);
+        };
+        match self.eval_cell_array(target, at) {
+            spill @ Value::Array { .. } => spill,
+            _ => Value::Error(ErrorValue::Ref),
+        }
+    }
+
+    /// `@x` — implicit intersection, Microsoft's three rules: a single item is
+    /// itself; a range gives the cell in line with the formula — its row for a
+    /// one-column range, its column for a one-row range, both for a block —
+    /// and `#VALUE!` when there is none; an array gives its top-left value.
+    fn eval_single(&mut self, sheet_index: usize, args: &[Expr]) -> Value {
+        let [arg] = args else {
+            return Value::Error(ErrorValue::Value);
+        };
+        // The range an argument names, as (sheet, r0, c0, r1, c1).
+        let range = match arg {
+            Expr::Range(a, b) => {
+                let (Some(target), Some(a), Some(b)) = (
+                    self.resolve_sheet(&a.sheet, sheet_index),
+                    a.resolve(self.origin()),
+                    b.resolve(self.origin()),
+                ) else {
+                    return Value::Error(ErrorValue::Ref);
+                };
+                Some((
+                    target,
+                    a.row.min(b.row),
+                    a.col.min(b.col),
+                    a.row.max(b.row),
+                    a.col.max(b.col),
+                ))
+            }
+            Expr::StructuredRef { table, spec } => {
+                match self.resolve_structured(sheet_index, table.as_deref(), spec) {
+                    Ok((target, r)) => {
+                        Some((target, r.start.row, r.start.col, r.end.row, r.end.col))
+                    }
+                    Err(e) => return Value::Error(e),
+                }
+            }
+            // `@A1#`: the spill's own block, intersected like any range, and
+            // read from the anchor's result for the reason `A1#` is.
+            Expr::Function { name, args } if name == casual_calc_formula::parse::ANCHORARRAY => {
+                let spill = self.eval_anchor_array(sheet_index, args);
+                let Value::Array { rows, cols, cells } = &spill else {
+                    return spill;
+                };
+                let Some((_, anchor)) =
+                    args.first().and_then(|a| self.spill_anchor(sheet_index, a))
+                else {
+                    return Value::Error(ErrorValue::Ref);
+                };
+                let bounds = (
+                    anchor.row,
+                    anchor.col,
+                    anchor.row + (*rows as u32).saturating_sub(1),
+                    anchor.col + (*cols as u32).saturating_sub(1),
+                );
+                return match self.in_line(bounds) {
+                    Some((r, c)) => cells
+                        .get((r - anchor.row) as usize * cols + (c - anchor.col) as usize)
+                        .cloned()
+                        .unwrap_or(Value::Error(ErrorValue::Value)),
+                    None => Value::Error(ErrorValue::Value),
+                };
+            }
+            _ => None,
+        };
+        match range {
+            Some((target, r0, c0, r1, c1)) => match self.in_line((r0, c0, r1, c1)) {
+                Some((r, c)) => self.eval_cell(target, CellRef::new(r, c)),
+                None => Value::Error(ErrorValue::Value),
+            },
+            // A single item is itself and an array its top-left value — which
+            // is what a scalar context already does to an array.
+            None => self.eval_expr_array(sheet_index, arg).scalar(),
+        }
+    }
+
+    /// The cell of `(r0, c0, r1, c1)` in line with the formula being evaluated,
+    /// by implicit intersection: an axis one cell deep is taken as it is, and
+    /// a longer one must contain the formula's own row or column.
+    fn in_line(&self, (r0, c0, r1, c1): (u32, u32, u32, u32)) -> Option<(u32, u32)> {
+        let (_, here) = self.current?;
+        let pick = |lo: u32, hi: u32, at: u32| {
+            if lo == hi {
+                Some(lo)
+            } else {
+                (lo..=hi).contains(&at).then_some(at)
+            }
+        };
+        Some((pick(r0, r1, here.row)?, pick(c0, c1, here.col)?))
     }
 
     /// Take the custom-function calls this evaluation wanted and found no

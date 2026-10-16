@@ -4647,6 +4647,41 @@ fn a_whole_column_reference_follows_a_column_move_and_ignores_a_row_move() {
     assert_eq!(formula_text(&wb, 0, 4, 7).as_deref(), Some("SUM(D:D)"));
 }
 
+/// `B2#` and `@B2:B9` are calls in the tree (`ANCHORARRAY`, `SINGLE`), so they
+/// shift as their operands do (XL-FEAT-015); a deleted anchor is `#REF!`, as
+/// Excel shows it, rather than a call nobody wrote.
+#[test]
+fn spill_and_intersection_operators_shift_with_their_operands() {
+    let mut wb = lettered_columns();
+    set_formula(&mut wb, 0, 9, 7, "SUM(B2#)+@B2:B9");
+    apply(
+        &mut wb,
+        Operation::InsertRows {
+            sheet: 0,
+            at: 0,
+            count: 1,
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        formula_text(&wb, 0, 10, 7).as_deref(),
+        Some("SUM(B3#)+@B3:B10")
+    );
+    apply(
+        &mut wb,
+        Operation::DeleteColumns {
+            sheet: 0,
+            at: 1,
+            count: 1,
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        formula_text(&wb, 0, 10, 6).as_deref(),
+        Some("SUM(#REF!)+@#REF!")
+    );
+}
+
 /// The row twin of the test above (XL-FEAT-016): `3:3` follows rows inserted
 /// above it, ignores columns, and is `#REF!` once its row is deleted — what
 /// Excel does with `=SUM(3:3)`.

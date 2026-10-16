@@ -224,6 +224,21 @@ impl fmt::Display for At<'_> {
                 }
                 f.write_str("}")
             }
+            // `A1#` and `@x` are function calls in the tree, because that is how
+            // the file stores them, and operators on screen, because that is how
+            // Excel shows them. Only the shapes the parser builds print as
+            // operators; anything else falls through and prints as the call.
+            Expr::Function { name, args }
+                if name == crate::parse::ANCHORARRAY && spill_anchor(args) =>
+            {
+                write!(f, "{}#", At(&args[0], origin))
+            }
+            Expr::Function { name, args } if name == crate::parse::SINGLE && args.len() == 1 => {
+                f.write_str("@")?;
+                // The parser reads a primary after `@`; anything that is not
+                // one keeps its brackets.
+                write_child(f, &args[0], origin, bp(&args[0]).0 < ATOM_BP)
+            }
             Expr::Function { name, args } => {
                 f.write_str(name)?;
                 f.write_str("(")?;
@@ -236,6 +251,16 @@ impl fmt::Display for At<'_> {
                 f.write_str(")")
             }
         }
+    }
+}
+
+/// Whether `ANCHORARRAY(args)` is one the parser builds from `x#` — one single
+/// cell or one name — and so may print as the operator.
+fn spill_anchor(args: &[Expr]) -> bool {
+    match args {
+        [Expr::Reference(r)] => !r.row_implicit && !r.col_implicit,
+        [Expr::Name(_)] => true,
+        _ => false,
     }
 }
 

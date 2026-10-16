@@ -1276,6 +1276,16 @@ fn writable_in_odf(expr: &casual_calc_formula::Expr) -> bool {
         Expr::Name(_) | Expr::Raw(_) | Expr::StructuredRef { .. } | Expr::Call { .. } => false,
         Expr::Unary { operand, .. } => writable_in_odf(operand),
         Expr::Binary { left, right, .. } => writable_in_odf(left) && writable_in_odf(right),
+        // `A1#` and `@x` (XL-FEAT-015) have no OpenFormula spelling: ODF 1.2 has
+        // neither operator, and LibreOffice 26.2 reads neither (`SUM([.A1]#)`
+        // is Err:508, `@[.A1:.A3]` Err:509 — measured by writing them through
+        // its own CSV import). Refused, and so counted in the report.
+        Expr::Function { name, .. }
+            if name == casual_calc_formula::parse::ANCHORARRAY
+                || name == casual_calc_formula::parse::SINGLE =>
+        {
+            false
+        }
         Expr::Function { args, .. } => args.iter().all(writable_in_odf),
     }
 }
@@ -1955,6 +1965,16 @@ mod tests {
         let written = odf_formula(&column).expect("writable");
         assert_eq!(written, r#"of:={1|-2|"x"|TRUE|#N/A}"#);
         assert_eq!(translate_formula(&written), Some(column));
+    }
+
+    /// `A1#` and `@x` have no ODF form, so the writer refuses them — and the
+    /// export report counts each such formula rather than dropping it quietly.
+    #[test]
+    fn spill_and_intersection_operators_are_refused_and_counted() {
+        for text in ["SUM(A1#)", "@A1:A3", "1+@B2"] {
+            let expr = casual_calc_formula::parse(text).unwrap();
+            assert_eq!(odf_formula(&expr), None, "{text} was written");
+        }
     }
 
     /// **A formula survives the round trip as a formula, not as its answer.**

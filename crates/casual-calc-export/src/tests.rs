@@ -5731,6 +5731,9 @@ fn written_formula(package: &[u8]) -> String {
         .replace("&lt;", "<")
         .replace("&gt;", ">")
         .replace("&amp;", "&")
+        // This writer spells the prefix in capitals (`future.rs`, as it always
+        // has); the comparison is about the formula, not that spelling.
+        .replace("_XLFN.", "_xlfn.")
 }
 
 /// Import Excel's `<f>` text, check it became an expression that prints as the
@@ -5788,5 +5791,23 @@ fn array_constants_round_trip_through_xlsx() {
         "INDEX({TRUE,#N/A,\"x\"},1,2)",
     ] {
         assert_formula_round_trips(text, text);
+    }
+}
+
+/// Excel stores `A1#` as `_xlfn.ANCHORARRAY(A1)` and `@x` as `_xlfn.SINGLE(x)`
+/// (XL-FEAT-015). Both read as the operators and are written back as the calls.
+#[test]
+fn spill_and_intersection_operators_round_trip_through_xlsx() {
+    for (file, shown) in [
+        ("SUM(_xlfn.ANCHORARRAY(B1))", "SUM(B1#)"),
+        ("_xlfn.ANCHORARRAY(Sheet2!$C$3)", "Sheet2!$C$3#"),
+        ("_xlfn.SINGLE(B1:B5)*2", "@B1:B5*2"),
+        ("_xlfn.SINGLE(_xlfn.ANCHORARRAY(B1))", "@B1#"),
+        (
+            "IF(ISNA(#N/A),\"#REF!\",#SPILL!)",
+            "IF(ISNA(#N/A),\"#REF!\",#SPILL!)",
+        ),
+    ] {
+        assert_formula_round_trips(file, shown);
     }
 }

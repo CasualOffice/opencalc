@@ -1903,10 +1903,21 @@ fn rewrite_expr(expr: &Expr, ctx: &RewriteCtx) -> Expr {
             left: Box::new(rewrite_expr(left, ctx)),
             right: Box::new(rewrite_expr(right, ctx)),
         },
-        Expr::Function { name, args } => Expr::Function {
-            name: name.clone(),
-            args: args.iter().map(|arg| rewrite_expr(arg, ctx)).collect(),
-        },
+        Expr::Function { name, args } => {
+            let rewritten: Vec<Expr> = args.iter().map(|arg| rewrite_expr(arg, ctx)).collect();
+            // `B1#` whose anchor was deleted is `#REF!` outright, as Excel
+            // shows it — not `ANCHORARRAY(#REF!)`, a call nobody wrote.
+            if name == casual_calc_formula::parse::ANCHORARRAY
+                && matches!(args[..], [Expr::Reference(_)])
+                && matches!(rewritten[..], [Expr::Error(_)])
+            {
+                return ref_error();
+            }
+            Expr::Function {
+                name: name.clone(),
+                args: rewritten,
+            }
+        }
         // Both halves hold references that move with an insert or delete: the
         // callee may be a LAMBDA body full of them.
         Expr::Call { callee, args } => Expr::Call {

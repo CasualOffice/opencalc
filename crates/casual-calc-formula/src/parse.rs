@@ -100,6 +100,12 @@ struct Parser {
 
 const PREFIX_BP: u8 = 50;
 
+/// The function `A1#` is stored as: `_xlfn.ANCHORARRAY(A1)` in the file.
+pub const ANCHORARRAY: &str = "ANCHORARRAY";
+
+/// The function `@x` is stored as: `_xlfn.SINGLE(x)` in the file.
+pub const SINGLE: &str = "SINGLE";
+
 fn binary_op(token: &Token) -> Option<(BinaryOp, u8, u8)> {
     // (op, left binding power, recurse power). Every operator is left-associative,
     // `^` included: Excel reads `2^3^2` as `(2^3)^2` = 64 (XL-FEAT-135).
@@ -198,12 +204,44 @@ impl Parser {
                     operand: Box::new(operand),
                 })
             }
+            // `@A1:A5`, `@SUM(…)`: implicit intersection of the operand that
+            // follows, stored — as Excel stores it — as `SINGLE(…)`. It takes
+            // a primary (with its `%` and `#`), never a prefixed expression,
+            // so `@@A1` and `@-A1` are refused and the recursion is bounded.
+            Some(Token::At) => {
+                self.advance();
+                let operand = self.parse_postfix()?;
+                Ok(Expr::Function {
+                    name: SINGLE.to_owned(),
+                    args: vec![operand],
+                })
+            }
             _ => self.parse_postfix(),
         }
     }
 
     fn parse_postfix(&mut self) -> Result<Expr, FormulaError> {
         let mut expr = self.parse_primary()?;
+        // `A1#`: the range the anchor spills into, stored — as Excel stores it
+        // — as `ANCHORARRAY(A1)`. Only a single cell or a name can anchor a
+        // spill; `A1:B2#` and `SUM(A1)#` are not references Excel accepts.
+        if self.peek() == Some(&Token::Hash) {
+            let anchors = match &expr {
+                Expr::Reference(r) => !r.row_implicit && !r.col_implicit,
+                Expr::Name(_) => true,
+                _ => false,
+            };
+            if !anchors {
+                return Err(FormulaError::UnexpectedToken(
+                    "# after something that is not a cell or a name".to_owned(),
+                ));
+            }
+            self.advance();
+            expr = Expr::Function {
+                name: ANCHORARRAY.to_owned(),
+                args: vec![expr],
+            };
+        }
         while self.peek() == Some(&Token::Percent) {
             self.advance();
             expr = Expr::Unary {

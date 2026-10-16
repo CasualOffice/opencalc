@@ -646,3 +646,11 @@ COUNTA({1,"a",TRUE,#N/A})  @differs: LibreOffice 26.2 refuses an error value ins
 SUMPRODUCT({1,2,3},{4,5,6})
 CONCAT({"a","b"})
 INDEX({-1,0.5},1,2)
+
+# XL-FEAT-015: the spill operator and implicit intersection. Stored in xlsx as
+# _xlfn.ANCHORARRAY / _xlfn.SINGLE. (Column A is the corpus, so there is no
+# spill to point at here: C1 holds a constant, which has no spill range.)
+SUM(C1#)
+@C1:C10
+@{5,6}  @differs: LibreOffice 26.2 does not implement _xlfn.SINGLE (#NAME?); Microsoft: "If the value is an array, pick the top-left value" (5)
+@C3  @differs: LibreOffice 26.2 does not implement _xlfn.SINGLE (#NAME?); Microsoft: "If the value is a single item, return the item" (3)

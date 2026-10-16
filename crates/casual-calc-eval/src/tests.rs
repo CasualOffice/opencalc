@@ -5077,3 +5077,73 @@ fn a_sheet_scoped_name_wins_on_its_sheet_and_is_invisible_elsewhere() {
         "a name scoped to Sheet2 is not visible from Sheet1"
     );
 }
+
+/// The spill operator (XL-FEAT-015): `B1#` is everything `B1` spilled, and it
+/// follows the spill as it grows. A cell that does not spill has no spill
+/// range, which is `#REF!`. Microsoft, "Spilled range operator".
+#[test]
+fn the_spill_operator_reads_the_whole_spill() {
+    let mut b = Builder::new();
+    b.number((0, 0), 7.0) // A1: a constant, not a spill
+        .formula((0, 1), "SEQUENCE(3)") // B1:B3 = 1, 2, 3
+        .formula((0, 2), "SUM(B1#)") // C1
+        .formula((1, 2), "ROWS(B1#)") // C2
+        .formula((2, 2), "INDEX(B1#,2)") // C3
+        .formula((3, 2), "COUNTIF(B1#,\">1\")") // C4
+        .formula((4, 2), "SUM(A1#)") // C5
+        .formula((5, 2), "SUM(Spill#)") // C6, through a name
+        .formula((6, 2), "SUM(Sheet1!B1#)"); // C7
+    let mut wb = b.build();
+    wb.defined_names.push(casual_calc_model::DefinedName {
+        name: "Spill".to_owned(),
+        sheet: None,
+        formula: parse("Sheet1!$B$1").unwrap(),
+        comment: None,
+        attributes: Default::default(),
+    });
+    recalculate(&mut wb);
+    assert_eq!(value_at(&wb, 0, 2), CellValue::Number(6.0));
+    assert_eq!(value_at(&wb, 1, 2), CellValue::Number(3.0));
+    assert_eq!(value_at(&wb, 2, 2), CellValue::Number(2.0));
+    assert_eq!(value_at(&wb, 3, 2), CellValue::Number(2.0));
+    assert_eq!(
+        value_at(&wb, 4, 2),
+        CellValue::Error(casual_calc_model::ErrorValue::Ref)
+    );
+    assert_eq!(value_at(&wb, 5, 2), CellValue::Number(6.0));
+    assert_eq!(value_at(&wb, 6, 2), CellValue::Number(6.0));
+}
+
+/// Implicit intersection (XL-FEAT-015). Microsoft, "Implicit intersection
+/// operator: @": a range gives "the value from the cell on the same row or
+/// column as the formula", an array its top-left value, a single item itself;
+/// a range with no cell in line with the formula is `#VALUE!`.
+#[test]
+fn the_implicit_intersection_operator_picks_the_cell_in_line() {
+    let mut b = Builder::new();
+    for r in 0..5u32 {
+        b.number((r, 0), f64::from(r + 1) * 10.0); // A1:A5 = 10..50
+    }
+    b.number((7, 1), 2.0) // B8
+        .number((7, 2), 3.0) // C8
+        .number((7, 3), 4.0) // D8
+        .formula((2, 4), "@A1:A5") // E3 -> A3
+        .formula((6, 4), "@A1:A5") // E7 -> no row 7 in A1:A5
+        .formula((9, 2), "@B8:D8") // C10 -> C8
+        .formula((9, 5), "@B8:D8") // F10 -> no column F in B8:D8
+        .formula((3, 4), "@{5,6,7}") // E4 -> top-left
+        .formula((4, 4), "@SEQUENCE(3)+1") // E5
+        .formula((1, 4), "@A1") // E2
+        .formula((0, 5), "@A:A"); // F1 -> A1
+    let mut wb = b.build();
+    recalculate(&mut wb);
+    let value_err = CellValue::Error(casual_calc_model::ErrorValue::Value);
+    assert_eq!(value_at(&wb, 2, 4), CellValue::Number(30.0));
+    assert_eq!(value_at(&wb, 6, 4), value_err);
+    assert_eq!(value_at(&wb, 9, 2), CellValue::Number(3.0));
+    assert_eq!(value_at(&wb, 9, 5), value_err);
+    assert_eq!(value_at(&wb, 3, 4), CellValue::Number(5.0));
+    assert_eq!(value_at(&wb, 4, 4), CellValue::Number(2.0));
+    assert_eq!(value_at(&wb, 1, 4), CellValue::Number(10.0));
+    assert_eq!(value_at(&wb, 0, 5), CellValue::Number(10.0));
+}

@@ -67,6 +67,12 @@ pub enum Token {
     /// `;`, the row separator inside an array constant. Excel's file grammar
     /// is the en-US one, so `;` means nothing else.
     Semicolon,
+    /// `#` written straight after a reference or a name: the spilled-range
+    /// operator, `A1#`. Anywhere else `#` starts an error literal.
+    Hash,
+    /// `@`, the implicit-intersection operator. A structured reference's own
+    /// `[@Col]` is inside its brackets and never lexes as this.
+    At,
 }
 
 const KNOWN_ERRORS: &[&str] = &[
@@ -212,6 +218,18 @@ pub fn tokenize(input: &str) -> Result<Vec<Token>, FormulaError> {
                 let (name, next) = lex_quoted_sheet(&chars, i)?;
                 tokens.push(Token::QuotedSheet(name));
                 i = next;
+            }
+            // Straight after a word character — `A1#`, `Sheet2!B3#`, `Name#` —
+            // `#` is the spill operator. An error literal never follows a word
+            // without an operator or a bracket between them, so `#N/A`,
+            // `IF(A1,#REF!)` and `A1#+#SPILL!` all lex as they always did.
+            '#' if i > 0 && is_word_char(chars[i - 1]) => {
+                tokens.push(Token::Hash);
+                i += 1;
+            }
+            '@' => {
+                tokens.push(Token::At);
+                i += 1;
             }
             '#' => {
                 let (error, next) = lex_error(&chars, i)?;
