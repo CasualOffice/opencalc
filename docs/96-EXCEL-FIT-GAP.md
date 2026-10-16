@@ -412,3 +412,120 @@ repository. Everything real is a row; the owner put it in this roadmap.
 | XL-UX-143 | About dialog | Shows the engine version and "Alpha" | Account › About Excel with a product/version line | "Engine v0.0.0 · Alpha" (a7.cjs); docs/95 rule 7 forbids version strings | P3 | S |
 | XL-UX-144 | Zoom % button | Clicking 100% resets the zoom | Clicking the percentage opens the Zoom dialog | `aria-label="Zoom level, reset to 100%"` (a1.json) | P3 | S |
 | XL-UX-145 | Help tab | Key and contents | KeyTip Y2 **[unverified]**; Help, Contact Support, Feedback, Show Training, What's New | Key "Y"; Keyboard Shortcuts + About (`ribbon.model.js:173`) | P3 | S |
+
+## Differences from Excel (audit, 2026-10-17)
+
+Row `XL-UX-169`. Owner, 2026-10-17 (docs/95 rule 9): OpenCalc is a clone of Excel
+for Microsoft 365 on Windows in UI, UX and user flows. A difference may stay only
+for one of two reasons. The first is a **browser limit**: something a web page
+physically cannot do, named below. The second is an **own asset**: name, logo,
+icons, fonts or colour. Every other shipped difference is **to convert**.
+
+**Method.**
+
+- **Text sweep.** `docs/14` (each Done row read), `docs/14a`, `docs/95`, `docs/96`,
+  `docs/99`, the other `docs/*.md`, `webapp/*.{js,css,html}` and
+  `tests/browser/*.spec.mjs` were searched for "deliberate", "divergen…",
+  "differs from / unlike / instead of / where Excel", "Excel does not / has no /
+  would", "kinder", "we chose", "owner decision", "our own", "rule 8",
+  "omitted" and "not Excel".
+- **Live run.** The editor was driven with Playwright: every ribbon tab, the
+  four context menus, about 27 dialogs and the File rail. The Insert Cells
+  confirmation and typing into a locked cell were both run.
+- **Excel's behaviour.** Taken from the Microsoft pages linked in the table. A
+  row marked **[unverified]** rests on remembered Excel behaviour, or on a
+  search-result snippet rather than a fetched page.
+- **Excluded.** Gaps already filed as open rows for missing features are not
+  repeated. They are cited only where the shipped behaviour is itself a
+  difference.
+
+**Counts.** 6 browser limits, 5 own assets, 29 to convert. Of the 29, one
+(`XL-UX-168`, dialog messages) is converted with this audit, and 8 had no row:
+they are proposed as new rows N1–N8, for [14](14-EXECUTION-TRACKER.md) to number.
+
+| Surface | What OpenCalc does | What Excel 2026 does (source) | Class | Row |
+| --- | --- | --- | --- | --- |
+| File › Open | Browse only, using the browser's file picker. No Recent, This PC or folder paths. | The Open page lists Recent and locations, plus Browse **[unverified]**. | **browser limit**: a page cannot list or reopen local paths. File System Access is Chromium-only and exposes no paths. | XL-UX-028 (Recent) |
+| File › Save / Save As / F12 | "Save a Copy" downloads the file in a chosen format. There is no folder picker. | A Save As dialog to any path, and AutoSave **[unverified]**. | **browser limit**: a page cannot write to a path the user picks (outside Chromium's File System Access). The rail name and the mixed pane are to convert. | XL-UX-048, 095, 135 |
+| Printing | The browser's print dialog; the operating system supplies the printer and its properties. | A Print pane with a printer picker, settings and a preview **[unverified]**. | **browser limit**: a page cannot list printers. The missing preview and settings pane is to convert. | XL-UX-029 |
+| Insert Hyperlink: file targets | No Create New Document. Existing File is an Address box only. Only http(s) and mailto are accepted. | Create New Document; Current Folder, Browsed Pages and Recent Files; file and UNC targets ([work with links](https://support.microsoft.com/office/work-with-links-in-excel-7fc80d8d-68f9-482f-ab01-584c44d72b3e)). | **browser limit**: a page cannot create or list local files, and browsers block `file:` navigation from http(s). | XL-UX-164 |
+| Clipboard | Ctrl+V is left to the browser's paste event. A copy can fall back to "copied here — the system clipboard was refused". | The native clipboard with every format **[unverified]**. | **browser limit**: the Async Clipboard API needs a permission or a user gesture and carries only HTML and plain text. The message wording is to convert. | XL-UX-070 (wording) |
+| VBA | VBA is read-only in a viewer; macros are JavaScript. | Runs VBA **[unverified]**. | **browser limit**: VBA's object model reaches COM, Win32, the file system and the shell ([99](99-MACROS-AND-SCRIPTS.md)). | MACRO-05 |
+| Name, logo, About, Security Notice | "OpenCalc", our logo, "OpenCalc Security Notice", and "OpenCalc" as the message-box title. | Microsoft branding. | **own asset** | — |
+| Accent colour | `#0e7a55` | `#217346` / `#107C41` | **own asset** | — |
+| Icon artwork | Fluent UI System Icons (MIT), message-box icons included. | Office icons. | **own asset** | — |
+| Fonts | Inter for the UI and Carlito for cells, while the font box reads "Calibri". | Segoe UI; Aptos Narrow is the M365 default cell font **[unverified]**. | **own asset**: neither Aptos nor Calibri can be shipped. A font box that names Calibri while Carlito is drawn needs an owner note. | — |
+| Help, templates, function descriptions | Our own Help tab content, Keyboard Shortcuts dialog and paraphrased function text. | Microsoft's text. | **own asset**: Microsoft's text is copyrighted. The Help tab's *structure* is to convert. | XL-UX-145, 158 |
+| Dialog validation messages | Shown inline in the dialog: Go To, Go To Special, Insert Hyperlink, Create Table, Row Height and Column Width, New Name, Name Manager, Confirm Password, Unprotect, Goal Seek, Find & Replace, the CF formula. | A message box over the dialog. | **to convert**: **converted** under XL-UX-168 (below). | XL-UX-168 |
+| Grid and command alerts | A data-validation Stop shows "Not allowed here — …" in the status bar. Warning and Information accept the value without asking (`editor.selection.js`). Typing in a locked cell gets a status-bar line, as do "cannot delete the last sheet", pivot-cell edits and formula errors. | Message boxes, and Warning asks Yes/No ([data validation](https://support.microsoft.com/office/apply-data-validation-to-cells-29fecbcc-d1b9-42c1-9d76-eff3ce5f7249)). The locked-cell box reads "The cell or chart you're trying to change is on a protected sheet…" ([protect a worksheet](https://support.microsoft.com/excel/protect-a-worksheet); wording **[unverified]**). | **to convert** | new: N2, XL-UX-059 |
+| Confirmations and refusals over a dialog | Name Manager and Macros close themselves to ask "Delete …?", then reopen. A custom number format is never refused: any code is stored. | Excel asks over the dialog, which stays open, and refuses an unreadable code with "Microsoft Excel cannot use the number format you typed." **[unverified]**. | **to convert**: the second needs the engine to say which codes it cannot read. | new: N2 |
+| Insert/Delete Cells (shift) | References are not rewritten. A "Formulas reference these cells" confirmation warns instead (`editor.core.js` `registerShellCommands`). | "Cell references automatically adjust to match the location of the shifted cells" ([insert cells](https://support.microsoft.com/office/95f00e00-5f58-43f5-971b-7a6550030556); the Mac page, which the [Windows page](https://support.microsoft.com/office/insert-or-delete-cells-rows-and-columns-6f40e6e4-85af-45e0-b39d-65dd504a3246) does not contradict). | **to convert** | new: N1 |
+| Sort A→Z / Z→A | From one cell, sorts the whole used area from A1, not the block around the cell. A partial selection is sorted without a warning (`sortTarget`, `editor.selection.js`). | Sorts the current region. A partial selection raises the Sort Warning: "Expand the selection" or "Continue with the current selection" ([sort](https://support.microsoft.com/office/sort-data-in-a-range-or-table-62d0b95d-2a90-4610-a6ae-2e545c4a4654)). | **to convert** | new: N3 |
+| Copy | Leaves out manually hidden rows and columns (`session_copy_tsv`; M3-5). | "By default, Excel copies hidden or filtered cells in addition to visible cells" ([copy visible cells only](https://support.microsoft.com/office/copy-visible-cells-only-6e3a1f01-2884-4332-b262-8b814412847e)). | **to convert** | new: N4 |
+| Ribbon button labels | Off by default, behind a File › Options › Ribbon "Labels" setting (owner, 2026-10-14). | The classic ribbon labels its large buttons and has no such setting ([ribbon](https://support.microsoft.com/office/show-or-hide-the-ribbon-in-office-d946b26e-0c8c-402d-a0f7-c6efa296b527); labels **[unverified]**). | **to convert**: the 2026-10-14 decision conflicts with rule 9 and needs the owner. | new: N5 |
+| Developer tab | Shown by default. | It "isn't displayed by default" ([show the Developer tab](https://support.microsoft.com/office/show-the-developer-tab-e1192344-5e56-4d45-931b-e5fd9bea2d45)). | **to convert** | new: N5 |
+| Ribbon keyboard and display | No Full-screen mode. The arrow keys move only between tabs; the band is reached with Tab. | Full-screen, Show tabs only and Always show; the arrow keys move among ribbon items ([keyboard shortcuts](https://support.microsoft.com/office/keyboard-shortcuts-in-excel-1798d9d5-842a-42b8-9c99-9b7213f0040f)). | **to convert** | new: N5, XL-UX-009 |
+| Ribbon content | Commands that are not built are left off rather than shown disabled, which leaves thin groups. | The full tab and group set. | **to convert** | XL-UX-038, 040–043, 087, 088, 146 |
+| Non-Excel ribbon commands | Column Statistics, Convert Text to Numbers, Zero Values, Version History, Exit Sheet View, Print on Page Layout, Lock Cell on Review. | Absent, or in another place. | **to convert** | XL-UX-084, 090, 119, 120, 121 |
+| Hyperlink ScreenTip and hold | The ScreenTip is an inline field. Press-and-hold to select a link cell waits a guessed 600 ms. | ScreenTip… opens its own "Set Hyperlink ScreenTip" box. The hold lasts "until the pointer becomes a cross" ([work with links](https://support.microsoft.com/office/work-with-links-in-excel-7fc80d8d-68f9-482f-ab01-584c44d72b3e)). | **to convert**: the hold time must be measured on Excel. | new: N6 |
+| Hyperlink recent lists | No Browsed Pages and no recent e-mail addresses. | Both shown (same page). | **to convert**: recent web and e-mail lists are not a browser limit. | XL-UX-167 |
+| Side panels instead of dialogs | CF, DV and Page Setup are 321 px side panels. Tables and charts use panels, not contextual tabs. | Modal dialogs, and the Table Design and Chart Design contextual tabs **[unverified]**. | **to convert** | XL-UX-073, 086, 089, 106, UX-SHELL-11 |
+| Format Cells | Tabs run Number, Font, Alignment, Fill, Border. There is no Protection tab, and the button reads Apply. | Number, Alignment, Font, Border, Fill, Protection; OK ([KB 264372](https://support.microsoft.com/kb/264372), an older Excel page). | **to convert** | XL-UX-044 (extend with the order), 100, 126 |
+| Other dialogs | Paste Special has five options. Sort is "Sort range" with three fixed levels. Create Table adds a style picker. Text to Columns is one page. Remove Duplicates is a sentence. Cell Styles is a modal. | Excel's dialogs ([sort](https://support.microsoft.com/office/sort-data-in-a-range-or-table-62d0b95d-2a90-4610-a6ae-2e545c4a4654)). | **to convert** | XL-UX-047, 074, 101, 102, 107, 129, 130 |
+| Casing | Sentence case: "Paste special", "Data validation", "Conditional formatting", "Create table", "Text to columns", "Remove duplicates", "Cell styles", "Page setup", "Keyboard shortcuts". | Title Case **[unverified]**. | **to convert** | XL-UX-104, 105 |
+| Context menus | The cell, header and sheet-tab menus differ in items, order and case. Delete is red. No mini toolbar and no Paste Options row. Eight tab-colour swatches. | Excel's menus **[unverified]**. | **to convert** | XL-UX-034, 055–058, 111, 112 |
+| Status bar and sheet-tab row | One shared row, with "Local only · nothing uploaded". Right-click does nothing. No view buttons. | Separate rows, customised by right-click ([status bar options](https://support.microsoft.com/en-us/excel/excel-status-bar-options); search result). | **to convert** | XL-UX-030–033, 051–054 |
+| File backstage | The rail is New, Open, Info, Save a Copy, Print, Share, Options. Print is a three-item list. Options is a page. | Adds Home, Export, Close and Account; Print has a preview; Options is the Excel Options dialog **[unverified]**. | **to convert** | XL-UX-028, 029, 048, 049, 050 |
+| Title bar | A gear popover holds Scroll speed and an Accent picker. No AutoSave. The default name is "Untitled workbook". | No gear; AutoSave; "Book1" **[unverified]**. | **to convert**: only the fixed accent colour is an own asset. | XL-UX-095, 097, 098, 125 |
+| Macros dialog | A code editor inside the dialog, with New function and an Autostart checkbox. | Macro name, Macros in and Description; Run, Step Into, Edit, Create, Delete, Options **[unverified]**. | **to convert**: the macro language itself is the VBA row above. | new: N8 |
+| Find | Every match is tinted on the grid. | Find All lists the matches and nothing is tinted ([find or replace](https://support.microsoft.com/office/find-or-replace-text-and-numbers-on-a-worksheet-0e304ca5-ecef-4808-b90f-fdb42f892e90)). | **to convert** | new: N7 |
+| Non-Excel grid gestures | The freeze divider can be dragged. A "Clip" overflow state exists. Ctrl+Alt+0 resets the zoom, and Ctrl+Alt+= / Ctrl+Alt+− are not bound. | Freeze is set from the menu only ([freeze panes](https://support.microsoft.com/office/freeze-panes-to-lock-rows-and-columns-dab2ffc9-020d-4026-8121-67dd25f2508f)). Text wraps or overflows ([wrap text](https://support.microsoft.com/office/wrap-text-in-a-cell-2a18cff5-ccc1-4bce-95e4-f0d4f3ff4e84)). Ctrl+Alt+= / − zoom ([keyboard shortcuts](https://support.microsoft.com/office/keyboard-shortcuts-in-excel-1798d9d5-842a-42b8-9c99-9b7213f0040f)). | **to convert** | new: N7, XL-UX-109 |
+| Crash recovery | A bar above the toolbar ("deliberately not a modal", `editor.css`). | A Document Recovery pane **[unverified]**. | **to convert** | new: N8 |
+| Row height, column width | Measured in pixels, with a 2,000 px ceiling. | Points and characters: 409 pt and 255 characters. | **to convert** | XL-UX-035 |
+| Zoom | 25–200%. Clicking 100% resets the zoom, and Zoom is a menu of presets. | 10–400%, and the Zoom dialog. | **to convert** | XL-FEAT-095, XL-UX-122, 144 |
+| Shortcuts | Shift+F2 opens Comments. Ctrl+Shift+A selects. F12 does nothing. Redo is listed as Ctrl+Shift+Z. | Shift+F2 is a Note; Ctrl+Shift+A inserts argument names; F12 is Save As; Redo is Ctrl+Y ([keyboard shortcuts](https://support.microsoft.com/office/keyboard-shortcuts-in-excel-1798d9d5-842a-42b8-9c99-9b7213f0040f)). | **to convert** | XL-UX-110, 131, 132, 135 |
+| About | "Engine v0.0.0 · Alpha". | A product and version line. | **to convert** (and docs/95 rule 7) | XL-UX-143 |
+
+**Docs that state a contract the code does not keep.** Each is tracked by the row
+named, not corrected in the prose:
+
+- docs/91 says Left and Right in the ribbon body cross group edges.
+  `ribbon.js` handles arrows only on the tab list (N5).
+- docs/99 says the Developer tab carries Record Macro and Convert VBA. It has
+  Visual Basic and Macros (N5).
+- docs/12 says the single-cell sort "expands silently … worth keeping". It
+  expands to the used area, not the current region (N3).
+- docs/14a M3-5 frames hidden-row skipping as Excel's behaviour (N4).
+- docs/96's area table calls data validation "Full-ish … error messages and
+  styles", but no alert is a message box (N2).
+
+### Dialog messages as Excel's message box (XL-UX-168)
+
+One component, `messageBox()` in `webapp/editor.dialogs.js`, carries every
+message a dialog gives about its own input. Its title bar reads "OpenCalc"
+where Excel's reads "Microsoft Excel" (own asset), and it shows Excel's
+warning, information or error icon (Fluent artwork), the message and OK. OK
+has the focus, and Enter, Space or Escape dismisses the box. While it is up,
+nothing behind it takes a key or a click. Dismissing it returns the focus to
+the field the message is about, with that field's text selected, and the
+dialog keeps what was typed. `editor.message-box.spec.mjs` drives every site
+through it.
+
+| Dialog | Message | Source |
+| --- | --- | --- |
+| Go To; Insert Hyperlink (Place in This Document); following a link to a missing place | Reference isn't valid. | **[unverified]**: remembered; no Microsoft page quotes it |
+| Go To Special | No cells were found. | **[unverified]**: remembered. It is also Excel's `SpecialCells` run-time error text. |
+| Create Table | Reference isn't valid. | **[unverified]** |
+| Find & Replace, nothing found | We couldn't find what you were looking for. Click Options for more ways to search. | quoted in [Microsoft Q&A](https://learn.microsoft.com/en-us/answers/questions/5173659/excel-find-or-replace-does-not-work). OpenCalc had dropped the second sentence. |
+| Replace All | All done. We made *n* replacements. (information icon) | **[unverified]** |
+| Confirm Password | The confirmation password is not identical. | **[unverified]**. OpenCalc said "Confirmation password is not identical." |
+| Unprotect Sheet | The password you supplied is not correct. Verify that the CAPS LOCK key is off and be sure to use the correct capitalization. | [KB 2849975](https://support.microsoft.com/kb/2849975) |
+| Goal Seek | Cell must contain a formula. / Cell must contain a value. / Reference must be to a single cell. / Invalid value. | [GoalSeek method](https://learn.microsoft.com/en-us/previous-versions/office/developer/office2000/aa298303(v=office.10)) for the first three conditions; the wording is **[unverified]** |
+| New Name, Name Manager | The engine's refusals, already Excel's ("The name that you entered is not valid. …") | **[unverified]** |
+| Row Height, Column Width | Our own words, because the dialog measures in pixels (XL-UX-035) | — |
+| Insert Hyperlink address | "Only web (http, https) and e-mail addresses can be linked." | Our own: a browser limit. Excel accepts `file:` and UNC targets. |
+| Conditional formatting formula | The engine's parse refusal | Excel says "There's a problem with this formula." **[unverified]**; it converts with XL-UX-059 |
+
+Excel's icon for each message, and whether Excel closes Go To Special and
+Unprotect Sheet before raising the box, are **[unverified]**. OpenCalc keeps the
+dialog open, which is the behaviour docs/95 rule 8 states.
