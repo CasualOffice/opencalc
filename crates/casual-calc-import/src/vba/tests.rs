@@ -701,7 +701,10 @@ fn decompression_is_capped_for_the_whole_project() {
     for _ in 0..(MAX_DECOMPRESSED / 4096 + 1) {
         bomb.extend_from_slice(&bomb_chunk());
     }
-    assert_eq!(decompress_all(&bomb), Err(VbaError::DecompressedTooLarge));
+    assert_eq!(
+        decompress_all(&bomb).map(|v| v.len()),
+        Err(VbaError::DecompressedTooLarge)
+    );
 
     // And the cap is the project's, not each module's: two modules of three
     // quarters of it each cannot both be read.
@@ -770,8 +773,54 @@ fn deterministic_mutations_never_panic() {
     }
 }
 
-/// Writes the fixture for the browser test and the fuzz seed. Run by hand:
-/// `cargo test -p casual-calc-import vba::tests::write_fixtures -- --ignored`.
+/// A macro-enabled package carrying `vba`: one sheet with `A1=41`, and the
+/// project hung off the workbook by a `vbaProject` relationship.
+pub(crate) fn xlsm_with(vba: &[u8]) -> Vec<u8> {
+    use std::io::Write;
+    use zip::write::{SimpleFileOptions, ZipWriter};
+    let parts: [(&str, &[u8]); 6] = [
+        (
+            "[Content_Types].xml",
+            br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Default Extension="bin" ContentType="application/vnd.ms-office.vbaProject"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.ms-excel.sheet.macroEnabled.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>"#,
+        ),
+        (
+            "_rels/.rels",
+            br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>"#,
+        ),
+        (
+            "xl/workbook.xml",
+            br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Sheet1" sheetId="1" r:id="rId1"/></sheets></workbook>"#,
+        ),
+        (
+            "xl/_rels/workbook.xml.rels",
+            br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.microsoft.com/office/2006/relationships/vbaProject" Target="vbaProject.bin"/></Relationships>"#,
+        ),
+        (
+            "xl/worksheets/sheet1.xml",
+            br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1"><v>41</v></c></row></sheetData></worksheet>"#,
+        ),
+        ("xl/vbaProject.bin", vba),
+    ];
+    let mut zip = ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    let options = SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Deflated)
+        .last_modified_time(zip::DateTime::default());
+    for (name, bytes) in parts {
+        zip.start_file(name, options).unwrap();
+        zip.write_all(bytes).unwrap();
+    }
+    zip.finish().unwrap().into_inner()
+}
+
+/// Writes the browser test's fixture (`tests/fixtures/vba-hello.xlsm`) and the
+/// fuzz seed (`fuzz/seeds/vba/hello.bin`). Run by hand when the builder
+/// changes:
+/// `cargo test -p casual-calc-import --lib vba::tests::write_fixtures -- --ignored`.
 #[test]
 #[ignore = "writes fixture files; run by hand when the builder changes"]
 fn write_fixtures() {
@@ -780,5 +829,19 @@ fn write_fixtures() {
     std::fs::create_dir_all(root.join("fuzz/seeds/vba")).unwrap();
     std::fs::write(root.join("fuzz/seeds/vba/hello.bin"), &bin).unwrap();
     std::fs::create_dir_all(root.join("tests/fixtures")).unwrap();
-    std::fs::write(root.join("tests/fixtures/vbaProject-hello.bin"), &bin).unwrap();
+    std::fs::write(root.join("tests/fixtures/vba-hello.xlsm"), xlsm_with(&bin)).unwrap();
+}
+
+/// The committed fixtures are what the builder makes today, so the browser
+/// test and the fuzz seed cannot drift from the decoder's own tests.
+#[test]
+fn the_committed_fixtures_are_the_builders_output() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let seed = std::fs::read(root.join("fuzz/seeds/vba/hello.bin")).unwrap();
+    assert_eq!(seed, hello_project(), "re-run write_fixtures");
+    let xlsm = std::fs::read(root.join("tests/fixtures/vba-hello.xlsm")).unwrap();
+    let mut zip = zip::ZipArchive::new(std::io::Cursor::new(xlsm)).unwrap();
+    let mut inner = Vec::new();
+    std::io::Read::read_to_end(&mut zip.by_name("xl/vbaProject.bin").unwrap(), &mut inner).unwrap();
+    assert_eq!(inner, hello_project(), "re-run write_fixtures");
 }
