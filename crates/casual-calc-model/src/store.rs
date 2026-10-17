@@ -203,6 +203,69 @@ impl CellStore {
         let end = CellRef::new(last_row.saturating_add(1), 0);
         self.cells.range(start..end).map(|(r, c)| (*r, c))
     }
+
+    /// Excel's *current region* around `seed`: the rectangle bounded by blank
+    /// rows and blank columns, what Ctrl+Shift+* selects and what Sort, Ctrl+A,
+    /// Create Table and Go To Special › Current region act on (`XL-UX-175`).
+    ///
+    /// Grown from `seed` until the ring of cells around it — the row above and
+    /// below, the column left and right, *corners included* — holds nothing.
+    /// A cell counts when it has a value or a formula; a style alone does not.
+    /// The growth runs to a fixed point: a block found by walking right can
+    /// reach further up than the walk up did, and stopping after one pass of
+    /// each direction left a ragged block short of its own data.
+    ///
+    /// `None` when nothing in or around `seed` has content — Excel's region
+    /// is then the selection itself, which no caller wants as a block.
+    #[must_use]
+    pub fn current_region(&self, seed: CellRange) -> Option<CellRange> {
+        let (mut r0, mut c0) = (seed.start.row, seed.start.col);
+        let (mut r1, mut c1) = (
+            seed.end.row.min(GRID_MAX_ROW),
+            seed.end.col.min(GRID_MAX_COL),
+        );
+        let content = |c: &Cell| !c.value.is_empty() || c.formula.is_some();
+        // One row's cells in [a, b]: a range query on the row-major map.
+        let row_has = |r: u32, a: u32, b: u32| {
+            self.cells
+                .range(CellRef::new(r, a)..=CellRef::new(r, b))
+                .any(|(_, c)| content(c))
+        };
+        let mut grew = false;
+        loop {
+            let before = (r0, c0, r1, c1);
+            let (ca, cb) = (c0.saturating_sub(1), (c1 + 1).min(GRID_MAX_COL));
+            while r0 > 0 && row_has(r0 - 1, ca, cb) {
+                r0 -= 1;
+            }
+            while r1 < GRID_MAX_ROW && row_has(r1 + 1, ca, cb) {
+                r1 += 1;
+            }
+            // The columns with content in the band, found in one pass over the
+            // band rather than a point lookup per row per column step.
+            let (ra, rb) = (r0.saturating_sub(1), (r1 + 1).min(GRID_MAX_ROW));
+            let mut cols = std::collections::BTreeSet::new();
+            for (at, c) in self.row_band(ra, rb) {
+                if content(c) {
+                    cols.insert(at.col);
+                }
+            }
+            while c0 > 0 && cols.contains(&(c0 - 1)) {
+                c0 -= 1;
+            }
+            while c1 < GRID_MAX_COL && cols.contains(&(c1 + 1)) {
+                c1 += 1;
+            }
+            if (r0, c0, r1, c1) == before {
+                break;
+            }
+            grew = true;
+        }
+        let seeded = self
+            .row_band(seed.start.row, seed.end.row)
+            .any(|(at, c)| at.col >= seed.start.col && at.col <= seed.end.col && content(c));
+        (grew || seeded).then(|| CellRange::new(CellRef::new(r0, c0), CellRef::new(r1, c1)))
+    }
 }
 
 impl From<Vec<StoredCell>> for CellStore {
@@ -229,5 +292,109 @@ impl From<CellStore> for Vec<StoredCell> {
                 cell,
             })
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod current_region_tests {
+    use super::*;
+    use crate::{CellValue, StyleId};
+
+    fn store(cells: &[(u32, u32)]) -> CellStore {
+        let mut s = CellStore::new();
+        for &(r, c) in cells {
+            s.set(CellRef::new(r, c), Cell::value(CellValue::Number(1.0)));
+        }
+        s
+    }
+    fn at(r: u32, c: u32) -> CellRange {
+        CellRange::new(CellRef::new(r, c), CellRef::new(r, c))
+    }
+    fn rect(r0: u32, c0: u32, r1: u32, c1: u32) -> Option<CellRange> {
+        Some(CellRange::new(CellRef::new(r0, c0), CellRef::new(r1, c1)))
+    }
+
+    #[test]
+    fn a_blank_column_bounds_the_region() {
+        // A1:B4 and D1:E4, column C blank between them.
+        let mut cells = Vec::new();
+        for r in 0..4 {
+            cells.extend([(r, 0), (r, 1), (r, 3), (r, 4)]);
+        }
+        let s = store(&cells);
+        assert_eq!(s.current_region(at(1, 1)), rect(0, 0, 3, 1));
+        assert_eq!(s.current_region(at(2, 4)), rect(0, 3, 3, 4));
+    }
+
+    #[test]
+    fn a_blank_row_bounds_the_region() {
+        // A title in A1, a blank row 2, the block B3:C6.
+        let mut cells = vec![(0, 0)];
+        for r in 2..6 {
+            cells.extend([(r, 1), (r, 2)]);
+        }
+        let s = store(&cells);
+        assert_eq!(s.current_region(at(4, 2)), rect(2, 1, 5, 2));
+        assert_eq!(s.current_region(at(0, 0)), rect(0, 0, 0, 0));
+    }
+
+    #[test]
+    fn growth_runs_to_a_fixed_point() {
+        // A1:C1, then C2:C4 hanging down from its right end. Walking up, down,
+        // left and right once from A1 reaches C1 but not C2:C4 below it: the
+        // walk down ran while the block was still only A1 wide.
+        let s = store(&[(0, 0), (0, 1), (0, 2), (1, 2), (2, 2), (3, 2)]);
+        assert_eq!(s.current_region(at(0, 0)), rect(0, 0, 3, 2));
+        assert_eq!(s.current_region(at(3, 2)), rect(0, 0, 3, 2));
+    }
+
+    #[test]
+    fn a_diagonal_neighbour_joins_the_region() {
+        let s = store(&[(0, 0), (1, 1)]);
+        assert_eq!(s.current_region(at(0, 0)), rect(0, 0, 1, 1));
+    }
+
+    #[test]
+    fn an_empty_cell_takes_the_region_it_touches_and_an_isolated_one_has_none() {
+        let s = store(&[(0, 0), (0, 1)]);
+        assert_eq!(s.current_region(at(0, 2)), rect(0, 0, 0, 2));
+        assert_eq!(s.current_region(at(5, 5)), None);
+        assert_eq!(CellStore::new().current_region(at(0, 0)), None);
+    }
+
+    #[test]
+    fn a_style_alone_is_not_content() {
+        let mut s = store(&[(0, 0)]);
+        s.set(
+            CellRef::new(0, 1),
+            Cell {
+                style: Some(StyleId::at(0)),
+                ..Cell::default()
+            },
+        );
+        assert_eq!(s.current_region(at(0, 0)), rect(0, 0, 0, 0));
+    }
+
+    #[test]
+    fn a_partial_selection_grows_to_its_block() {
+        let mut cells = Vec::new();
+        for r in 0..4 {
+            cells.extend([(r, 0), (r, 1), (r, 3)]);
+        }
+        let s = store(&cells);
+        let scores = CellRange::new(CellRef::new(1, 1), CellRef::new(3, 1));
+        assert_eq!(s.current_region(scores), rect(0, 0, 3, 1));
+    }
+
+    #[test]
+    fn the_grid_edge_is_a_boundary_not_an_overflow() {
+        let s = store(&[
+            (GRID_MAX_ROW, GRID_MAX_COL),
+            (GRID_MAX_ROW - 1, GRID_MAX_COL),
+        ]);
+        assert_eq!(
+            s.current_region(at(GRID_MAX_ROW, GRID_MAX_COL)),
+            rect(GRID_MAX_ROW - 1, GRID_MAX_COL, GRID_MAX_ROW, GRID_MAX_COL)
+        );
     }
 }

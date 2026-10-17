@@ -451,45 +451,39 @@ pub fn session_hyperlink_cells(sheet: usize, r0: u32, c0: u32, r1: u32, c1: u32)
     .unwrap_or_else(|| "[]".to_owned())
 }
 
-/// The contiguous block of populated cells around `(row, col)`, as JSON
-/// `{r0,c0,r1,c1}`, or `null` when the cell is empty.
+/// Excel's current region around `(row, col)`, as JSON `{r0,c0,r1,c1}`, or
+/// `null` when neither the cell nor any cell touching it has content.
 ///
-/// What Ctrl+T uses when the selection is a single cell: asking someone to
-/// select the whole table first is work the app can do, and doing it here means
-/// the same rule applies wherever a block is needed.
+/// What Ctrl+A, Create Table, Insert Chart and Go To Special › Current region
+/// use when the selection is a single cell: asking someone to select the whole
+/// table first is work the app can do. One rule for all of them and for Sort,
+/// `CellStore::current_region`, so no two of them can disagree about where a
+/// block ends (`XL-UX-175`).
 #[wasm_bindgen]
 pub fn session_block_bounds(sheet: usize, row: u32, col: u32) -> String {
+    session_current_region(sheet, row, col, row, col)
+}
+
+/// Excel's current region around the rectangle `(r0, c0)`–`(r1, c1)`: the
+/// rectangle grown until blank rows and blank columns bound it, as JSON
+/// `{r0,c0,r1,c1}`, or `null` when nothing in or around it has content.
+///
+/// A single cell asks what Ctrl+Shift+* would select; a wider rectangle asks
+/// what Sort's "Expand the selection" grows a partial selection to.
+#[wasm_bindgen]
+pub fn session_current_region(sheet: usize, r0: u32, c0: u32, r1: u32, c1: u32) -> String {
     with_session(|s| {
         let Some(sh) = s.workbook().sheets.get(sheet) else {
             return "null".to_owned();
         };
-        let filled = |r: u32, c: u32| {
-            sh.cells
-                .get(CellRef::new(r, c))
-                .is_some_and(|cell| !cell.value.is_empty() || cell.formula.is_some())
-        };
-        if !filled(row, col) {
-            return "null".to_owned();
+        let seed = CellRange::new(CellRef::new(r0, c0), CellRef::new(r1, c1));
+        match sh.cells.current_region(seed) {
+            Some(b) => format!(
+                "{{\"r0\":{},\"c0\":{},\"r1\":{},\"c1\":{}}}",
+                b.start.row, b.start.col, b.end.row, b.end.col
+            ),
+            None => "null".to_owned(),
         }
-        // Walk out along the row and column, then square the block off. A
-        // ragged region grows to its bounding box, which is what a user means
-        // by "this table" even when one corner is blank.
-        let (mut r0, mut r1, mut c0, mut c1) = (row, row, col, col);
-        while r0 > 0 && (c0..=c1).any(|c| filled(r0 - 1, c)) {
-            r0 -= 1;
-        }
-        while c0 > 0 && (r0..=r1).any(|r| filled(r, c0 - 1)) {
-            c0 -= 1;
-        }
-        // Bounded so a pathological sheet cannot make this walk forever.
-        let limit = 1_048_576u32;
-        while r1 + 1 < limit && (c0..=c1).any(|c| filled(r1 + 1, c)) {
-            r1 += 1;
-        }
-        while c1 + 1 < 16_384 && (r0..=r1).any(|r| filled(r, c1 + 1)) {
-            c1 += 1;
-        }
-        format!("{{\"r0\":{r0},\"c0\":{c0},\"r1\":{r1},\"c1\":{c1}}}")
     })
     .unwrap_or_else(|| "null".to_owned())
 }

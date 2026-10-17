@@ -51,7 +51,6 @@ import {
   gotoName,
   invalidateGrowth,
   locale,
-  looksLikeHeader,
   ocOverlayHost,
   off,
   on,
@@ -74,7 +73,7 @@ import {
   setNumberFormat,
   shiftIsRisky,
   sortRange,
-  sortTarget,
+  sortTargetAsk,
   state,
   status,
   statusError,
@@ -735,8 +734,10 @@ export function customFormatDialog() {
   input.select();
 }
 
-export function sortDialog() {
-  const s = sortTarget();
+export async function sortDialog() {
+  const target = await sortTargetAsk();
+  if (!target) return;
+  const s = target.s;
   const modal = byId("oc-modal");
   const body = byId("oc-modal-body");
   byId("oc-modal-title").textContent = "Sort range";
@@ -747,7 +748,7 @@ export function sortDialog() {
   const headerRow = el("label", "sort-head");
   const headerBox = document.createElement("input");
   headerBox.type = "checkbox";
-  headerBox.checked = looksLikeHeader(s);
+  headerBox.checked = target.header;
   headerRow.append(headerBox, document.createTextNode(" My data has a header row"));
 
   const keysWrap = el("div", "sort-keys");
@@ -813,6 +814,74 @@ export function sortDialog() {
     if (keys.length) applySort(s, keys, headerBox.checked);
   });
   ok.focus();
+}
+
+/// Excel's Sort Warning (XL-UX-175): raised when a selection of more than one
+/// cell is sorted with data in a column beside it. Resolves to `"expand"`
+/// ("Expand the selection", the default), `"current"` ("Continue with the
+/// current selection") or `null` for Cancel, Escape, ✕ or a click outside.
+///
+/// Excel's words, with our name where Excel says "Microsoft Excel" as the
+/// message box does (docs/95 rule 8).
+export function sortWarning() {
+  return new Promise((resolve) => {
+    const modal = byId("oc-modal");
+    const body = byId("oc-modal-body");
+    byId("oc-modal-title").textContent = "Sort Warning";
+    body.textContent = "";
+    const text = el("p", "oc-confirm-text",
+      "OpenCalc found data next to your selection. Since you have not selected this data, it will not be sorted.");
+    const ask = el("p", "oc-confirm-text", "What do you want to do?");
+    const group = el("div", "oc-radio-group oc-sort-warning");
+    group.setAttribute("role", "radiogroup");
+    group.setAttribute("aria-label", "What do you want to do?");
+    const radio = (value, label, checked) => {
+      const row = el("label", "oc-radio");
+      const input = document.createElement("input");
+      input.type = "radio";
+      input.name = "oc-sortwarn";
+      input.value = value;
+      input.checked = checked;
+      row.append(input, el("span", null, label));
+      group.appendChild(row);
+      return input;
+    };
+    const expand = radio("expand", "Expand the selection", true);
+    radio("current", "Continue with the current selection", false);
+    const actions = el("div", "oc-confirm-actions");
+    const ok = el("button", "oc-btn primary", "Sort");
+    const cancel = el("button", "oc-btn", "Cancel");
+    actions.append(ok, cancel);
+    body.append(text, ask, group, actions);
+    modal.hidden = false;
+
+    const x = byId("oc-modal-x");
+    const done = (answer) => {
+      modal.hidden = true;
+      body.textContent = "";
+      document.removeEventListener("keydown", onKey, true);
+      x.removeEventListener("click", onCancel);
+      modal.removeEventListener("click", onBackdrop);
+      canvas.focus();
+      resolve(answer);
+    };
+    const onSort = () => done(body.querySelector("input[name=oc-sortwarn]:checked")?.value ?? "expand");
+    const onCancel = () => done(null);
+    const onBackdrop = (e) => { if (e.target === modal) onCancel(); };
+    const onKey = (e) => {
+      if (e.key === "Escape") { e.stopPropagation(); e.preventDefault(); onCancel(); }
+      else if (e.key === "Enter") {
+        e.stopPropagation(); e.preventDefault();
+        if (document.activeElement === cancel) onCancel(); else onSort();
+      }
+    };
+    ok.addEventListener("click", onSort);
+    cancel.addEventListener("click", onCancel);
+    x.addEventListener("click", onCancel);
+    modal.addEventListener("click", onBackdrop);
+    document.addEventListener("keydown", onKey, true);
+    expand.focus();
+  });
 }
 
 /// The block a filter-menu sort acts on, as `{r0,c0,r1,c1}`, or `null` if no

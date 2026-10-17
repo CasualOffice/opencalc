@@ -101,6 +101,7 @@ import {
   wrap,
   holdBlock,
   caretAnchor,
+  sortWarning,
 } from "./editor.core.js";
 
 export function updateStats() {
@@ -946,13 +947,89 @@ export function parseColor(input) {
   return null;
 }
 
+/// Excel's current region around the rectangle `s` — grown until blank rows
+/// and blank columns bound it — or `null` when nothing in or around it has
+/// content. The engine's rule (`session_current_region`), the same one Ctrl+A
+/// and Go To Special › Current region use.
+export function currentRegion(s) {
+  try {
+    const j = wasm.session_current_region(state.sheet, s.r0, s.c0, s.r1, s.c1);
+    return j && j !== "null" ? JSON.parse(j) : null;
+  } catch { return null; }
+}
+
+/// The table holding the whole of `s`, as the block a sort acts on: the
+/// table's columns, its header row and its body, never its totals row — which
+/// Excel keeps at the bottom whatever order the body takes. `null` when `s` is
+/// not inside one table.
+function tableSortTarget(s) {
+  let t = null;
+  try {
+    const j = wasm.session_table_at(state.sheet, s.r0, s.c0);
+    if (j && j !== "null") t = JSON.parse(j);
+  } catch { return null; }
+  if (!t || s.r1 > t.r1 || s.c1 > t.c1) return null;
+  return {
+    s: { r0: t.r0, c0: t.c0, r1: t.r1 - (t.totals || 0), c1: t.c1 },
+    header: (t.headers || 0) > 0,
+  };
+}
+
+/// The block Remove Duplicates works on: the current region around a single
+/// cell (as Excel's Sort and Remove Duplicates both take it), else the
+/// selection. Its own adjacent-data question is asked by `removeDuplicates`.
 export function sortTarget() {
   const s = effectiveRange();
-  if (s.r0 === s.r1 && s.c0 === s.c1) {
-    const b = usedBounds();
-    return { r0: 0, c0: 0, r1: b.rows - 1, c1: b.cols - 1 };
-  }
+  if (s.r0 === s.r1 && s.c0 === s.c1) return currentRegion(s) ?? s;
   return s;
+}
+
+/// Whether a column just outside `s` holds data on `s`'s rows — Excel's test
+/// for the Sort Warning: "if there's data in any column adjacent to your
+/// selection, Excel issues this warning" (support.microsoft.com, "Expanding a
+/// selection while sorting data or removing duplicates").
+function dataBeside(s) {
+  const has = (c) => {
+    if (c < 0) return false;
+    for (let r = s.r0; r <= s.r1; r += 1) {
+      let text = "";
+      try { text = wasm.session_cell_input(state.sheet, r, c); } catch { text = ""; }
+      if (text !== "") return true;
+    }
+    return false;
+  };
+  return has(s.c0 - 1) || has(s.c1 + 1);
+}
+
+/// What a sort acts on, Excel's way (XL-UX-175), as `{ s, header }` — or
+/// `null` when the user cancelled or there is nothing to sort.
+///
+/// - Inside a table: the table, header and body, without its totals row.
+/// - One cell: the current region around it. An empty cell with nothing
+///   around it is Excel's "select a single cell in a range" refusal.
+/// - More than one cell, with data in a column beside it: the Sort Warning,
+///   whose "Expand the selection" takes the current region of the selection
+///   and "Continue with the current selection" takes the selection.
+///
+/// `header` is the guess "My data has headers" starts from.
+export async function sortTargetAsk() {
+  let s = effectiveRange();
+  const table = tableSortTarget(s);
+  if (table) return table;
+  if (s.r0 === s.r1 && s.c0 === s.c1) {
+    const region = currentRegion(s);
+    if (!region) {
+      // Excel's words for sorting from an empty cell with no data around it.
+      await messageBox("This can't be applied to the selected range. Select a single cell in a range and try again.");
+      return null;
+    }
+    s = region;
+  } else if (dataBeside(s)) {
+    const choice = await sortWarning();
+    if (!choice) return null;
+    if (choice === "expand") s = currentRegion(s) ?? s;
+  }
+  return { s, header: looksLikeHeader(s) };
 }
 
 export function looksLikeHeader(s) {
@@ -973,11 +1050,12 @@ export function looksLikeHeader(s) {
   return differs;
 }
 
-export function sortRange(desc) {
-  const s = sortTarget();
-  const hasHeader = looksLikeHeader(s);
+export async function sortRange(desc) {
+  const target = await sortTargetAsk();
+  if (!target) return;
+  const { s, header } = target;
   const key = Math.min(Math.max(state.sel.col, s.c0), s.c1);
-  applySort(s, [{ col: key, asc: !desc }], hasHeader);
+  applySort(s, [{ col: key, asc: !desc }], header);
 }
 
 export function applySort(s, keys, hasHeader) {

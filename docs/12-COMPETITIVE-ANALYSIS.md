@@ -244,14 +244,15 @@ and the user must fall back to Fill Down.
 
 **Equal, with a smaller cap.**
 
-- Sorting from a single cell inside a block **auto-expands to the whole
-  contiguous range and keeps rows intact**, detecting the header row: sorting
-  from C2 on a 5×3 block reordered whole records and left `Region|Rep|Units` on
-  top [measured]. `docs/73` #9 warned this was the classic data-destroying case
-  with no "expand the selection" prompt. **Measured, it does not destroy data.**
-  Excel prompts; this expands silently. *Does the divergence help?* Yes — it
-  removes a modal from a very common action and does the safe thing. Worth
-  keeping.
+- Sorting from a single cell sorts **Excel's current region** around it — the
+  block bounded by blank rows and blank columns, what Ctrl+Shift+* selects — and
+  keeps rows intact, detecting the header row; inside a table it sorts the
+  table's body and leaves the totals row. A selection of more than one cell with
+  data in an adjacent column raises Excel's **Sort Warning** ("Expand the
+  selection" / "Continue with the current selection"). Both are Excel's
+  behaviour, not a divergence. (Until XL-UX-175 the single-cell sort expanded
+  to the whole used area from A1, which reordered an unrelated block across a
+  blank column, and a partial selection was sorted without a prompt.)
 - The filter dropdown offers `Sort A→Z` / `Sort Z→A` inline [measured], which
   is where Excel and Sheets put it.
 
@@ -1099,7 +1100,6 @@ The owner's standard, applied one row at a time.
 
 | Divergence | Why it helps |
 | --- | --- |
-| Sort auto-expands to the contiguous block instead of prompting | Removes a modal from a daily action and does the safe thing. Measured: rows stay intact and the header is detected. |
 | The Name Box defines names and takes five syntaxes | Strictly more than Excel's, with no behaviour removed. |
 | All six aggregates at once, folded across disjoint ranges | Strictly more information in the same space. |
 | "Just for me" filter inline in the dropdown | Sheets/Excel bury the same idea behind a separate menu. |
