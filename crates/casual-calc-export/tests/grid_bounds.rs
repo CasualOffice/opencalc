@@ -52,7 +52,7 @@ fn out_of_grid_in_package(bytes: &[u8]) -> Vec<String> {
     let mut archive = zip::ZipArchive::new(Cursor::new(bytes.to_vec())).unwrap();
     for i in 0..archive.len() {
         let mut entry = archive.by_index(i).unwrap();
-        let name = entry.name().to_owned();
+        let name = entry.name().unwrap().into_owned();
         if !(name.ends_with(".xml") || name.ends_with(".rels")) {
             continue;
         }
