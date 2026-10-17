@@ -1855,7 +1855,11 @@ mod tests {
 
         let mut zip = zip::ZipArchive::new(Cursor::new(&bytes[..])).expect("a zip");
         let first = zip.by_index(0).expect("at least one entry");
-        assert_eq!(first.name(), "mimetype", "mimetype is not the first entry");
+        assert_eq!(
+            first.name().unwrap(),
+            "mimetype",
+            "mimetype is not the first entry"
+        );
         assert_eq!(
             first.compression(),
             zip::CompressionMethod::Stored,
@@ -2479,7 +2483,11 @@ mod tests {
 
             let mut zip = zip::ZipArchive::new(Cursor::new(&written[..])).expect("a zip");
             let first = zip.by_index(0).expect("at least one entry");
-            assert_eq!(first.name(), "mimetype", "mimetype is not the first entry");
+            assert_eq!(
+                first.name().unwrap(),
+                "mimetype",
+                "mimetype is not the first entry"
+            );
             assert_eq!(first.compression(), zip::CompressionMethod::Stored);
         }
 

@@ -12,7 +12,7 @@ casual-calc-package = { path = "../casual-calc-package" }
 quick-xml = "0.41"
 
 [dev-dependencies]
-zip = { version = "2", default-features = false, features = ["deflate"] }
+zip = { version = "9", default-features = false, features = ["deflate"] }
 
 [lints]
 workspace = true
