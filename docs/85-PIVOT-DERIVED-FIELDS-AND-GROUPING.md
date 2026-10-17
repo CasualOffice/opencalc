@@ -567,12 +567,12 @@ set. A formula that cannot be parsed is refused rather than stored, because a
 stored-but-unevaluable formula is a report cell that is `#NAME?` forever with no
 way to see why.
 
-### 5.4 The wire: `PROTOCOL_VERSION` 11 → 12 (COL-65 took 8 → 9, MACRO-02 9 → 10, MACRO-04 10 → 11)
+### 5.4 The wire: `PROTOCOL_VERSION` 12 → 13 (COL-65 took 8 → 9, MACRO-02 9 → 10, MACRO-04 10 → 11, the formula grammar `XL-FEAT-014`/`017` 11 → 12)
 
 `SheetMetadata` field 20 `PIVOTS` is a **whole-vector replace**, exactly as
 field 19 `CHARTS` is. §1.2 measured that the consequence is not the same:
 
-> **`PROTOCOL_VERSION` moves to 12** (COL-65 used 9 and MACRO-02 used 10, both on 2026-10-15; MACRO-04 used 11 for `#BUSY!` on 2026-10-16). A chart's additive field was the *quiet*
+> **`PROTOCOL_VERSION` moves to 13** (COL-65 used 9 and MACRO-02 used 10, both on 2026-10-15; MACRO-04 used 11 for `#BUSY!` on 2026-10-16; the formula grammar used 12 for array constants and 3-D references on 2026-10-17). A chart's additive field was the *quiet*
 > break, because `ChartView` tolerates unknown fields and an old client writes
 > the vector back without them. A pivot's additive field is the **loud** one,
 > because all four pivot types deny unknown fields and an old client refuses the

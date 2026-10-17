@@ -16,7 +16,9 @@ use casual_calc_io::{IoError, read_delimited, write_delimited};
 use casual_calc_layout::print::PrintContext;
 use casual_calc_layout::{DisplayList, Freeze, GridGeometry, Viewport, panes};
 use casual_calc_model::{Author, AuthorId, Id, Workbook};
-use casual_calc_render::pdf::{PdfBand, PdfFurniture, PdfMetadata, PdfPage, write_pdf};
+use casual_calc_render::pdf::{
+    GlyphReport, PdfBand, PdfFurniture, PdfMetadata, PdfPage, write_pdf,
+};
 use casual_calc_render::{ImageSource, PanePaint, RenderError, render_panes_png_with_images};
 use casual_calc_transaction::{
     Axis, History, Operation, SheetFields, TxnError, WouldDiscard, apply, restore,
@@ -1045,6 +1047,21 @@ impl WorkbookSession {
     /// Only sound when the values really were computed under `environment`
     /// from this same workbook; anything else is what `set_environment` is
     /// for.
+    /// Set the clock and seed **without recalculating**, for a host that
+    /// recalculates next itself (the editor sets its clock before every pass
+    /// it asks for).
+    ///
+    /// Not an edit, and not a change to the document: the untouched original
+    /// survives it, so an opened file that nobody edited still saves back byte
+    /// for byte (`SAVE-14`). Writing these two fields through
+    /// [`workbook_mut`](Self::workbook_mut) cost the file that guarantee on the
+    /// first recalculation after every open.
+    pub fn stage_environment(&mut self, environment: Environment) {
+        self.config.environment = environment;
+        apply_environment(&mut self.workbook, &self.config);
+        self.stale = true;
+    }
+
     pub fn adopt_environment(&mut self, environment: Environment) {
         self.config.environment = environment;
         apply_environment(&mut self.workbook, &self.config);
@@ -1881,6 +1898,20 @@ impl WorkbookSession {
         Ok(())
     }
 
+    /// Forget every custom-function answer and ask for each again — what Excel's
+    /// Enable Content does for the content it unblocks (`MACRO-19`): a call
+    /// the person disabled answered `#VALUE!`, and that answer is cached under
+    /// the same key a fresh call would use, so without this the cell keeps
+    /// `#VALUE!` until something else changes it.
+    ///
+    /// Not an edit, for the reason [`set_custom_functions`](Self::set_custom_functions)
+    /// is not: answers are this client's run-time state.
+    pub fn refresh_custom_functions(&mut self) {
+        self.workbook.custom.clear_results();
+        self.recalc.invalidate();
+        self.recalculate_if_automatic();
+    }
+
     /// Take the custom-function calls recalculation found no answer for, each
     /// with the ticket to answer it by. Each call is handed out once.
     pub fn take_custom_calls(&mut self) -> Vec<casual_calc_model::PendingCustomCall> {
@@ -2242,6 +2273,42 @@ impl WorkbookSession {
             .map(|s| s.name.clone())
             .unwrap_or_default();
         sheet_pdf_with_context(&self.workbook, sheet_index, &geometry, &title, ctx)
+    }
+
+    /// The CJK font slices a PDF of `sheet_index` wants and does not have
+    /// loaded (`XL-FEAT-140`), as `(variant, characters)`.
+    ///
+    /// The fonts for Japanese, Chinese and Korean are not compiled in; a host
+    /// fetches the slices a document needs and registers them with
+    /// [`casual_calc_render::cjk::register_slice`]. This asks the writer
+    /// itself — it runs the export and reads back what it wanted — so the
+    /// answer is exactly the characters, regions and weights the page would
+    /// draw, including a Calibri cell's Japanese and a `ＭＳ 明朝` cell's Latin.
+    ///
+    /// Empty once everything is loaded. A character no shipped slice has
+    /// stays wanted, and the export names it as undrawn in its report: a host
+    /// should stop after one round that registers nothing new.
+    ///
+    /// # Errors
+    ///
+    /// As [`export_pdf`](Self::export_pdf).
+    pub fn pdf_font_needs(
+        &self,
+        sheet_index: usize,
+    ) -> Result<Vec<(casual_calc_render::cjk::Variant, String)>, SdkError> {
+        let geometry = self.geometry(sheet_index);
+        let (_, _, glyphs) = sheet_pdf_with_glyphs(
+            &self.workbook,
+            sheet_index,
+            &geometry,
+            "",
+            &PrintContext::default(),
+        )?;
+        Ok(glyphs
+            .wanted
+            .into_iter()
+            .map(|(variant, chars)| (variant, chars.into_iter().collect()))
+            .collect())
     }
 
     /// The format this session was opened from, and the one
@@ -2642,6 +2709,19 @@ pub fn sheet_pdf_with_context(
     title: &str,
     ctx: &PrintContext<'_>,
 ) -> Result<(Vec<u8>, CompatibilityReport), SdkError> {
+    sheet_pdf_with_glyphs(workbook, sheet_index, geometry, title, ctx)
+        .map(|(bytes, report, _)| (bytes, report))
+}
+
+/// [`sheet_pdf_with_context`], and the writer's own account of the text: what
+/// it drew as nothing and which CJK slices it wanted (`XL-FEAT-140`).
+fn sheet_pdf_with_glyphs(
+    workbook: &Workbook,
+    sheet_index: usize,
+    geometry: &GridGeometry,
+    title: &str,
+    ctx: &PrintContext<'_>,
+) -> Result<(Vec<u8>, CompatibilityReport, GlyphReport), SdkError> {
     let meta = PdfMetadata {
         title: title.to_owned(),
     };
@@ -2651,7 +2731,11 @@ pub fn sheet_pdf_with_context(
         // Nothing to print. A document with no pages, rather than one blank
         // page that cannot be told from a page that failed to draw.
         let (bytes, _) = write_pdf(&[], geometry, &meta)?;
-        return Ok((bytes, CompatibilityReport::default()));
+        return Ok((
+            bytes,
+            CompatibilityReport::default(),
+            GlyphReport::default(),
+        ));
     };
 
     // Which bands each page is made of, before any of them has been laid out.
@@ -2837,28 +2921,40 @@ pub fn sheet_pdf_with_context(
     // Named per script rather than per character, because "this sheet contains
     // Devanagari and no face covering it is installed" is actionable and a list
     // of code points is not.
-    for missing in missing_font_coverage_of(workbook) {
-        report.record(
-            &format!("text in {} (no installed face covers it)", missing.script),
+    //
+    // From the **writer's own account** of what it drew as nothing
+    // (`XL-FEAT-140`), not from the string table: whether a Han character is
+    // drawable depends on the cell's font and the slices loaded for its
+    // region, which only the writer knows. A few of the characters ride along
+    // with the script, so a reader can see which text is affected; the count
+    // is of distinct characters.
+    let glyphs = images.glyphs;
+    let mut by_script: BTreeMap<&'static str, Vec<char>> = BTreeMap::new();
+    for &ch in &glyphs.undrawn {
+        by_script
+            .entry(casual_calc_render::script_of(ch))
+            .or_default()
+            .push(ch);
+    }
+    for (script, chars) in &by_script {
+        let sample: String = chars.iter().take(8).collect();
+        report.record_n(
+            &format!("text in {script} (no installed face covers it: {sample})"),
             ModelOutcome::Omitted,
             RetentionOutcome::NotRetained,
+            chars.len() as u64,
         );
     }
-    Ok((bytes, report))
-}
-
-/// Every script in `workbook`'s text that no registered face can draw.
-///
-/// The free function behind [`WorkbookSession::missing_font_coverage`], so a
-/// render path can ask without a session. Same reasoning as that method: the
-/// string table holds every piece of text exactly once, and sheet names are
-/// excluded because this renderer never draws them.
-fn missing_font_coverage_of(workbook: &Workbook) -> Vec<casual_calc_render::MissingScript> {
-    let mut text = String::new();
-    for s in workbook.strings.iter() {
-        text.push_str(s);
+    let unlisted = glyphs.undrawn_total.saturating_sub(glyphs.undrawn.len());
+    if unlisted > 0 {
+        report.record_n(
+            "text in further characters (no installed face covers them)",
+            ModelOutcome::Omitted,
+            RetentionOutcome::NotRetained,
+            unlisted as u64,
+        );
     }
-    casual_calc_render::missing_scripts(&text)
+    Ok((bytes, report, glyphs))
 }
 
 /// The workbook's own media, as something the renderer can draw from.
@@ -3041,6 +3137,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::views::PersonalViews;
 
+#[cfg(test)]
+mod cjk_tests;
 #[cfg(test)]
 mod custom_function_tests;
 #[cfg(test)]

@@ -1793,3 +1793,40 @@ fn rows_and_columns_measure_a_mixed_reference() {
     num("ROWS($A$1:$A$5)", 5.0);
     num("ROWS(A1:A5)", 5.0);
 }
+
+/// Array constants (XL-FEAT-014), evaluated the way Excel does: whole in an
+/// array context, lifted over a scalar parameter, spilled when they are the
+/// result. Each expected value is Excel's (Microsoft, "Use array constants
+/// in array formulas") and LibreOffice's, which the oracle corpus checks.
+#[test]
+fn array_constants_evaluate_as_arrays() {
+    num("SUM({1,2,3})", 6.0);
+    num("SUM({1,2;3,4})", 10.0);
+    num("SUM({-1,-2})", -3.0);
+    num("SUM(COUNTIF(E1:E5,{\"alpha\",\"beta\",\"zeta\"}))", 2.0);
+    num("SUM(CHOOSE({1,2},C1,D1))", 11.0);
+    num("INDEX({1,2;3,4},2,1)", 3.0);
+    num("ROWS({1;2;3})", 3.0);
+    num("COLUMNS({1,2,3})", 3.0);
+    num("SUM({1,2}*{10;20})", 90.0);
+    num("MATCH(\"b\",{\"a\",\"b\",\"c\"},0)", 2.0);
+    text("LOOKUP(2,{1,2,3},{\"a\",\"b\",\"c\"})", "b");
+    text("VLOOKUP(2,{1,\"one\";2,\"two\"},2,FALSE)", "two");
+    boolean("AND({TRUE,FALSE})", false);
+    boolean("OR({FALSE,TRUE})", true);
+    error("INDEX({1,#N/A},1,2)", ErrorValue::Na);
+    // A constant holding text and logicals: SUM skips them, as it does in a
+    // range, while COUNTA counts every element.
+    num("SUM({1,\"2\",TRUE})", 1.0);
+    num("COUNTA({1,\"a\",TRUE,#N/A})", 4.0);
+}
+
+/// `={1,2;3,4}` in a cell spills, like any formula whose answer is an array.
+#[test]
+fn an_array_constant_spills() {
+    let (wb, v) = eval("{1,2;3,4}");
+    assert_eq!(v, CellValue::Number(1.0));
+    assert_eq!(cell(&wb, AT.0, AT.1 + 1), CellValue::Number(2.0));
+    assert_eq!(cell(&wb, AT.0 + 1, AT.1), CellValue::Number(3.0));
+    assert_eq!(cell(&wb, AT.0 + 1, AT.1 + 1), CellValue::Number(4.0));
+}

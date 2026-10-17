@@ -63,6 +63,8 @@ pub const FUTURE_FUNCTIONS: &[&str] = &[
     "ACOT",
     "ACOTH",
     "AGGREGATE",
+    // `A1#` — the spilled-range operator is stored as a function.
+    "ANCHORARRAY",
     "ARABIC",
     "ARRAYTOTEXT",
     "BASE",
@@ -173,6 +175,8 @@ pub const FUTURE_FUNCTIONS: &[&str] = &[
     "SEQUENCE",
     "SHEET",
     "SHEETS",
+    // `@x` — the implicit-intersection operator is stored as a function.
+    "SINGLE",
     "SKEW.P",
     "SORT",
     "SORTBY",

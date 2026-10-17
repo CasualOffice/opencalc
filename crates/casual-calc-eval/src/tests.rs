@@ -2474,6 +2474,27 @@ fn whole_column_and_whole_row_references_evaluate() {
     );
 }
 
+/// `=SUM(1:1)` — the unanchored spelling, which was a parse error while `$1:$1`
+/// worked (XL-FEAT-016) — plus a multi-row span and a sheet-qualified one.
+#[test]
+fn unanchored_whole_row_references_evaluate() {
+    let mut b = Builder::new();
+    b.number((0, 0), 1.0) // A1
+        .number((0, 1), 10.0) // B1
+        .number((1, 2), 100.0) // C2
+        .number((2, 5), 1000.0) // F3
+        .formula((5, 0), "SUM(1:1)") // A6
+        .formula((6, 0), "SUM(1:3)") // A7
+        .formula((7, 0), "SUM(Sheet1!2:2)") // A8
+        .formula((8, 0), "COUNT(2:3)"); // A9
+    let mut wb = b.build();
+    recalculate(&mut wb);
+    assert_eq!(value_at(&wb, 5, 0), CellValue::Number(11.0));
+    assert_eq!(value_at(&wb, 6, 0), CellValue::Number(1111.0));
+    assert_eq!(value_at(&wb, 7, 0), CellValue::Number(100.0));
+    assert_eq!(value_at(&wb, 8, 0), CellValue::Number(2.0));
+}
+
 /// The bounds an open range walks come from the data, not from the sheet's
 /// limits. Without the clamp this test would iterate 1,048,576 rows per
 /// formula and take minutes rather than milliseconds.
@@ -5055,4 +5076,161 @@ fn a_sheet_scoped_name_wins_on_its_sheet_and_is_invisible_elsewhere() {
         CellValue::Error(casual_calc_model::ErrorValue::Name),
         "a name scoped to Sheet2 is not visible from Sheet1"
     );
+}
+
+/// The spill operator (XL-FEAT-015): `B1#` is everything `B1` spilled, and it
+/// follows the spill as it grows. A cell that does not spill has no spill
+/// range, which is `#REF!`. Microsoft, "Spilled range operator".
+#[test]
+fn the_spill_operator_reads_the_whole_spill() {
+    let mut b = Builder::new();
+    b.number((0, 0), 7.0) // A1: a constant, not a spill
+        .formula((0, 1), "SEQUENCE(3)") // B1:B3 = 1, 2, 3
+        .formula((0, 2), "SUM(B1#)") // C1
+        .formula((1, 2), "ROWS(B1#)") // C2
+        .formula((2, 2), "INDEX(B1#,2)") // C3
+        .formula((3, 2), "COUNTIF(B1#,\">1\")") // C4
+        .formula((4, 2), "SUM(A1#)") // C5
+        .formula((5, 2), "SUM(Spill#)") // C6, through a name
+        .formula((6, 2), "SUM(Sheet1!B1#)"); // C7
+    let mut wb = b.build();
+    wb.defined_names.push(casual_calc_model::DefinedName {
+        name: "Spill".to_owned(),
+        sheet: None,
+        formula: parse("Sheet1!$B$1").unwrap(),
+        comment: None,
+        attributes: Default::default(),
+    });
+    recalculate(&mut wb);
+    assert_eq!(value_at(&wb, 0, 2), CellValue::Number(6.0));
+    assert_eq!(value_at(&wb, 1, 2), CellValue::Number(3.0));
+    assert_eq!(value_at(&wb, 2, 2), CellValue::Number(2.0));
+    assert_eq!(value_at(&wb, 3, 2), CellValue::Number(2.0));
+    assert_eq!(
+        value_at(&wb, 4, 2),
+        CellValue::Error(casual_calc_model::ErrorValue::Ref)
+    );
+    assert_eq!(value_at(&wb, 5, 2), CellValue::Number(6.0));
+    assert_eq!(value_at(&wb, 6, 2), CellValue::Number(6.0));
+}
+
+/// Implicit intersection (XL-FEAT-015). Microsoft, "Implicit intersection
+/// operator: @": a range gives "the value from the cell on the same row or
+/// column as the formula", an array its top-left value, a single item itself;
+/// a range with no cell in line with the formula is `#VALUE!`.
+#[test]
+fn the_implicit_intersection_operator_picks_the_cell_in_line() {
+    let mut b = Builder::new();
+    for r in 0..5u32 {
+        b.number((r, 0), f64::from(r + 1) * 10.0); // A1:A5 = 10..50
+    }
+    b.number((7, 1), 2.0) // B8
+        .number((7, 2), 3.0) // C8
+        .number((7, 3), 4.0) // D8
+        .formula((2, 4), "@A1:A5") // E3 -> A3
+        .formula((6, 4), "@A1:A5") // E7 -> no row 7 in A1:A5
+        .formula((9, 2), "@B8:D8") // C10 -> C8
+        .formula((9, 5), "@B8:D8") // F10 -> no column F in B8:D8
+        .formula((3, 4), "@{5,6,7}") // E4 -> top-left
+        .formula((4, 4), "@SEQUENCE(3)+1") // E5
+        .formula((1, 4), "@A1") // E2
+        .formula((0, 5), "@A:A"); // F1 -> A1
+    let mut wb = b.build();
+    recalculate(&mut wb);
+    let value_err = CellValue::Error(casual_calc_model::ErrorValue::Value);
+    assert_eq!(value_at(&wb, 2, 4), CellValue::Number(30.0));
+    assert_eq!(value_at(&wb, 6, 4), value_err);
+    assert_eq!(value_at(&wb, 9, 2), CellValue::Number(3.0));
+    assert_eq!(value_at(&wb, 9, 5), value_err);
+    assert_eq!(value_at(&wb, 3, 4), CellValue::Number(5.0));
+    assert_eq!(value_at(&wb, 4, 4), CellValue::Number(2.0));
+    assert_eq!(value_at(&wb, 1, 4), CellValue::Number(10.0));
+    assert_eq!(value_at(&wb, 0, 5), CellValue::Number(10.0));
+}
+
+/// 3-D references (XL-FEAT-017): Excel's functions take the same cells on
+/// every sheet from one tab to another; anywhere else a 3-D reference is
+/// `#VALUE!`. The span is positional, so a sheet inserted between the tabs is
+/// counted and one moved out is not.
+#[test]
+fn three_d_references_aggregate_across_the_span() {
+    let mut wb = Workbook::new(Id::from_parts(1, 1));
+    let mut summary = Sheet::new(SheetId(Id::from_parts(2, 1)), "Summary");
+    let formulas = [
+        "SUM(Jan:Mar!B5)",
+        "AVERAGE(Jan:Mar!B5)",
+        "COUNT(Jan:Mar!B5:B6)",
+        "COUNTA(Jan:Mar!B5:B6)",
+        "MAX(Jan:Mar!B5)",
+        "MIN(Mar:Jan!B5)",
+        "PRODUCT(Jan:Mar!B5)",
+        "SUM(Jan:Mar!B5:B6,100)",
+        "ROWS(VSTACK(Jan:Mar!B5))",
+        "Jan:Mar!B5",
+        "COUNTIF(Jan:Mar!B5,\">0\")",
+        "SUM(Jan:Mar!B5*2)",
+        "SUM(Jan:Nope!B5)",
+    ];
+    for (row, text) in formulas.iter().enumerate() {
+        let at = Origin::at(row as u32, 0);
+        let handle = wb.store_formula_at(parse(text).unwrap(), at);
+        let mut cell = Cell::value(CellValue::Empty);
+        cell.formula = Some(handle);
+        summary.cells.set(CellRef::new(row as u32, 0), cell);
+    }
+    wb.sheets.push(summary);
+    for (i, (name, n)) in [("Jan", 1.0), ("Feb", 2.0), ("Mar", 4.0)]
+        .iter()
+        .enumerate()
+    {
+        let mut sheet = Sheet::new(SheetId(Id::from_parts(10 + i as u64, 1)), *name);
+        sheet
+            .cells
+            .set(CellRef::new(4, 1), Cell::value(CellValue::Number(*n)));
+        let label = wb.intern_string("note");
+        sheet.cells.set(
+            CellRef::new(5, 1),
+            Cell::value(CellValue::InlineString(label)),
+        );
+        wb.sheets.push(sheet);
+    }
+    recalculate(&mut wb);
+    let at = |wb: &Workbook, row: u32| {
+        wb.sheets[0]
+            .cells
+            .get(CellRef::new(row, 0))
+            .map(|c| c.value.clone())
+            .unwrap()
+    };
+    use casual_calc_model::ErrorValue;
+    let n = CellValue::Number;
+    assert_eq!(at(&wb, 0), n(7.0));
+    assert_eq!(at(&wb, 1), n(7.0 / 3.0));
+    assert_eq!(at(&wb, 2), n(3.0));
+    assert_eq!(at(&wb, 3), n(6.0));
+    assert_eq!(at(&wb, 4), n(4.0));
+    assert_eq!(at(&wb, 5), n(1.0));
+    assert_eq!(at(&wb, 6), n(8.0));
+    assert_eq!(at(&wb, 7), n(107.0));
+    assert_eq!(at(&wb, 8), n(3.0));
+    assert_eq!(at(&wb, 9), CellValue::Error(ErrorValue::Value));
+    assert_eq!(at(&wb, 10), CellValue::Error(ErrorValue::Value));
+    assert_eq!(at(&wb, 11), CellValue::Error(ErrorValue::Value));
+    assert_eq!(at(&wb, 12), CellValue::Error(ErrorValue::Ref));
+
+    // A sheet inserted between the endpoints is in the span...
+    let mut extra = Sheet::new(SheetId(Id::from_parts(20, 1)), "Extra");
+    extra
+        .cells
+        .set(CellRef::new(4, 1), Cell::value(CellValue::Number(10.0)));
+    wb.sheets.insert(2, extra);
+    recalculate(&mut wb);
+    assert_eq!(at(&wb, 0), n(17.0));
+    // ...and one moved out of it is not.
+    let moved = wb.sheets.remove(2);
+    wb.sheets.push(moved);
+    let feb = wb.sheets.remove(2);
+    wb.sheets.push(feb);
+    recalculate(&mut wb);
+    assert_eq!(at(&wb, 0), n(5.0));
 }

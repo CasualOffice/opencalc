@@ -180,7 +180,7 @@ fn a_strict_open_xml_workbook_reads_the_same_as_a_transitional_one() {
             let mut zout = zip::ZipWriter::new(std::io::Cursor::new(&mut strict));
             for i in 0..zin.len() {
                 let mut entry = zin.by_index(i).expect("entry");
-                let entry_name = entry.name().to_owned();
+                let entry_name = entry.name().unwrap().into_owned();
                 let mut data = Vec::new();
                 std::io::Read::read_to_end(&mut entry, &mut data).expect("read");
                 if entry_name.ends_with(".xml")

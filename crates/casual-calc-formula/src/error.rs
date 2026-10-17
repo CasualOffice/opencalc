@@ -30,6 +30,12 @@ pub enum FormulaError {
         /// The limit that was exceeded.
         limit: u32,
     },
+    /// An array constant holds more elements than
+    /// [`MAX_ARRAY_CONSTANT`](crate::parse::MAX_ARRAY_CONSTANT).
+    TooLarge {
+        /// The element limit.
+        limit: usize,
+    },
 }
 
 impl FormulaError {
@@ -51,6 +57,9 @@ impl fmt::Display for FormulaError {
             FormulaError::InvalidReference(r) => write!(f, "invalid reference: {r:?}"),
             FormulaError::TooDeep { limit } => {
                 write!(f, "the expression nests deeper than {limit} levels")
+            }
+            FormulaError::TooLarge { limit } => {
+                write!(f, "the array constant holds more than {limit} elements")
             }
         }
     }

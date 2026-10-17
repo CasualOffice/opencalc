@@ -204,6 +204,8 @@ fn may_be_array(expr: &Expr) -> bool {
         | Expr::Reference(_)
         | Expr::Empty
         | Expr::Raw(_)
+        // `#VALUE!` outside the functions that take one, lifted or not.
+        | Expr::Reference3d(_)
         // A wide structured reference is `#VALUE!` in an array context too;
         // left to the function, as it always was.
         | Expr::StructuredRef { .. } => false,
@@ -217,6 +219,9 @@ fn may_be_array(expr: &Expr) -> bool {
                 .any(|(i, a)| kind_at(kinds, i) == ParamKind::Scalar && may_be_array(a)),
             None => true,
         },
+        // `COUNTIF(r, {"a","b"})` is two counts: a constant with more than one
+        // element is exactly what lifting is for.
+        Expr::Array(rows) => rows.len() > 1 || rows.first().is_some_and(|r| r.len() > 1),
         Expr::Range(..) | Expr::Name(_) | Expr::Call { .. } => true,
     }
 }

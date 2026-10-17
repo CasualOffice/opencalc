@@ -274,6 +274,29 @@ test("a read sees the macro's own write, recalculated by the engine", async ({ p
   expect(await input(page, 2, 2)).toBe("$B$1");
 });
 
+test("a macro reads the browser's language, and nothing else of navigator (SEC-026)", async ({ page }) => {
+  // ONLYOFFICE's samples format by locale through `navigator.language`. The
+  // sandbox removed all of `navigator`, which took that harmless read with it;
+  // a frozen subset gives it back without `sendBeacon` or anything that reaches
+  // the network or a device.
+  await boot(page);
+  const lang = await page.evaluate(() => navigator.language);
+  const res = await run(page, `
+    var s = Api.GetActiveSheet();
+    s.GetRange("A1").SetValue(navigator.language);
+    s.GetRange("A2").SetValue(String(Array.isArray(navigator.languages) && navigator.languages.length > 0));
+    s.GetRange("A3").SetValue(typeof navigator.sendBeacon);
+    s.GetRange("A4").SetValue(typeof navigator.clipboard + "," + typeof navigator.serviceWorker + "," + typeof navigator.locks + "," + typeof navigator.storage);
+    s.GetRange("A5").SetValue(String(Object.isFrozen(navigator)));
+  `);
+  expect(res.error).toBeNull();
+  expect(await input(page, 0, 0)).toBe(lang);
+  expect(await input(page, 1, 0)).toBe("TRUE");
+  expect(await input(page, 2, 0)).toBe("undefined");
+  expect(await input(page, 3, 0)).toBe("undefined,undefined,undefined,undefined");
+  expect(await input(page, 4, 0)).toBe("TRUE");
+});
+
 // ---------------------------------------------------------------------------
 // 2. The sandbox.
 

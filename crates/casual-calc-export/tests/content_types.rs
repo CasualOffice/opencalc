@@ -99,7 +99,7 @@ fn entries(package: &[u8]) -> Vec<(String, Vec<u8>)> {
     let mut out = Vec::new();
     for i in 0..zip.len() {
         let mut entry = zip.by_index(i).expect("entry");
-        let name = entry.name().to_owned();
+        let name = entry.name().unwrap().into_owned();
         let mut bytes = Vec::new();
         entry.read_to_end(&mut bytes).expect("readable");
         out.push((name, bytes));

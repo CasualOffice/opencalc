@@ -26,9 +26,26 @@ fuzz_target!(|data: &[u8]| {
         // Display is recursive, so a tree the parser accepted must also be one
         // this can walk.
         let printed = expr.to_string();
-        // And what it prints must parse back, which is the round-trip gate
-        // stated as a property rather than over a fixed corpus.
-        let _ = casual_calc_formula::parse(&printed);
+        // And what it prints must parse back **to the same tree**, which is
+        // the round-trip gate stated as a property rather than over a fixed
+        // corpus. It used only to require that the text parse at all; the
+        // stronger form found three defects in the grammar extensions
+        // (XL-FEAT-014..017) in its first minutes — a range whose far end
+        // named another sheet, `#REF!#` printed for a spill anchor off the
+        // sheet, and `inf` printed for a literal past the largest double.
+        //
+        // Text that prints `#REF!` is exempt: `parse_a1` still accepts a
+        // column past XFD (`SUMH1`), which then prints as `#REF!` — a
+        // known defect proposed as its own row, and a different tree by design.
+        if printed.contains("#REF!") {
+            return;
+        }
+        let again = casual_calc_formula::parse(&printed)
+            .unwrap_or_else(|e| panic!("{text:?} printed {printed:?}, which does not parse: {e}"));
+        assert!(
+            again == expr,
+            "{text:?} printed {printed:?}, which reads back as {again:?}, not {expr:?}"
+        );
         // Drop is recursive too, and is where the chain bug landed.
         drop(expr);
     }

@@ -234,6 +234,10 @@ import {
   quadClip,
   refreshTheme,
   registerSuppliedFonts,
+  ensureExportFonts,
+  cjkFontsLoaded,
+  cjkFontsReady,
+  hasCjk,
   runFont,
   runsWidth,
   textWidth,
@@ -300,6 +304,7 @@ import {
   autofillToNeighbour,
   autofitColumn,
   autofitColumnForTest,
+  autofitPendingForTest,
   undoMark,
   widenForEntry,
   autofitRow,
@@ -449,6 +454,7 @@ export { cancelFileJob, fileJobActive, setFileWorkersForTest } from "./editor.fi
 // are offered on open and never run without the person choosing Run.
 import { forgetMacroAnswersForTest, offerAutostartMacros, openMacrosWindow } from "./editor.macros-window.js";
 import { openVbaViewer } from "./editor.vba-viewer.js";
+import { caretPoint, initFormulaBarSizer, keepCaretInView } from "./editor.formula-bar.js";
 export { forgetMacroAnswersForTest, offerAutostartMacros, openMacrosWindow };
 // Network access only after the person allows it (`MACRO-13`, docs/99 §5a):
 // the grants this device holds, listed in File ▸ Options ▸ Trust Center.
@@ -680,6 +686,10 @@ export {
   quadClip,
   refreshTheme,
   registerSuppliedFonts,
+  ensureExportFonts,
+  cjkFontsLoaded,
+  cjkFontsReady,
+  hasCjk,
   runFont,
   runsWidth,
   textWidth,
@@ -746,6 +756,7 @@ export {
   autofillToNeighbour,
   autofitColumn,
   autofitColumnForTest,
+  autofitPendingForTest,
   undoMark,
   widenForEntry,
   autofitRow,
@@ -7617,10 +7628,11 @@ export function updateSignatureTip() {
   });
   sigEl.append(document.createTextNode(")"));
   sigEl.hidden = false;
-  const r = (editSurface ?? inline).getBoundingClientRect();
+  // At the start of the call's name, as Excel's argument ScreenTip is.
+  const a = caretAnchor(editSurface, call.at);
   const w = sigEl.offsetWidth;
-  sigEl.style.left = Math.max(4, Math.min(r.left, window.innerWidth - 4 - w)) + "px";
-  sigEl.style.top = r.bottom + 2 + "px";
+  sigEl.style.left = Math.max(4, Math.min(a.left, window.innerWidth - 4 - w)) + "px";
+  sigEl.style.top = a.top + 2 + "px";
 }
 
 
@@ -7850,17 +7862,33 @@ export function renderTabs() {
 
 // The formula bar's expand toggle, in one place.
 //
-// The `fx` chevron and Ctrl+Shift+U are the same command, so they share the
-// same three lines: `resize()` is not optional — the bar growing changes the
-// canvas's height, and skipping it leaves the grid painting under the bar.
+// The `fx` chevron, Ctrl+Shift+U and the bar's bottom-edge splitter are one
+// piece of state, kept by `editor.formula-bar.js`. `resize()` is
+// not optional — the bar growing changes the canvas's height, and skipping it
+// leaves the grid painting under the bar.
+let fxSizer = null;
 export function toggleFormulaBarExpanded() {
-  const bar = qs(".formula-bar");
-  if (!bar) return false;
-  const on = bar.classList.toggle("expanded");
-  const btn = byId("fx-expand");
-  if (btn) btn.setAttribute("aria-expanded", on ? "true" : "false");
-  resize();
-  return on;
+  if (!fxSizer) return false;
+  return fxSizer.toggle();
+}
+
+// Where a popup that belongs to the caret opens: under the
+// caret's line, at `at` (a character offset), when typing in the formula bar —
+// which, expanded, is several lines tall, so "under the box" can be lines away
+// from what is being typed. The in-cell editor keeps its own anchor, under the
+// cell.
+export function caretAnchor(surface, at) {
+  if (surface === fInput) {
+    const c = caretPoint(fInput, at);
+    if (c) {
+      const r = fInput.getBoundingClientRect();
+      // A caret scrolled out of the box anchors to the box's edge, not to text
+      // nobody can see.
+      return { left: c.x, top: Math.min(Math.max(c.bottom, r.top), r.bottom) };
+    }
+  }
+  const r = (surface ?? inline).getBoundingClientRect();
+  return { left: r.left, top: r.bottom };
 }
 
 // Excel's Ctrl+Shift+O — select every cell on this sheet that carries a note.
@@ -7963,6 +7991,11 @@ export function openColumnPickList() {
 /// this repository refuses.
 async function exportPdf() {
   try {
+    // Japanese, Chinese and Korean faces are fetched slices, not compiled in
+    // (`XL-FEAT-140`): hand the engine the ones this sheet's text needs before
+    // it writes the file. Anything still missing is named in `loss` below.
+    status.textContent = "exporting PDF…";
+    await ensureExportFonts(state.sheet);
     const bytes = wasm.session_export_pdf(state.sheet);
     const loss = wasm.session_export_pdf_loss(state.sheet);
     const base = (documentName() || "workbook").replace(/\.[^.]+$/, "");
@@ -9545,6 +9578,14 @@ function wireEvents() {
       if (step && editMode !== "Edit" && (pointMode || refAcceptable())) {
         if (pointStep(step[0], step[1], e.shiftKey)) { e.preventDefault(); return; }
       }
+      // Ctrl+Shift+U mid-edit, from either surface, as in Excel: the grid's
+      // key handler never sees a key typed into an editor, so it is answered
+      // here too. The edit and the focus stay where they are.
+      if ((e.ctrlKey || e.metaKey) && e.shiftKey && !e.altKey && (e.key === "U" || e.key === "u")) {
+        toggleFormulaBarExpanded();
+        e.preventDefault();
+        return;
+      }
       if (e.key === "F4") { if (cycleAnchors()) e.preventDefault(); }
       // Alt+Enter breaks the line inside the cell instead of committing.
       //
@@ -9562,6 +9603,10 @@ function wireEvents() {
         mirrorEdit();
         // Only the in-cell editor is positioned over a cell; the bar is not.
         if (surface === inline) positionInline();
+        // A programmatic value change does not scroll a textarea to its caret,
+        // so the new line could open below the expanded bar's last visible one.
+        else keepCaretInView(surface);
+        updateRefSpans();
       }
       // Ctrl+Enter fills the whole selection with the entry, as in Excel.
       else if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { commitToSelection(surface.value); e.preventDefault(); }
@@ -11279,6 +11324,22 @@ function bindElements() {
   hscroll = byId("hscroll");
   hthumb = byId("hthumb");
   fInput = byId("formula-input");
+  fxSizer = initFormulaBarSizer({
+    bar: qs(".formula-bar"),
+    input: fInput,
+    button: byId("fx-expand"),
+    workArea: qs(".work-area"),
+    // Everything laid over the box follows its new height: the canvas below,
+    // the reference-tint mirror (sized to the box, so a stale one clips the
+    // formula at the old height), and the popups anchored to the caret.
+    onResize: () => {
+      resize();
+      if (editSurface !== fInput) return;
+      paintRefTokens();
+      updateSignatureTip();
+      if (acState) renderAutocomplete();
+    },
+  });
   cellRef = byId("cell-ref");
   commentTip = byId("comment-tip");
   status = byId("tb-status");
@@ -11856,6 +11917,15 @@ async function main() {
   // every cell a user looks at with its own faces. This is for `render_png`,
   // where a missing face is a picture full of boxes.
   await registerSuppliedFonts();
+  // Which region's glyphs a Han character in a Latin-font cell is drawn with —
+  // Excel takes it from the system locale; a browser's nearest is its
+  // language. Anything that is not Chinese or Korean keeps the engine's
+  // default, Japanese (`XL-FEAT-140`). `?cjk=sc` overrides, for a deployment
+  // or a test that must not depend on the viewer.
+  try {
+    const asked = new URL(location.href).searchParams.get("cjk");
+    wasm.set_cjk_default_region(asked || navigator.language || "");
+  } catch {}
 
   COL_W = wasm.default_col_px();
   ROW_H = wasm.default_row_px();

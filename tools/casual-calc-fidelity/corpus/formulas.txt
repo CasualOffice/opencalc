@@ -616,3 +616,52 @@ LEN(TEXTJOIN(",",TRUE,REPT("a",20000),REPT("b",20000)))  @differs: Microsoft: pa
 ROWS(A$1:A5)
 ROWS(A1:A$5)
 COLUMNS($A1:C1)
+
+# XL-FEAT-016: whole-row references, the twin of `A:A`. (Column A is where the
+# corpus formulas live, so these pick the fixture columns out with INDEX.)
+INDEX(5:5,1,4)
+INDEX(2:3,2,3)
+INDEX($4:$4,1,5)
+ROWS(4:6)
+COLUMNS(1:1)
+ROWS($2:$2)
+
+# XL-FEAT-014: array constants — `,` between columns, `;` between rows.
+SUM({1,2,3})
+SUM({1,2;3,4})
+SUM({-1,-2})
+SUM(COUNTIF(E1:E5,{"alpha","beta","zeta"}))
+SUM(CHOOSE({1,2},C1,D1))
+INDEX({1,2;3,4},2,1)
+ROWS({1;2;3})
+COLUMNS({1,2,3})
+SUM({1,2}*{10;20})
+MATCH("b",{"a","b","c"},0)
+LOOKUP(2,{1,2,3},{"a","b","c"})
+LOOKUP(3,{1,2;3,4})
+VLOOKUP(2,{1,"one";2,"two"},2,FALSE)
+AND({TRUE,FALSE})
+SUM({1,"2",TRUE})  @differs: Microsoft (SUM): "If an argument is an array or reference, only numbers in that array or reference are counted"; LibreOffice also counts the text "2" and answers 2
+COUNTA({1,"a",TRUE,#N/A})  @differs: LibreOffice 26.2 refuses an error value inside an inline array (Err:539); COUNTA counts every non-empty element, errors included, in Excel
+SUMPRODUCT({1,2,3},{4,5,6})
+CONCAT({"a","b"})
+INDEX({-1,0.5},1,2)
+
+# XL-FEAT-015: the spill operator and implicit intersection. Stored in xlsx as
+# _xlfn.ANCHORARRAY / _xlfn.SINGLE. (Column A is the corpus, so there is no
+# spill to point at here: C1 holds a constant, which has no spill range.)
+SUM(C1#)
+@C1:C10
+@{5,6}  @differs: LibreOffice 26.2 does not implement _xlfn.SINGLE (#NAME?); Microsoft: "If the value is an array, pick the top-left value" (5)
+@C3  @differs: LibreOffice 26.2 does not implement _xlfn.SINGLE (#NAME?); Microsoft: "If the value is a single item, return the item" (3)
+
+# XL-FEAT-017: 3-D references. The corpus has one sheet, `S`, so these are
+# one-sheet spans, which read as the plain reference `S!C1:C3` (LibreOffice
+# reads them so, and it is what keeps COUNTIF working on one). Real spans are
+# in corpus/ods/three-d.ods, four sheets, and its unit test computes them.
+SUM(S:S!C1:C3)
+COUNT(S:S!C1:D2)
+MAX(S:S!D1:D10)
+AVERAGE(S:S!C1:C4)
+S:S!C1
+COUNTIF(S:S!C1:C3,">1")

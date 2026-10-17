@@ -90,3 +90,75 @@ fn an_unbundled_family_still_measures() {
         assert!(measured > 0.0, "{family:?} measured {measured}");
     }
 }
+
+/// `XL-FEAT-140`: an East Asian font name draws with the mapped CJK face on
+/// screen. The editor's canvas uses this stack, so a cell styled `游ゴシック`
+/// that resolves to a Latin face draws its Japanese in whatever the viewer
+/// happens to have installed — or nothing.
+#[test]
+fn east_asian_font_names_lead_their_stack_with_the_mapped_cjk_face() {
+    use crate::substitution::css_stack;
+    for (name, face) in [
+        ("游ゴシック", "OpenCalc CJK JP Sans"),
+        ("Yu Gothic", "OpenCalc CJK JP Sans"),
+        ("ＭＳ Ｐゴシック", "OpenCalc CJK JP Sans"),
+        ("Meiryo", "OpenCalc CJK JP Sans"),
+        ("ＭＳ 明朝", "OpenCalc CJK JP Serif"),
+        ("Yu Mincho", "OpenCalc CJK JP Serif"),
+        ("Microsoft YaHei", "OpenCalc CJK SC Sans"),
+        ("等线", "OpenCalc CJK SC Sans"),
+        ("SimSun", "OpenCalc CJK SC Serif"),
+        ("Microsoft JhengHei", "OpenCalc CJK TC Sans"),
+        ("PMingLiU", "OpenCalc CJK TC Serif"),
+        ("맑은 고딕", "OpenCalc CJK KR Sans"),
+        ("Batang", "OpenCalc CJK KR Serif"),
+    ] {
+        let stack = css_stack(name);
+        assert!(
+            stack.starts_with(&format!("\"{face}\"")),
+            "{name}: expected the stack to lead with {face}, got {stack}"
+        );
+        assert!(
+            stack.contains(&format!("\"{name}\"")),
+            "{name}: the requested name stays in the stack: {stack}"
+        );
+    }
+}
+
+/// And a Latin font falls back to the CJK faces for the characters it lacks —
+/// Excel's font linking — rather than to the viewer's system font.
+#[test]
+fn a_latin_font_stack_falls_back_to_the_cjk_faces() {
+    let stack = crate::substitution::css_stack("Calibri");
+    assert!(stack.starts_with("\"Carlito\", \"Calibri\""), "{stack}");
+    for face in [
+        "OpenCalc CJK JP Sans",
+        "OpenCalc CJK SC Sans",
+        "OpenCalc CJK TC Sans",
+        "OpenCalc CJK KR Sans",
+    ] {
+        assert!(stack.contains(face), "{face} missing from {stack}");
+    }
+}
+
+/// CJK text is measured at its real width — one em per ideograph, kana or
+/// hangul syllable — even before any CJK face has been loaded. Measured at zero
+/// a column of Japanese autofits to nothing and overflow never triggers.
+#[test]
+fn cjk_text_measures_one_em_per_character_before_its_face_loads() {
+    // Hangul is narrower than Han in the Korean faces: 0.92 em in the sans.
+    for (text, family, em) in [
+        ("日本語", Some("Calibri"), 1.0),
+        ("简体字", Some("Arial"), 1.0),
+        ("한국어", None, 0.92),
+        ("ひらがな", Some("游ゴシック"), 1.0),
+    ] {
+        let n = text.chars().count() as f32;
+        let got = advance_width(text, 16.0, false, false, family);
+        assert!(
+            (got - 16.0 * n * em).abs() < 0.01,
+            "{text} in {family:?}: {got}px, expected {}",
+            16.0 * n * em
+        );
+    }
+}

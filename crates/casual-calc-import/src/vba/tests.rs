@@ -807,9 +807,13 @@ pub(crate) fn xlsm_with(vba: &[u8]) -> Vec<u8> {
         ("xl/vbaProject.bin", vba),
     ];
     let mut zip = ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    // The host system is pinned: zip 9 otherwise stamps "version made by" with
+    // the platform the builder ran on (Unix here, DOS on Windows), and the
+    // committed fixtures must be the same bytes on every CI runner.
     let options = SimpleFileOptions::default()
         .compression_method(zip::CompressionMethod::Deflated)
-        .last_modified_time(zip::DateTime::default());
+        .last_modified_time(zip::DateTime::default())
+        .system(zip::System::Unix);
     for (name, bytes) in parts {
         zip.start_file(name, options).unwrap();
         zip.write_all(bytes).unwrap();

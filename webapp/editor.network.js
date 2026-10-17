@@ -37,7 +37,7 @@
 // never wider.
 
 import { NET_LIMITS, checkRequest, checkUrl } from "./macro.net-policy.js";
-import { byId, el, getCapabilities, status, wasm } from "./editor.core.js";
+import { byId, draw, el, getCapabilities, status, wasm } from "./editor.core.js";
 import { documentName } from "./editor.sheets.js";
 
 // ---- Host policy -------------------------------------------------------------
@@ -460,12 +460,22 @@ function answer(key, allowed) {
 /// the bar.
 function enableAll() {
   for (const key of [...order]) answer(key, true);
+  let functionsUnblocked = false;
   for (const [key, ask] of [...disabled]) {
     disabled.delete(key);
+    if (ask.kind !== "macro") functionsUnblocked = true;
     addGrant({ doc: ask.doc, site: ask.site, hash: ask.hash, kind: ask.kind, guid: ask.guid || "", who: ask.who, workbook: documentName() || "" });
   }
   closeNotice();
   renderBar();
+  // A custom function the person disabled answered #VALUE!, and that answer is
+  // cached under the key a fresh call would use. Excel's Enable Content
+  // refreshes what it unblocks, so ask every custom function again
+  // (`MACRO-19`); a macro is simply run again by the person.
+  if (functionsUnblocked) {
+    try { wasm.session_refresh_custom_functions(); } catch { /* an older engine: the next recalculation answers */ }
+    draw();
+  }
 }
 
 /// "The custom function PRICE", "The macro "Fetch rates"" — the asker, as the

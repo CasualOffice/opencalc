@@ -50,6 +50,7 @@ mod collab;
 mod custom;
 mod data;
 mod find;
+mod fonts;
 mod formula;
 mod history;
 mod io;
@@ -206,9 +207,17 @@ pub(crate) fn set_session(session: WorkbookSession) {
     let mut session = session;
     let (now, seed) = VOLATILE.with(core::cell::Cell::get);
     if now != 0.0 {
-        let wb = session.workbook_mut();
-        wb.volatile_now = now;
-        wb.volatile_seed = seed;
+        // Through the SDK, never `workbook_mut()`: the clock is configuration,
+        // and handing out the whole workbook to set it gave up the untouched
+        // original, so a file opened in the editor and saved with no edits was
+        // rewritten instead of returned byte for byte (`SAVE-14`). Only when it
+        // differs: a session the file worker opened already runs under this
+        // clock (`PERF-16`), and resetting it would repeat that recalculation
+        // here on the page's thread.
+        let environment = casual_calc_sdk::Environment { now, seed };
+        if session.config().environment != environment {
+            session.set_environment(environment);
+        }
     }
     if HOST_READ_ONLY.with(core::cell::Cell::get) {
         session.config_mut().read_only = true;

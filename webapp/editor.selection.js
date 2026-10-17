@@ -23,6 +23,8 @@ import {
   canvas,
   capabilityForbids,
   cellFont,
+  cjkFontsLoaded,
+  cjkFontsReady,
   cellPx,
   cellRef,
   colName,
@@ -96,6 +98,7 @@ import {
   wasm,
   wrap,
   holdBlock,
+  caretAnchor,
 } from "./editor.core.js";
 
 export function updateStats() {
@@ -259,6 +262,10 @@ export function refreshFormulaBar() {
   if (active === fInput || active === byId("tb-font") ||
       active === byId("tb-size")) return;
   fInput.value = wasm.session_cell_input(state.sheet, state.sel.row, state.sel.col);
+  // Not being edited, the bar shows a value from its first line — collapsed,
+  // that is the only line it shows, as in Excel. A textarea keeps
+  // the scroll an earlier edit left it with, which would show a later line.
+  fInput.scrollTop = 0;
   // Name what each will do, rather than leaving "Undo" to mean anything. The
   // label is the engine's, so it always matches the operation on the stack.
   for (const [id, can, label, verb, key] of [
@@ -724,8 +731,12 @@ export function allRanges() {
   return state.ranges.concat([effectiveRange()]);
 }
 
-export function autofitColumn(col) {
+export function autofitColumn(col, again = false) {
   const b = usedBounds();
+  // Text whose CJK face is still downloading is measured with a stand-in
+  // face. Collected, so the column is fitted again once the real face is in
+  // (`XL-FEAT-140`) — without that an early autofit is a permanent mis-fit.
+  const pending = [];
   const items = JSON.parse(wasm.session_cells(state.sheet, 0, col, b.rows - 1, col));
   // Read fresh rather than trusting `sheetMerges`, which is refreshed on draw:
   // autofit can run against a sheet edited since the last one.
@@ -742,6 +753,7 @@ export function autofitColumn(col) {
     // apportion them.
     if (spansColumns(it.r)) continue;
     ctx.font = cellFont(it);
+    if (!again && !cjkFontsReady(ctx.font, String(it.t))) pending.push([ctx.font, String(it.t)]);
     const flat = ctx.measureText(String(it.t)).width;
     // Rotated text needs *less* width, not more: what the column has to hold is
     // the run projected onto the horizontal axis. Sizing to the flat width
@@ -765,6 +777,25 @@ export function autofitColumn(col) {
   try { wasm.session_set_col_width(state.sheet, col, Math.ceil(maxw) + 14); }
   catch (e) { statusError(errText(e)); }
   draw();
+  if (pending.length) {
+    // Fit again when the faces arrive — but only if nothing has touched the
+    // column since: a width the user dragged in the meantime is theirs.
+    const sheet = state.sheet;
+    const set = wasm.session_col_width(sheet, col);
+    autofitPending.add(sheet + ":" + col);
+    void Promise.all(pending.map(([font, text]) => cjkFontsLoaded(font, text))).then(() => {
+      autofitPending.delete(sheet + ":" + col);
+      if (state.sheet === sheet && wasm.session_col_width(sheet, col) === set) autofitColumn(col, true);
+    });
+  }
+}
+
+/// Columns whose autofit is waiting on a CJK face, for the browser gate.
+const autofitPending = new Set();
+
+/// Whether an autofit is still waiting on a font to re-measure.
+export function autofitPendingForTest() {
+  return autofitPending.size;
 }
 
 /// Columns this editor widened on entry, as `"sheet:col"` → the width it set.
@@ -1784,11 +1815,15 @@ export function renderAutocomplete() {
   // sits over the canvas, the formula bar above it, so this is measured in
   // viewport coordinates (the menu is position: fixed) rather than as an offset
   // inside the grid wrapper.
-  const r = (editSurface ?? inline).getBoundingClientRect();
+  //
+  // In the formula bar it opens under the caret's line, at the start of the
+  // word being completed: expanded, the bar is several lines
+  // tall and its bottom-left corner can be far from what is being typed.
+  const a = caretAnchor(editSurface, acState.start);
   acEl.hidden = false;
   const width = acEl.offsetWidth;
-  acEl.style.left = Math.max(4, Math.min(r.left, window.innerWidth - 4 - width)) + "px";
-  acEl.style.top = r.bottom + 2 + "px";
+  acEl.style.left = Math.max(4, Math.min(a.left, window.innerWidth - 4 - width)) + "px";
+  acEl.style.top = a.top + 2 + "px";
 }
 
 export function callAtCaret() {
@@ -1815,7 +1850,8 @@ export function callAtCaret() {
     if (c === "(") {
       // The word immediately before the paren, if any, names the call.
       const name = /([A-Za-z][A-Za-z0-9.]*)$/.exec(upto.slice(0, i));
-      stack.push({ name: name ? name[1].toUpperCase() : null, arg: 0 });
+      // `at` is where the name starts, which is where its hint is anchored.
+      stack.push({ name: name ? name[1].toUpperCase() : null, arg: 0, at: name ? i - name[1].length : i });
     } else if (c === ")") {
       stack.pop();
     } else if (c === "," && stack.length) {

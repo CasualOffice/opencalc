@@ -47,8 +47,11 @@ Consequences the design accounts for from the start:
 > `'My Sheet'!B2`), cell ranges, defined names, function calls, unary `+`/`-`/`%`,
 > and binary arithmetic/comparison/concat with correct precedence and
 > right-associative `^`. `parse(print(e)) == e` is gated. Import parses `<f>`
-> into the AST and stores it in the model's arena. Deferred: R1C1, full row/column
-> ranges (`A:A`), 3-D refs, structured (table) references, union/intersection.
+> into the AST and stores it in the model's arena. Since added: whole columns and
+> rows (`A:A`, `1:1`), structured (table) references, array constants, `A1#`
+> and `@`, and 3-D references — the last four in
+> [102](102-FORMULA-GRAMMAR-EXTENSIONS.md). Deferred: R1C1 and the
+> union/intersection operators.
 
 ### Tokenizer & parser
 

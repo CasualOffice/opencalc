@@ -2822,6 +2822,102 @@ fn a_new_error_value_is_a_protocol_change() {
     );
 }
 
+/// **A formula crosses the wire as its tree, so a new `Expr` variant is a
+/// protocol change** (`XL-FEAT-014`, `XL-FEAT-017`). `WireOperation` carries
+/// every formula an operation refers to by value, and `Expr` is a plain
+/// externally-tagged enum: a peer that has never heard of a tag refuses the
+/// whole batch. The tag set is pinned against the version that introduced it,
+/// and `tag` is an exhaustive match so a new variant does not compile until it
+/// is listed here — which is when this test asks for the bump.
+#[test]
+fn a_new_formula_variant_is_a_protocol_change() {
+    use casual_calc_formula::Expr;
+    fn tag(e: &Expr) -> &'static str {
+        match e {
+            Expr::Number(_) => "number",
+            Expr::Bool(_) => "bool",
+            Expr::Text(_) => "text",
+            Expr::Error(_) => "error",
+            Expr::Reference(_) => "reference",
+            Expr::Range(..) => "range",
+            Expr::Name(_) => "name",
+            Expr::Call { .. } => "call",
+            Expr::Empty => "empty",
+            Expr::Raw(_) => "raw",
+            Expr::StructuredRef { .. } => "structuredRef",
+            Expr::Unary { .. } => "unary",
+            Expr::Binary { .. } => "binary",
+            Expr::Function { .. } => "function",
+            Expr::Array(_) => "array",
+            Expr::Reference3d(_) => "reference3d",
+        }
+    }
+    let parsed = |text: &str| casual_calc_formula::parse(text).expect("parses");
+    let samples = [
+        parsed("1"),
+        parsed("TRUE"),
+        parsed("\"a\""),
+        parsed("#N/A"),
+        parsed("A1"),
+        parsed("A1:B2"),
+        parsed("Rate"),
+        parsed("LAMBDA(x,x)(1)"),
+        Expr::Empty,
+        Expr::Raw("Sheet1!$1:".to_owned()),
+        parsed("Sales[Amount]"),
+        parsed("-A1"),
+        parsed("1+1"),
+        parsed("SUM(1)"),
+        parsed("{1,2;3,4}"),
+        parsed("Sheet1:Sheet3!A1"),
+    ];
+    let mut tags: Vec<&str> = Vec::new();
+    for expr in &samples {
+        let wire = serde_json::to_value(expr).expect("serialises");
+        let on_wire = match &wire {
+            serde_json::Value::String(s) => s.clone(),
+            serde_json::Value::Object(map) => map.keys().next().expect("one tag").clone(),
+            other => panic!("unexpected encoding {other}"),
+        };
+        assert_eq!(on_wire, tag(expr), "the wire tag of {expr:?}");
+        tags.push(tag(expr));
+    }
+    tags.sort_unstable();
+    tags.dedup();
+    assert_eq!(
+        tags,
+        [
+            "array",
+            "binary",
+            "bool",
+            "call",
+            "empty",
+            "error",
+            "function",
+            "name",
+            "number",
+            "range",
+            "raw",
+            "reference",
+            "reference3d",
+            "structuredRef",
+            "text",
+            "unary"
+        ],
+        "the formula variants that cross the wire have changed: move PROTOCOL_VERSION \
+         (currently {}) and update this list.",
+        crate::protocol::PROTOCOL_VERSION,
+    );
+    #[allow(clippy::assertions_on_constants)]
+    let moved = crate::protocol::PROTOCOL_VERSION > 11;
+    assert!(
+        moved,
+        "Expr gained `array` and `reference3d`, tags a protocol-11 peer cannot read. Move PROTOCOL_VERSION \
+         (currently {}) so the mismatch is refused at the handshake.",
+        crate::protocol::PROTOCOL_VERSION,
+    );
+}
+
 /// `SetMacros` applies, inverts to the previous library (so undo travels as an
 /// ordinary edit), and crosses the wire whole.
 #[test]
@@ -4552,6 +4648,141 @@ fn a_whole_column_reference_follows_a_column_move_and_ignores_a_row_move() {
     )
     .unwrap();
     assert_eq!(formula_text(&wb, 0, 4, 7).as_deref(), Some("SUM(D:D)"));
+}
+
+/// 3-D references across sheet edits (XL-FEAT-017), Microsoft's rules for each
+/// ("Create a 3-D reference to the same cell range on multiple worksheets"):
+/// a sheet deleted between the endpoints leaves the text alone (it is resolved
+/// by position); an endpoint deleted moves one sheet inward, and undo puts it
+/// back; a renamed endpoint is followed; a row edit on one sheet does not move
+/// the reference on all of them.
+#[test]
+fn three_d_references_follow_sheet_edits_as_excel_does() {
+    let mut wb = workbook();
+    for (i, name) in ["Jan", "Feb", "Mar", "Apr"].iter().enumerate() {
+        wb.sheets
+            .push(Sheet::new(SheetId(Id::from_parts(10 + i as u64, 1)), *name));
+    }
+    set_formula(&mut wb, 0, 0, 0, "SUM(Jan:Mar!B5)");
+    let text = |wb: &Workbook| formula_text(wb, 0, 0, 0);
+
+    apply(&mut wb, Operation::RemoveSheet { index: 2 }).unwrap(); // Feb
+    assert_eq!(text(&wb).as_deref(), Some("SUM(Jan:Mar!B5)"));
+
+    let undo = apply(&mut wb, Operation::RemoveSheet { index: 1 }).unwrap(); // Jan
+    // Narrowed to one sheet, it is that sheet's plain reference.
+    assert_eq!(text(&wb).as_deref(), Some("SUM(Mar!B5)"));
+    apply(&mut wb, undo).unwrap();
+    assert_eq!(text(&wb).as_deref(), Some("SUM(Jan:Mar!B5)"));
+    assert_eq!(wb.sheets[1].name, "Jan");
+
+    apply(
+        &mut wb,
+        Operation::RenameSheet {
+            index: 2,
+            name: "March".to_owned(),
+        },
+    )
+    .unwrap();
+    assert_eq!(text(&wb).as_deref(), Some("SUM(Jan:March!B5)"));
+
+    apply(
+        &mut wb,
+        Operation::InsertRows {
+            sheet: 1,
+            at: 0,
+            count: 3,
+        },
+    )
+    .unwrap();
+    assert_eq!(text(&wb).as_deref(), Some("SUM(Jan:March!B5)"));
+
+    // Down to one sheet it is a plain reference, and deleting that sheet is
+    // what deleting any referenced sheet is: the name stays, and reads #REF!.
+    apply(&mut wb, Operation::RemoveSheet { index: 2 }).unwrap(); // March
+    assert_eq!(text(&wb).as_deref(), Some("SUM(Jan!B5)"));
+    apply(&mut wb, Operation::RemoveSheet { index: 1 }).unwrap(); // Jan
+    assert_eq!(text(&wb).as_deref(), Some("SUM(Jan!B5)"));
+}
+
+/// `B2#` and `@B2:B9` are calls in the tree (`ANCHORARRAY`, `SINGLE`), so they
+/// shift as their operands do (XL-FEAT-015); a deleted anchor is `#REF!`, as
+/// Excel shows it, rather than a call nobody wrote.
+#[test]
+fn spill_and_intersection_operators_shift_with_their_operands() {
+    let mut wb = lettered_columns();
+    set_formula(&mut wb, 0, 9, 7, "SUM(B2#)+@B2:B9");
+    apply(
+        &mut wb,
+        Operation::InsertRows {
+            sheet: 0,
+            at: 0,
+            count: 1,
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        formula_text(&wb, 0, 10, 7).as_deref(),
+        Some("SUM(B3#)+@B3:B10")
+    );
+    apply(
+        &mut wb,
+        Operation::DeleteColumns {
+            sheet: 0,
+            at: 1,
+            count: 1,
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        formula_text(&wb, 0, 10, 6).as_deref(),
+        Some("SUM(#REF!)+@#REF!")
+    );
+}
+
+/// The row twin of the test above (XL-FEAT-016): `3:3` follows rows inserted
+/// above it, ignores columns, and is `#REF!` once its row is deleted — what
+/// Excel does with `=SUM(3:3)`.
+#[test]
+fn a_whole_row_reference_shifts_with_rows_and_ignores_columns() {
+    let mut wb = lettered_columns();
+    set_formula(&mut wb, 0, 9, 7, "SUM(3:3)+SUM($4:$5)");
+    let insert_rows = |at| Operation::InsertRows {
+        sheet: 0,
+        at,
+        count: 2,
+    };
+    apply(&mut wb, insert_rows(0)).unwrap();
+    assert_eq!(
+        formula_text(&wb, 0, 11, 7).as_deref(),
+        Some("SUM(5:5)+SUM($6:$7)")
+    );
+    apply(
+        &mut wb,
+        Operation::InsertColumns {
+            sheet: 0,
+            at: 0,
+            count: 3,
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        formula_text(&wb, 0, 11, 10).as_deref(),
+        Some("SUM(5:5)+SUM($6:$7)")
+    );
+    apply(
+        &mut wb,
+        Operation::DeleteRows {
+            sheet: 0,
+            at: 4,
+            count: 1,
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        formula_text(&wb, 0, 10, 10).as_deref(),
+        Some("SUM(#REF!)+SUM($5:$6)")
+    );
 }
 
 // ---------------------------------------------------------------------------
