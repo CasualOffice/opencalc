@@ -118,7 +118,8 @@ test("the last sheet is refused, and is refused before the question", async ({ p
   // Asking and *then* failing would be a dialog talking somebody into a click
   // that cannot work.
   await expect(page.locator("#oc-modal")).toBeHidden();
-  await expect(page.locator("#tb-status")).toHaveText(/cannot delete the last sheet/);
+  // Excel's message box, in Excel's words (XL-UX-174), not a status line.
+  await expect(page.locator("#oc-msgbox-text")).toHaveText(/^A workbook must contain at least one visible worksheet\./);
   expect(await sheets(page)).toHaveLength(1);
 });
 

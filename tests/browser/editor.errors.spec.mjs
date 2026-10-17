@@ -52,8 +52,9 @@ test("the Delete key says why a protected sheet refused it", async ({ page }) =>
   await page.locator("#grid").focus();
   await page.keyboard.press("Delete");
 
-  await expect(statusErr(page), "the refusal is on the status bar").toHaveText(
-    /protect/i,
+  // Said in Excel's message box since XL-UX-174, not on the status bar.
+  await expect(page.locator("#oc-msgbox-text"), "the refusal is said").toHaveText(
+    /on a protected sheet/,
   );
   expect(
     (await page.locator("#a11y-1-3").textContent())?.trim(),

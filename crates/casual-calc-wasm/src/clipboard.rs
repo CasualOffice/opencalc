@@ -370,18 +370,29 @@ pub fn session_sort_range(
 #[wasm_bindgen]
 pub fn session_copy_html(sheet: usize, r0: u32, c0: u32, r1: u32, c1: u32) -> String {
     with_session(|s| {
-        let wb = s.workbook();
+        let (rows, cols) = copied_axes(s, sheet, r0, c0, r1, c1);
+        html_of(s.workbook(), sheet, &rows, &cols)
+    })
+    .unwrap_or_default()
+}
+
+/// [`session_copy_html`] over exactly the rows and columns given; see
+/// [`session_copy_tsv_grid`].
+#[wasm_bindgen]
+#[must_use]
+pub fn session_copy_html_grid(sheet: usize, rows: Vec<u32>, cols: Vec<u32>) -> String {
+    with_session(|s| html_of(s.workbook(), sheet, &sorted(rows), &sorted(cols))).unwrap_or_default()
+}
+
+fn html_of(wb: &Workbook, sheet: usize, rows: &[u32], cols: &[u32]) -> String {
+    {
         let Some(sh) = wb.sheets.get(sheet) else {
             return String::new();
         };
-        let vis_cols: Vec<u32> = (c0..=c1).filter(|c| !sh.hidden_cols.contains(c)).collect();
         let mut out = String::from("<table>");
-        for r in r0..=r1 {
-            if sh.is_row_hidden(r) {
-                continue; // visible cells only
-            }
+        for &r in rows {
             out.push_str("<tr>");
-            for &c in &vis_cols {
+            for &c in cols {
                 let cell = sh.cells.get(CellRef::new(r, c));
                 let text = cell.map(|cl| display_text(wb, cl)).unwrap_or_default();
                 let css = cell
@@ -401,8 +412,7 @@ pub fn session_copy_html(sheet: usize, r0: u32, c0: u32, r1: u32, c1: u32) -> St
         }
         out.push_str("</table>");
         out
-    })
-    .unwrap_or_default()
+    }
 }
 
 /// Inline CSS for one cell's style, for the HTML clipboard payload.
@@ -840,26 +850,20 @@ thread_local! {
     static CLIP: RefCell<Option<Clip>> = const { RefCell::new(None) };
 }
 
-/// Snapshot a range onto the internal clipboard (value + style + formula AST).
-/// `cut` marks the source to be cleared on the next paste. The OS clipboard TSV
-/// is produced separately by [`session_copy_tsv`].
-/// Capture the **visible** cells of a range onto clipboard cells: hidden rows
-/// and columns are skipped and the survivors compressed to contiguous offsets,
-/// so a paste reproduces them with no gaps (the Excel/Sheets default). Pure so
-/// it can be unit-tested without a session.
+/// Capture the cells at `rows × cols` onto clipboard cells, compressed to
+/// contiguous offsets so a paste reproduces them with no gaps. Which rows and
+/// columns a copy takes is decided by the caller — `copied_axes` for a
+/// range, the host for a multi-area grid. Pure so it can be unit-tested
+/// without a session.
 pub(crate) fn clip_capture(
     wb: &Workbook,
     sh: &casual_calc_model::Sheet,
-    r0: u32,
-    c0: u32,
-    r1: u32,
-    c1: u32,
+    rows: &[u32],
+    cols: &[u32],
 ) -> Vec<ClipCell> {
-    let vis_rows: Vec<u32> = (r0..=r1).filter(|r| !sh.is_row_hidden(*r)).collect();
-    let vis_cols: Vec<u32> = (c0..=c1).filter(|c| !sh.hidden_cols.contains(c)).collect();
     let mut cells = Vec::new();
-    for (dr, &r) in vis_rows.iter().enumerate() {
-        for (dc, &c) in vis_cols.iter().enumerate() {
+    for (dr, &r) in rows.iter().enumerate() {
+        for (dc, &c) in cols.iter().enumerate() {
             if let Some(cell) = sh.cells.get(CellRef::new(r, c)) {
                 let formula = cell.formula.and_then(|h| wb.formula(h)).cloned();
                 cells.push(ClipCell {
@@ -876,33 +880,52 @@ pub(crate) fn clip_capture(
     cells
 }
 
+/// Put `rows × cols` of `sheet` on the internal clipboard.
+fn clip_store(s: &WorkbookSession, sheet: usize, rows: &[u32], cols: &[u32], cut: bool) {
+    let wb = s.workbook();
+    let Some(sh) = wb.sheets.get(sheet) else {
+        return;
+    };
+    let cells = clip_capture(wb, sh, rows, cols);
+    let widths = cols
+        .iter()
+        .enumerate()
+        .filter_map(|(offset, c)| {
+            sh.columns
+                .sizes
+                .get(c)
+                .map(|w| (u32::try_from(offset).unwrap_or(0), *w))
+        })
+        .collect();
+    CLIP.with(|cl| {
+        *cl.borrow_mut() = Some(Clip {
+            sheet,
+            cut,
+            cells,
+            widths,
+        });
+    });
+}
+
+/// Snapshot a range onto the internal clipboard (value + style + formula AST).
+/// `cut` marks the source to be cleared on the next paste. The OS clipboard TSV
+/// is produced separately by [`session_copy_tsv`]. Which rows and columns go is
+/// `copied_axes`'s answer (rows a filter hides are left out, rows and
+/// columns hidden by hand are not — XL-UX-176).
 #[wasm_bindgen]
 pub fn session_clip_copy(sheet: usize, r0: u32, c0: u32, r1: u32, c1: u32, cut: bool) {
     let _ = with_session(|s| {
-        let wb = s.workbook();
-        let Some(sh) = wb.sheets.get(sheet) else {
-            return;
-        };
-        let cells = clip_capture(wb, sh, r0, c0, r1, c1);
-        let widths = (c0..=c1)
-            .filter(|c| !sh.hidden_cols.contains(c))
-            .enumerate()
-            .filter_map(|(offset, c)| {
-                sh.columns
-                    .sizes
-                    .get(&c)
-                    .map(|w| (u32::try_from(offset).unwrap_or(0), *w))
-            })
-            .collect();
-        CLIP.with(|cl| {
-            *cl.borrow_mut() = Some(Clip {
-                sheet,
-                cut,
-                cells,
-                widths,
-            });
-        });
+        let (rows, cols) = copied_axes(s, sheet, r0, c0, r1, c1);
+        clip_store(s, sheet, &rows, &cols, cut);
     });
+}
+
+/// Snapshot exactly `rows × cols` — a multi-area selection whose areas form
+/// one grid, as Go To Special ▸ Visible cells only leaves. Copy only: Excel
+/// refuses to cut a multiple selection, and so does the host.
+#[wasm_bindgen]
+pub fn session_clip_copy_grid(sheet: usize, rows: Vec<u32>, cols: Vec<u32>) {
+    let _ = with_session(|s| clip_store(s, sheet, &sorted(rows), &sorted(cols), false));
 }
 
 /// Whether the internal clipboard currently holds a snapshot.

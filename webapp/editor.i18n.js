@@ -199,7 +199,18 @@ export function errText(e) {
   return String((e && e.message) || e).replace(/^Error:\s*/, "");
 }
 
+/// A refusal Excel answers with a message box rather than a line of text is
+/// raised by this hook instead of being painted (XL-UX-174). Registered by
+/// `editor.dialogs.js`, which owns the box; returns `true` when it took it.
+// `var` with no initializer, on purpose: `editor.dialogs.js` registers the
+// hook while its module evaluates, which an import cycle can run before this
+// module's own body — a `let` would throw there, and an initializer would
+// reset the hook afterwards.
+var statusAlert; // eslint-disable-line no-var
+export function setStatusAlert(fn) { statusAlert = fn; }
+
 export function statusError(text) {
+  if (statusAlert && statusAlert(text)) return;
   status.textContent = "";
   const span = document.createElement("span");
   span.className = "err";
