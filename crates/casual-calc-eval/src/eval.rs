@@ -407,11 +407,7 @@ impl<'a> Evaluator<'a> {
             Expr::Function { name, args }
                 if args.iter().any(|a| matches!(a, Expr::Reference3d(_))) =>
             {
-                if !accepts_3d(name) {
-                    return Value::Error(ErrorValue::Value);
-                }
-                let expanded = self.expand_3d(args);
-                call_function(self, sheet_index, name, &expanded)
+                self.call_3d(sheet_index, name, args)
             }
             Expr::Function { name, args } => {
                 // A defined name bound to a LAMBDA is called like a builtin,
@@ -441,6 +437,7 @@ impl<'a> Evaluator<'a> {
     /// where no parser has seen it — so the shape and the size are checked
     /// again here rather than trusted. A malformed one is `#VALUE!`, an
     /// oversized one `#NUM!`, the evaluator's answer for any array too big.
+    #[inline(never)]
     fn array_constant(&mut self, sheet_index: usize, rows: &[Vec<Expr>]) -> Value {
         let cols = rows.first().map_or(0, Vec::len);
         if cols == 0 || rows.iter().any(|row| row.len() != cols) {
@@ -478,6 +475,19 @@ impl<'a> Evaluator<'a> {
     /// The span is resolved by position here, at evaluation, so a sheet
     /// inserted or moved between the endpoints is in it and one moved out is
     /// not. An endpoint that names no sheet is `#REF!`.
+    /// A call with a 3-D reference among its arguments. Out of line, like the
+    /// other new arms of `eval_expr_inner`, which is the evaluator's recursive
+    /// frame.
+    #[inline(never)]
+    fn call_3d(&mut self, sheet_index: usize, name: &str, args: &[Expr]) -> Value {
+        if !accepts_3d(name) {
+            return Value::Error(ErrorValue::Value);
+        }
+        let expanded = self.expand_3d(args);
+        call_function(self, sheet_index, name, &expanded)
+    }
+
+    #[inline(never)]
     fn expand_3d(&self, args: &[Expr]) -> Vec<Expr> {
         let mut out = Vec::with_capacity(args.len());
         for arg in args {
@@ -541,6 +551,7 @@ impl<'a> Evaluator<'a> {
     /// into: those are written *after* evaluation, so reading them would see
     /// the previous pass's spill whenever the anchor has just changed. A cell
     /// that does not spill has no spill range, and Excel answers `#REF!`.
+    #[inline(never)]
     fn eval_anchor_array(&mut self, sheet_index: usize, args: &[Expr]) -> Value {
         let [arg] = args else {
             return Value::Error(ErrorValue::Value);
@@ -558,6 +569,7 @@ impl<'a> Evaluator<'a> {
     /// itself; a range gives the cell in line with the formula — its row for a
     /// one-column range, its column for a one-row range, both for a block —
     /// and `#VALUE!` when there is none; an array gives its top-left value.
+    #[inline(never)]
     fn eval_single(&mut self, sheet_index: usize, args: &[Expr]) -> Value {
         let [arg] = args else {
             return Value::Error(ErrorValue::Value);

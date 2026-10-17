@@ -147,42 +147,16 @@ impl fmt::Display for Expr {
 }
 
 impl fmt::Display for At<'_> {
+    /// The frame that recurses. A 512-term `1+1+…` chain is 512 of these
+    /// deep, measured on a one-megabyte stack (`MAX_CHAIN`), and in a debug
+    /// build a frame holds the slots of **every** arm, taken or not. So only the
+    /// operators — the arms that recurse — are written here; every other
+    /// expression is written by [`write_operand`], out of line. Adding the
+    /// grammar extensions' arms here overflowed that stack on Rust 1.88 (CI's
+    /// MSRV job) while 1.96 passed.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let origin = self.1;
         match self.0 {
-            Expr::Number(n) => write!(f, "{n}"),
-            Expr::Bool(b) => f.write_str(if *b { "TRUE" } else { "FALSE" }),
-            Expr::Text(s) => write_string_literal(f, s),
-            Expr::Error(s) => f.write_str(s),
-            Expr::Reference(r) => write_ref(f, r, origin),
-            Expr::Range(a, b) => {
-                write_ref(f, a, origin)?;
-                f.write_str(":")?;
-                write_ref(f, b, origin)
-            }
-            Expr::Reference3d(r) => write_3d(f, r, origin),
-            // Verbatim: the point of keeping it is that it goes back out
-            // exactly as it came in.
-            Expr::Raw(text) => write!(f, "{text}"),
-            // Prints as nothing, which is exactly how it was written.
-            Expr::Empty => Ok(()),
-            Expr::Call { callee, args } => {
-                write!(f, "{}(", At(callee, origin))?;
-                for (i, a) in args.iter().enumerate() {
-                    if i > 0 {
-                        f.write_str(",")?;
-                    }
-                    write!(f, "{}", At(a, origin))?;
-                }
-                f.write_str(")")
-            }
-            Expr::Name(name) => f.write_str(name),
-            Expr::StructuredRef { table, spec } => {
-                if let Some(table) = table {
-                    f.write_str(table)?;
-                }
-                write!(f, "[{spec}]")
-            }
             Expr::Unary { op, operand } => match op {
                 // The operand was parsed at `PREFIX_BP`, so anything binding
                 // looser than that — every binary operator — would be cut short
@@ -209,45 +183,76 @@ impl fmt::Display for At<'_> {
                 f.write_str(binary_symbol(*op))?;
                 write_child(f, right, origin, bp(right).0 < rbp)
             }
-            // Separators as Excel writes them, in the file and the formula bar.
-            Expr::Array(rows) => write_array(f, rows, origin),
-            // `A1#` and `@x` are function calls in the tree, because that is how
-            // the file stores them, and operators on screen, because that is how
-            // Excel shows them. Only the shapes the parser builds print as
-            // operators; anything else falls through and prints as the call.
-            Expr::Function { name, args }
-                if name == crate::parse::ANCHORARRAY && spill_anchor(args) =>
-            {
-                // An anchor read off the sheet from here is `#REF!`, and so is
-                // the spill: `#REF!#` is not a formula anything can read back.
-                if let Expr::Reference(r) = &args[0]
-                    && r.at(origin).is_none()
-                {
-                    return f.write_str("#REF!");
-                }
-                write!(f, "{}#", At(&args[0], origin))
-            }
-            Expr::Function { name, args } if name == crate::parse::SINGLE && args.len() == 1 => {
-                f.write_str("@")?;
-                // The parser reads a primary after `@`; anything that is not
-                // one keeps its brackets — another `@` included, since
-                // `@@x` does not parse and `@(@x)` does (found by fuzzing).
-                let nested = matches!(&args[0], Expr::Function { name, args }
-                    if name == crate::parse::SINGLE && args.len() == 1);
-                write_child(f, &args[0], origin, nested || bp(&args[0]).0 < ATOM_BP)
-            }
-            Expr::Function { name, args } => {
-                f.write_str(name)?;
-                f.write_str("(")?;
-                for (i, arg) in args.iter().enumerate() {
-                    if i > 0 {
-                        f.write_str(",")?;
-                    }
-                    write!(f, "{}", At(arg, origin))?;
-                }
-                f.write_str(")")
-            }
+            other => write_operand(f, other, origin),
         }
+    }
+}
+
+/// Everything but an operator: literals, references, calls. See
+/// [`At::fmt`] for why this is a separate frame.
+#[inline(never)]
+fn write_operand(f: &mut fmt::Formatter<'_>, expr: &Expr, origin: Origin) -> fmt::Result {
+    match expr {
+        Expr::Number(n) => write!(f, "{n}"),
+        Expr::Bool(b) => f.write_str(if *b { "TRUE" } else { "FALSE" }),
+        Expr::Text(s) => write_string_literal(f, s),
+        Expr::Error(s) => f.write_str(s),
+        Expr::Reference(r) => write_ref(f, r, origin),
+        Expr::Range(a, b) => {
+            write_ref(f, a, origin)?;
+            f.write_str(":")?;
+            write_ref(f, b, origin)
+        }
+        Expr::Reference3d(r) => write_3d(f, r, origin),
+        // Verbatim: the point of keeping it is that it goes back out
+        // exactly as it came in.
+        Expr::Raw(text) => write!(f, "{text}"),
+        // Prints as nothing, which is exactly how it was written.
+        Expr::Empty => Ok(()),
+        Expr::Call { callee, args } => {
+            write!(f, "{}(", At(callee, origin))?;
+            for (i, a) in args.iter().enumerate() {
+                if i > 0 {
+                    f.write_str(",")?;
+                }
+                write!(f, "{}", At(a, origin))?;
+            }
+            f.write_str(")")
+        }
+        Expr::Name(name) => f.write_str(name),
+        Expr::StructuredRef { table, spec } => {
+            if let Some(table) = table {
+                f.write_str(table)?;
+            }
+            write!(f, "[{spec}]")
+        }
+        // Separators as Excel writes them, in the file and the formula bar.
+        Expr::Array(rows) => write_array(f, rows, origin),
+        // `A1#` and `@x` are function calls in the tree, because that is how
+        // the file stores them, and operators on screen, because that is how
+        // Excel shows them. Only the shapes the parser builds print as
+        // operators; anything else falls through and prints as the call.
+        // Written out of line, like the array and 3-D writers below.
+        Expr::Function { name, args }
+            if name == crate::parse::ANCHORARRAY && spill_anchor(args) =>
+        {
+            write_spill(f, &args[0], origin)
+        }
+        Expr::Function { name, args } if name == crate::parse::SINGLE && args.len() == 1 => {
+            write_intersection(f, &args[0], origin)
+        }
+        Expr::Function { name, args } => {
+            f.write_str(name)?;
+            f.write_str("(")?;
+            for (i, arg) in args.iter().enumerate() {
+                if i > 0 {
+                    f.write_str(",")?;
+                }
+                write!(f, "{}", At(arg, origin))?;
+            }
+            f.write_str(")")
+        }
+        Expr::Unary { .. } | Expr::Binary { .. } => write!(f, "{}", At(expr, origin)),
     }
 }
 
@@ -307,6 +312,29 @@ fn write_3d(
         write_ref(f, end, origin)?;
     }
     Ok(())
+}
+
+/// `A1#`. An anchor read off the sheet from here is `#REF!`, and so is the
+/// spill: `#REF!#` is not a formula anything can read back.
+#[inline(never)]
+fn write_spill(f: &mut fmt::Formatter<'_>, anchor: &Expr, origin: Origin) -> fmt::Result {
+    if let Expr::Reference(r) = anchor
+        && r.at(origin).is_none()
+    {
+        return f.write_str("#REF!");
+    }
+    write!(f, "{}#", At(anchor, origin))
+}
+
+/// `@x`. The parser reads a primary after `@`; anything that is not one keeps
+/// its brackets — another `@` included, since `@@x` does not parse and
+/// `@(@x)` does (found by fuzzing).
+#[inline(never)]
+fn write_intersection(f: &mut fmt::Formatter<'_>, operand: &Expr, origin: Origin) -> fmt::Result {
+    f.write_str("@")?;
+    let nested = matches!(operand, Expr::Function { name, args }
+        if name == crate::parse::SINGLE && args.len() == 1);
+    write_child(f, operand, origin, nested || bp(operand).0 < ATOM_BP)
 }
 
 /// Whether `ANCHORARRAY(args)` is one the parser builds from `x#` — one single

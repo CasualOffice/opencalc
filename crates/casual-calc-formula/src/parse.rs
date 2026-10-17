@@ -204,43 +204,15 @@ impl Parser {
                     operand: Box::new(operand),
                 })
             }
-            // `@A1:A5`, `@SUM(…)`: implicit intersection of the operand that
-            // follows, stored — as Excel stores it — as `SINGLE(…)`. It takes
-            // a primary (with its `%` and `#`), never a prefixed expression,
-            // so `@@A1` and `@-A1` are refused and the recursion is bounded.
-            Some(Token::At) => {
-                self.advance();
-                let operand = self.parse_postfix()?;
-                Ok(Expr::Function {
-                    name: SINGLE.to_owned(),
-                    args: vec![operand],
-                })
-            }
+            Some(Token::At) => self.parse_intersection(),
             _ => self.parse_postfix(),
         }
     }
 
     fn parse_postfix(&mut self) -> Result<Expr, FormulaError> {
         let mut expr = self.parse_primary()?;
-        // `A1#`: the range the anchor spills into, stored — as Excel stores it
-        // — as `ANCHORARRAY(A1)`. Only a single cell or a name can anchor a
-        // spill; `A1:B2#` and `SUM(A1)#` are not references Excel accepts.
         if self.peek() == Some(&Token::Hash) {
-            let anchors = match &expr {
-                Expr::Reference(r) => !r.row_implicit && !r.col_implicit,
-                Expr::Name(_) => true,
-                _ => false,
-            };
-            if !anchors {
-                return Err(FormulaError::UnexpectedToken(
-                    "# after something that is not a cell or a name".to_owned(),
-                ));
-            }
-            self.advance();
-            expr = Expr::Function {
-                name: ANCHORARRAY.to_owned(),
-                args: vec![expr],
-            };
+            expr = self.spill_of(expr)?;
         }
         while self.peek() == Some(&Token::Percent) {
             self.advance();
@@ -263,21 +235,7 @@ impl Parser {
                 self.expect(&Token::RParen)?;
                 Ok(expr)
             }
-            Some(Token::QuotedSheet(name)) => {
-                self.expect(&Token::Bang)?;
-                // `'Jan 2026:Dec 2026'!B5` — a colon cannot be part of a sheet
-                // name (Excel forbids it), so one inside the quotes is the 3-D
-                // span, written as one quoted pair.
-                if let Some((first, last)) = name.split_once(':') {
-                    if first.is_empty() || last.is_empty() {
-                        return Err(FormulaError::InvalidReference(name));
-                    }
-                    return self.parse_3d(first.to_owned(), last.to_owned());
-                }
-                let word = self.expect_word()?;
-                let reference = self.reference_or_axis(&word, Some(name))?;
-                self.maybe_range(reference)
-            }
+            Some(Token::QuotedSheet(name)) => self.parse_quoted_sheet(name),
             // A bare `[Amount]`, which is how a formula inside the table
             // refers to its own columns.
             Some(Token::Brackets(spec)) => Ok(Expr::StructuredRef { table: None, spec }),
@@ -298,12 +256,7 @@ impl Parser {
             && self.tokens.get(self.pos + 2) == Some(&Token::Bang)
             && !crate::reference::sheet_name_needs_quoting(&word)
         {
-            self.advance();
-            let Some(Token::Word(last)) = self.advance() else {
-                unreachable!("peeked a word")
-            };
-            self.advance();
-            return self.parse_3d(word, last);
+            return self.parse_3d_after(word);
         }
         match self.peek() {
             Some(Token::LParen) => {
@@ -349,8 +302,82 @@ impl Parser {
         }
     }
 
+    // The constructs below are parsed **out of line** on purpose. The parser
+    // recurses through `parse_expr` → `parse_prefix` → `parse_postfix` →
+    // `parse_primary` → `parse_word`, so every local those functions hold is
+    // paid once per level of `SUM(SUM(…))`, and `MAX_DEPTH` is measured against
+    // a one-megabyte stack. Inlined into them, these grew the frames enough to
+    // overflow that stack under Rust 1.88's codegen (CI's MSRV job) while 1.96
+    // passed: a frame budget is a property of the compiler too. A call costs a
+    // frame only when the construct is actually there.
+
+    /// `@x`: implicit intersection of the operand that follows, stored — as
+    /// Excel stores it — as `SINGLE(x)`. It takes a primary (with its `%` and
+    /// `#`), never a prefixed expression, so `@@A1` and `@-A1` are refused and
+    /// the recursion is bounded.
+    #[inline(never)]
+    fn parse_intersection(&mut self) -> Result<Expr, FormulaError> {
+        self.advance();
+        let operand = self.parse_postfix()?;
+        Ok(Expr::Function {
+            name: SINGLE.to_owned(),
+            args: vec![operand],
+        })
+    }
+
+    /// `A1#`: the range the anchor spills into, stored — as Excel stores it —
+    /// as `ANCHORARRAY(A1)`. Only a single cell or a name can anchor a spill;
+    /// `A1:B2#` and `SUM(A1)#` are not references Excel accepts.
+    #[inline(never)]
+    fn spill_of(&mut self, expr: Expr) -> Result<Expr, FormulaError> {
+        let anchors = match &expr {
+            Expr::Reference(r) => !r.row_implicit && !r.col_implicit,
+            Expr::Name(_) => true,
+            _ => false,
+        };
+        if !anchors {
+            return Err(FormulaError::UnexpectedToken(
+                "# after something that is not a cell or a name".to_owned(),
+            ));
+        }
+        self.advance();
+        Ok(Expr::Function {
+            name: ANCHORARRAY.to_owned(),
+            args: vec![expr],
+        })
+    }
+
+    /// After `'Name'`: a sheet-qualified reference — or, when the quotes hold a
+    /// colon, a 3-D span written as one quoted pair (`'Jan 2026:Dec 2026'!B5`).
+    /// A colon cannot be part of a sheet name; Excel forbids it.
+    #[inline(never)]
+    fn parse_quoted_sheet(&mut self, name: String) -> Result<Expr, FormulaError> {
+        self.expect(&Token::Bang)?;
+        if let Some((first, last)) = name.split_once(':') {
+            if first.is_empty() || last.is_empty() {
+                return Err(FormulaError::InvalidReference(name));
+            }
+            return self.parse_3d(first.to_owned(), last.to_owned());
+        }
+        let word = self.expect_word()?;
+        let reference = self.reference_or_axis(&word, Some(name))?;
+        self.maybe_range(reference)
+    }
+
+    /// After a bare first sheet name, with `:Last!` still to consume.
+    #[inline(never)]
+    fn parse_3d_after(&mut self, first: String) -> Result<Expr, FormulaError> {
+        self.advance();
+        let Some(Token::Word(last)) = self.advance() else {
+            unreachable!("peeked a word")
+        };
+        self.advance();
+        self.parse_3d(first, last)
+    }
+
     /// The area of a 3-D reference, after `first:last!`: a cell or a range on
     /// each sheet of the span. The far corner names no sheet of its own.
+    #[inline(never)]
     fn parse_3d(&mut self, first: String, last: String) -> Result<Expr, FormulaError> {
         let word = self.expect_word()?;
         let corner = self.reference_or_axis(&word, None)?;
@@ -466,6 +493,7 @@ impl Parser {
     /// One pass, element by element: the cost is linear in the constant and the
     /// count is checked as each element is read, so an oversized constant is
     /// refused before it is built rather than after.
+    #[inline(never)]
     fn parse_array(&mut self) -> Result<Expr, FormulaError> {
         let mut rows: Vec<Vec<Expr>> = Vec::new();
         let mut row: Vec<Expr> = Vec::new();
