@@ -1830,3 +1830,22 @@ fn an_array_constant_spills() {
     assert_eq!(cell(&wb, AT.0 + 1, AT.1), CellValue::Number(3.0));
     assert_eq!(cell(&wb, AT.0 + 1, AT.1 + 1), CellValue::Number(4.0));
 }
+
+/// XL-FEAT-153: a 0 row or column index is the whole column or row, as Excel's
+/// INDEX documents ("If you set row_num or column_num to 0 … returns the array
+/// of values for the entire column or row"). It answered `#REF!`, which the
+/// oracle found as `SUM(INDEX(2:3,0,3))` against LibreOffice's 5.
+#[test]
+fn index_with_a_zero_index_is_the_whole_row_or_column() {
+    num("SUM(INDEX(SEQUENCE(3,3),0,2))", 15.0); // 2+5+8
+    num("SUM(INDEX(SEQUENCE(3,3),3,0))", 24.0); // 7+8+9
+    num("SUM(INDEX(SEQUENCE(3,3),0,0))", 45.0);
+    num("ROWS(INDEX(SEQUENCE(3,3),0,2))", 3.0);
+    num("COLUMNS(INDEX(SEQUENCE(3,3),0,2))", 1.0);
+    num("COLUMNS(INDEX(SEQUENCE(3,3),2,0))", 3.0);
+    // One index into a single row or column: 0 is all of it.
+    num("SUM(INDEX(SEQUENCE(1,4),0))", 10.0);
+    // Still refused: past the edge, and negative.
+    error("INDEX(SEQUENCE(3,3),0,4)", ErrorValue::Ref);
+    error("INDEX(SEQUENCE(3,3),4,0)", ErrorValue::Ref);
+}
