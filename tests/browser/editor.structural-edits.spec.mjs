@@ -55,3 +55,51 @@ test("inserting a column when column XFD holds a value is refused the same way",
   await expect(page.locator("#oc-msgbox-text")).toHaveText(OFF_GRID);
   expect(await input(page, 3, 16383)).toBe("edge");
 });
+
+// XL-UX-173: Insert Cells ▸ Shift cells down on B2 moved the cells and left
+// `=B2` in D2 pointing at the cell that was now somewhere else, after a "will
+// not adjust" confirmation. Excel adjusts the reference and asks nothing.
+
+test("Shift cells down on B2 turns =B2 into =B3, with no confirmation", async ({ page }) => {
+  await boot(page);
+  await api(page, "w.session_set_cell(0, 1, 1, '5'); w.session_set_cell(0, 1, 3, '=B2');");
+  await page.evaluate(() => window.opencalcEditor.selectForTest(1, 1));
+  await page.keyboard.press("Control+Shift+Equal");
+  await expect(page.locator("#oc-modal-title")).toHaveText("Insert");
+  await page.locator('#oc-modal input[value="down"]').check();
+  await page.locator("#oc-modal .oc-btn.primary").click();
+  await expect(page.locator("#oc-modal")).toBeHidden();
+  await expect(box(page)).toBeHidden();
+  expect(await input(page, 2, 1), "B2 did not move down").toBe("5");
+  expect(await input(page, 1, 3), "the reference did not follow the cell").toBe("=B3");
+});
+
+test("Shift cells up on B2 turns a reference to it into #REF! and pulls B3 up; undo restores", async ({ page }) => {
+  await boot(page);
+  await api(page, "w.session_set_cell(0, 1, 1, '5'); w.session_set_cell(0, 2, 1, '6'); " +
+    "w.session_set_cell(0, 1, 3, '=B2'); w.session_set_cell(0, 2, 3, '=B3*2');");
+  await page.evaluate(() => window.opencalcEditor.selectForTest(1, 1));
+  await page.keyboard.press("Control+Minus");
+  await page.locator('#oc-modal input[value="up"]').check();
+  await page.locator("#oc-modal .oc-btn.primary").click();
+  await expect(page.locator("#oc-modal")).toBeHidden();
+  expect(await input(page, 1, 1)).toBe("6");
+  expect(await input(page, 1, 3)).toBe("=#REF!");
+  expect(await input(page, 2, 3)).toBe("=B2*2");
+  await page.keyboard.press("Control+z");
+  expect(await input(page, 1, 1)).toBe("5");
+  expect(await input(page, 1, 3)).toBe("=B2");
+  expect(await input(page, 2, 3)).toBe("=B3*2");
+});
+
+test("Insert cells that would split a merged cell are refused in a message box", async ({ page }) => {
+  await boot(page);
+  await api(page, "w.session_set_cell(0, 4, 0, 'm'); w.session_merge_cells(0, 4, 0, 4, 2);");
+  await page.evaluate(() => window.opencalcEditor.selectForTest(1, 1));
+  await page.keyboard.press("Control+Shift+Equal");
+  await page.locator('#oc-modal input[value="down"]').check();
+  await page.locator("#oc-modal .oc-btn.primary").click();
+  await expect(page.locator("#oc-msgbox-text")).toHaveText("We can't do that to a merged cell.");
+  expect(await input(page, 4, 0)).toBe("m");
+  expect(await input(page, 1, 1)).toBe("");
+});

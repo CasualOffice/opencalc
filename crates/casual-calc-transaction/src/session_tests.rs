@@ -1805,3 +1805,56 @@ fn concurrent_inserts_that_together_push_content_off_the_grid_refuse_atomically(
         "and must re-join from the server"
     );
 }
+
+/// `XL-UX-173` through the protocol: one participant inserts cells (shift
+/// down) in column B while another, in the same moment, types `=B5` and
+/// writes into a cell the shift moves. Both land, both follow the shift, and
+/// every replica agrees — the formula reads the cell it was written against.
+#[test]
+fn insert_cells_and_a_concurrent_formula_converge_on_the_moved_cell() {
+    use casual_calc_formula::stored::Origin;
+    let mut world = World::new(2);
+    world.edit(
+        0,
+        Operation::ShiftCells {
+            sheet: 0,
+            range: casual_calc_model::CellRange::new(CellRef::new(1, 1), CellRef::new(2, 1)),
+            shift: crate::CellShift::Down,
+        },
+    );
+    let handle = world.peers[1]
+        .workbook
+        .store_formula_at(casual_calc_formula::parse("B5").unwrap(), Origin::at(0, 2));
+    let mut cell = Cell::value(CellValue::Empty);
+    cell.formula = Some(handle);
+    world.edit(
+        1,
+        Operation::SetCell {
+            sheet: 0,
+            at: CellRef::new(0, 2),
+            cell: Some(cell),
+        },
+    );
+    world.edit(1, write(6, 1, 999.0));
+    world.send(0);
+    world.send(1);
+    world.settle();
+    world.assert_converged("insert cells vs formula");
+    let doc = &world.workbook;
+    let formula = doc.sheets[0]
+        .cells
+        .get(CellRef::new(0, 2))
+        .and_then(|c| c.formula)
+        .and_then(|h| doc.formula(h))
+        .map(|e| casual_calc_formula::print_at(e, Origin::at(0, 2)))
+        .unwrap();
+    assert_eq!(
+        formula, "B7",
+        "the formula did not follow the cell it named"
+    );
+    assert!(
+        observe(doc).contains("8:1=Number(999.0)"),
+        "the write did not follow its cell: {}",
+        observe(doc)
+    );
+}

@@ -88,7 +88,13 @@ use crate::wire::WireOperation;
 /// moved to the handshake. Whole-row references and `A1#`/`@` did not need it:
 /// the first was already a `StoredRef` shape and the second are function
 /// calls. Pinned by `a_new_formula_variant_is_a_protocol_change`.
-pub const PROTOCOL_VERSION: u32 = 12;
+///
+/// **13 is Insert/Delete Cells** (`XL-UX-173`). `Operation` gained
+/// `ShiftCells`, so that a block shift rewrites references the way a
+/// whole-line insert does and every replica rewrites them identically. A
+/// protocol-12 peer cannot read the tag and would refuse the whole batch on
+/// the first one — the loud break, moved to the handshake.
+pub const PROTOCOL_VERSION: u32 = 13;
 
 /// What somebody is typing, before they have decided to keep it.
 ///

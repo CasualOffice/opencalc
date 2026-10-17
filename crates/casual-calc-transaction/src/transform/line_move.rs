@@ -216,6 +216,7 @@ impl Mv {
             },
             at: self.at,
             count: self.count,
+            cross: None,
             against: match axis {
                 Axis::Row => "MoveRows",
                 Axis::Col => "MoveColumns",

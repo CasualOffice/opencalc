@@ -271,13 +271,14 @@ pub fn validate_formula(text: &str) -> String {
     }
 }
 
-/// Insert or delete a *block* of cells, shifting the rest along one axis.
+/// Insert or delete a *block* of cells, shifting the rest along one axis —
+/// Excel's Insert ▸ Shift cells down / right and Delete ▸ Shift cells up / left.
 ///
-/// Unlike a whole row or column insert, this does **not** rewrite formula
-/// references: a reference into the shifted band would need the same
-/// range-aware rewriting the structural ops do, and doing it half-way would be
-/// worse than not doing it. `session_cells_shift_affects_formulas` lets the host
-/// warn first, so the user decides rather than finding out later.
+/// One [`EditOperation::ShiftCells`] (`XL-UX-173`): references to the moved
+/// cells follow them, a reference to a deleted cell reads `#REF!`, and the
+/// operation travels to collaborators as itself, so every replica rewrites the
+/// same references. A shift that would cut a merged cell, a table or a pivot,
+/// or push content off the grid, is refused by the engine with its own code.
 #[wasm_bindgen]
 #[allow(clippy::too_many_arguments)]
 pub fn session_shift_cells(
@@ -291,62 +292,16 @@ pub fn session_shift_cells(
 ) -> Result<(), JsError> {
     let (rr0, cc0, rr1, cc1) = (r0.min(r1), c0.min(c1), r0.max(r1), c0.max(c1));
     guard_protected(sheet, rr0, cc0, rr1, cc1)?;
-    let span = if vertical {
-        rr1 - rr0 + 1
-    } else {
-        cc1 - cc0 + 1
+    let shift = match (insert, vertical) {
+        (true, true) => casual_calc_transaction::CellShift::Down,
+        (true, false) => casual_calc_transaction::CellShift::Right,
+        (false, true) => casual_calc_transaction::CellShift::Up,
+        (false, false) => casual_calc_transaction::CellShift::Left,
     };
-    SESSION.with(|cell| {
-        let mut guard = cell.borrow_mut();
-        let session = guard.as_mut().ok_or_else(|| JsError::new("no session"))?;
-        let Some(sh) = session.workbook().sheets.get(sheet) else {
-            return Ok(());
-        };
-        // The cells that move, read before anything is written.
-        let mut moving: Vec<(CellRef, Cell)> = Vec::new();
-        for (at, c) in sh.cells.iter() {
-            let in_band = if vertical {
-                at.col >= cc0 && at.col <= cc1 && at.row >= rr0
-            } else {
-                at.row >= rr0 && at.row <= rr1 && at.col >= cc0
-            };
-            if in_band {
-                moving.push((at, c.clone()));
-            }
-        }
-        // Deleting drops the block itself; inserting keeps everything and pushes
-        // it along.
-        let mut ops: Vec<EditOperation> = Vec::new();
-        for (at, _) in &moving {
-            ops.push(EditOperation::ClearCell { sheet, at: *at });
-        }
-        for (at, c) in moving {
-            let moved = if insert {
-                if vertical {
-                    Some(CellRef::new(at.row + span, at.col))
-                } else {
-                    Some(CellRef::new(at.row, at.col + span))
-                }
-            } else if vertical {
-                if at.row <= rr1 {
-                    None // inside the deleted block
-                } else {
-                    Some(CellRef::new(at.row - span, at.col))
-                }
-            } else if at.col <= cc1 {
-                None
-            } else {
-                Some(CellRef::new(at.row, at.col - span))
-            };
-            if let Some(to) = moved {
-                ops.push(EditOperation::SetCell {
-                    sheet,
-                    at: to,
-                    cell: Some(c),
-                });
-            }
-        }
-        session.edit(EditOperation::Batch(ops)).map_err(js)
+    commit_edit(EditOperation::ShiftCells {
+        sheet,
+        range: CellRange::new(CellRef::new(rr0, cc0), CellRef::new(rr1, cc1)),
+        shift,
     })
 }
 

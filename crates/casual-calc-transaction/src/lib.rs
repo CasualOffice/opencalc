@@ -21,6 +21,8 @@ use casual_calc_model::{
 };
 
 #[cfg(test)]
+mod block_shift_tests;
+#[cfg(test)]
 mod grid_edge_tests;
 pub mod protocol;
 pub mod restore;
@@ -69,6 +71,14 @@ pub enum TxnError {
         /// The top-left cell of the content that would be lost, for the message.
         occupied: CellRef,
     },
+    /// A block shift would move part of a merged cell, a table or a pivot and
+    /// leave the rest (`XL-UX-173`). Excel refuses it too.
+    WouldSplit {
+        /// The sheet index.
+        sheet: usize,
+        /// What would be cut.
+        what: SplitKind,
+    },
 }
 
 impl TxnError {
@@ -78,6 +88,11 @@ impl TxnError {
             TxnError::SheetNotFound { .. } => "OC-TXN-0001",
             TxnError::Invariant { .. } => "OC-TXN-0002",
             TxnError::OffGrid { .. } => "OC-TXN-0003",
+            TxnError::WouldSplit { what, .. } => match what {
+                SplitKind::Merge => "OC-TXN-0004",
+                SplitKind::Table => "OC-TXN-0005",
+                SplitKind::Pivot => "OC-TXN-0006",
+            },
         }
     }
 }
@@ -96,6 +111,16 @@ impl core::fmt::Display for TxnError {
                 self.code(),
                 occupied.row + 1,
                 occupied.col + 1
+            ),
+            TxnError::WouldSplit { what, .. } => write!(
+                f,
+                "[{}] the cells would move part of a {} and not the rest",
+                self.code(),
+                match what {
+                    SplitKind::Merge => "merged cell",
+                    SplitKind::Table => "table",
+                    SplitKind::Pivot => "PivotTable",
+                }
             ),
         }
     }
@@ -478,6 +503,46 @@ pub struct WouldDiscard {
 /// user is told to look rather than one where data disappears.
 #[must_use]
 pub fn undo_would_discard(workbook: &Workbook, op: &Operation) -> Option<WouldDiscard> {
+    // Undoing an Insert Cells deletes the block it opened — the same question,
+    // asked of the block rather than of whole lines.
+    if let Operation::ShiftCells {
+        sheet,
+        range,
+        shift: shift @ (CellShift::Up | CellShift::Left),
+    } = op
+    {
+        let target = workbook.sheets.get(*sheet)?;
+        let (r0, r1) = (
+            range.start.row.min(range.end.row),
+            range.start.row.max(range.end.row),
+        );
+        let (c0, c1) = (
+            range.start.col.min(range.end.col),
+            range.start.col.max(range.end.col),
+        );
+        let mut found: Option<CellRef> = None;
+        let mut cells = 0usize;
+        for (at, cell) in target.cells.iter() {
+            if at.row >= r0 && at.row <= r1 && at.col >= c0 && at.col <= c1 && !cell.is_blank() {
+                cells += 1;
+                if found.is_none_or(|best| (at.row, at.col) < (best.row, best.col)) {
+                    found = Some(at);
+                }
+            }
+        }
+        let (axis, at, count) = match shift {
+            CellShift::Up => (Axis::Row, r0, r1 - r0 + 1),
+            _ => (Axis::Col, c0, c1 - c0 + 1),
+        };
+        return found.map(|occupied| WouldDiscard {
+            sheet: *sheet,
+            axis,
+            at,
+            count,
+            occupied,
+            cells,
+        });
+    }
     let (sheet, axis, at, count) = match op {
         Operation::DeleteRows { sheet, at, count } => (*sheet, Axis::Row, *at, *count),
         Operation::DeleteColumns { sheet, at, count } => (*sheet, Axis::Col, *at, *count),
@@ -560,6 +625,32 @@ fn take_retained(workbook: &mut Workbook, paths: &BTreeSet<String>) -> RetainedB
     }
     workbook.retained_rels = keep;
     taken
+}
+
+/// Which way the cells after an inserted or deleted block move — the four
+/// choices of Excel's Insert and Delete dialogs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum CellShift {
+    /// Insert, shifting the cells below down.
+    Down,
+    /// Insert, shifting the cells to the right further right.
+    Right,
+    /// Delete, shifting the cells below up.
+    Up,
+    /// Delete, shifting the cells to the right left.
+    Left,
+}
+
+/// What a block shift would cut in two, for [`TxnError::WouldSplit`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SplitKind {
+    /// A merged cell.
+    Merge,
+    /// A table.
+    Table,
+    /// A pivot table.
+    Pivot,
 }
 
 /// The atomic edit operations, **closed at a given `PROTOCOL_VERSION`** rather
@@ -775,6 +866,27 @@ pub enum Operation {
         /// Where its top-left corner lands.
         to: CellRef,
     },
+    /// Insert or delete a block of cells, shifting the cells after it in its
+    /// columns (rows) — Excel's Insert ▸ Shift cells down / right and Delete ▸
+    /// Shift cells up / left (`XL-UX-173`, `PROTOCOL_VERSION` 13).
+    ///
+    /// A whole-line insert or delete confined to the block's band of the other
+    /// axis, and rewritten exactly like one: references to the moved cells
+    /// follow them anywhere in the workbook, a reference to a deleted cell
+    /// reads `#REF!`, and a range moves only when its columns (rows) lie
+    /// inside the band. Objects follow when they lie inside the band. A shift
+    /// that would cut a merged cell, a table or a pivot in two is refused
+    /// ([`TxnError::WouldSplit`]), as Excel refuses it, and one that would push
+    /// content off the grid is refused ([`TxnError::OffGrid`]). See
+    /// `structural::shift_block`. The transform is in `transform::block`.
+    ShiftCells {
+        /// Sheet index.
+        sheet: usize,
+        /// The block inserted (blank) or deleted.
+        range: CellRange,
+        /// Which way the cells after it move.
+        shift: CellShift,
+    },
     /// Replace a sheet's position-indexed metadata wholesale: merged ranges,
     /// column widths, row heights, hidden row/column sets, and frozen-pane
     /// counts. This is the universal inverse form for the metadata half of a
@@ -983,6 +1095,10 @@ fn describe_op(op: &Operation) -> &'static str {
         Operation::MoveColumns { .. } => "move columns",
         Operation::MoveRows { .. } => "move rows",
         Operation::MoveRange { .. } => "move cells",
+        Operation::ShiftCells { shift, .. } => match shift {
+            CellShift::Down | CellShift::Right => "insert cells",
+            CellShift::Up | CellShift::Left => "delete cells",
+        },
         Operation::InsertSheet { .. } => "add sheet",
         Operation::RemoveSheet { .. } => "remove sheet",
         Operation::RenameSheet { .. } => "rename sheet",
@@ -1052,16 +1168,16 @@ pub fn apply(workbook: &mut Workbook, op: Operation) -> Result<Operation, TxnErr
             })
         }
         Operation::InsertRows { sheet, at, count } => {
-            structural::insert(workbook, sheet, Axis::Row, at, count)
+            structural::insert(workbook, sheet, Axis::Row, at, count, None)
         }
         Operation::DeleteRows { sheet, at, count } => {
-            structural::delete(workbook, sheet, Axis::Row, at, count)
+            structural::delete(workbook, sheet, Axis::Row, at, count, None)
         }
         Operation::InsertColumns { sheet, at, count } => {
-            structural::insert(workbook, sheet, Axis::Col, at, count)
+            structural::insert(workbook, sheet, Axis::Col, at, count, None)
         }
         Operation::DeleteColumns { sheet, at, count } => {
-            structural::delete(workbook, sheet, Axis::Col, at, count)
+            structural::delete(workbook, sheet, Axis::Col, at, count, None)
         }
         Operation::MoveColumns {
             sheet,
@@ -1078,6 +1194,11 @@ pub fn apply(workbook: &mut Workbook, op: Operation) -> Result<Operation, TxnErr
         Operation::MoveRange { sheet, from, to } => {
             structural::move_range(workbook, sheet, from, to)
         }
+        Operation::ShiftCells {
+            sheet,
+            range,
+            shift,
+        } => structural::shift_block(workbook, sheet, range, shift),
         Operation::SetSheetMetadata {
             sheet,
             data,

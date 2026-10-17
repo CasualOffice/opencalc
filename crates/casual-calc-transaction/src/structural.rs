@@ -66,6 +66,14 @@ impl Axis {
         }
     }
 
+    /// The other axis: the one a block shift's band runs along.
+    pub(crate) const fn other(self) -> Self {
+        match self {
+            Axis::Row => Axis::Col,
+            Axis::Col => Axis::Row,
+        }
+    }
+
     /// The along-axis coordinate of a stored cell address.
     fn coord(self, at: CellRef) -> u32 {
         match self {
@@ -123,6 +131,315 @@ pub(crate) enum ShiftKind {
     },
 }
 
+/// The lines of the other axis a structural edit is confined to, inclusive —
+/// `None` for whole rows or columns, `Some` for Insert/Delete Cells with a
+/// shift (`XL-UX-173`), which moves only the cells in the block's columns
+/// (rows).
+pub(crate) type Cross = Option<(u32, u32)>;
+
+/// Whether a cell is one of those the edit moves.
+fn in_cross(cross: Cross, axis: Axis, at: CellRef) -> bool {
+    cross.is_none_or(|(c0, c1)| {
+        let x = axis.other().coord(at);
+        x >= c0 && x <= c1
+    })
+}
+
+/// Whether a range lies wholly inside the band (always, for whole lines).
+fn range_in_cross(cross: Cross, axis: Axis, range: &CellRange) -> bool {
+    cross.is_none_or(|(c0, c1)| {
+        let (a, b) = (
+            axis.other().coord(range.start),
+            axis.other().coord(range.end),
+        );
+        a.min(b) >= c0 && a.max(b) <= c1
+    })
+}
+
+/// Whether a range shares any line with the band.
+fn range_meets_cross(cross: Cross, axis: Axis, range: &CellRange) -> bool {
+    cross.is_none_or(|(c0, c1)| {
+        let (a, b) = (
+            axis.other().coord(range.start),
+            axis.other().coord(range.end),
+        );
+        a.max(b) >= c0 && a.min(b) <= c1
+    })
+}
+
+/// Insert or delete a block of cells, shifting the cells after it in its
+/// columns (rows) — [`Operation::ShiftCells`]. Returns the inverse.
+///
+/// Exactly a whole-line insert or delete confined to the block's band of the
+/// other axis: Shift cells down on `B3:C4` is two rows inserted at row 3 for
+/// columns B and C only. Everything follows the moved cells by the rules the
+/// whole-line edit uses, restricted to what lies wholly inside the band:
+///
+/// - **References.** A single reference to a cell in the band moves (or reads
+///   `#REF!` when its cell was deleted). A range moves, grows or shrinks only
+///   when its columns (rows) lie inside the band; one reaching outside it is
+///   left alone, since after a partial shift no rectangle names the cells it
+///   held. Whole-column (row) references along the shift are untouched, as
+///   for whole lines. Formulas everywhere in the workbook, defined names and
+///   chart series are rewritten.
+/// - **Objects.** Merges, tables, validations, conditional formats,
+///   hyperlinks, notes, autofilters, chart and picture frames, pivots and
+///   pivot sources follow when they lie inside the band, and stay otherwise.
+///   Row heights, column widths, hidden lines and outlines belong to whole
+///   lines and never move.
+/// - **Refusals.** A shift that would move part of a merged cell, a table or a
+///   pivot is refused with [`TxnError::WouldSplit`], as Excel refuses it; one
+///   that would push content off the grid with [`TxnError::OffGrid`].
+pub(crate) fn shift_block(
+    workbook: &mut Workbook,
+    sheet: usize,
+    range: CellRange,
+    shift: crate::CellShift,
+) -> Result<Operation, TxnError> {
+    use crate::CellShift;
+    let (r0, r1) = (
+        range.start.row.min(range.end.row),
+        range.start.row.max(range.end.row),
+    );
+    let (c0, c1) = (
+        range.start.col.min(range.end.col),
+        range.start.col.max(range.end.col),
+    );
+    if r1 > GRID_MAX_ROW || c1 > GRID_MAX_COL {
+        return Err(TxnError::Invariant {
+            reason: "the block to shift lies outside the grid".to_owned(),
+        });
+    }
+    let (axis, at, count, cross) = match shift {
+        CellShift::Down | CellShift::Up => (Axis::Row, r0, r1 - r0 + 1, (c0, c1)),
+        CellShift::Right | CellShift::Left => (Axis::Col, c0, c1 - c0 + 1, (r0, r1)),
+    };
+    let target = workbook
+        .sheets
+        .get(sheet)
+        .ok_or(TxnError::SheetNotFound { index: sheet })?;
+    if let Some(what) = block_splits(target, axis, at, cross) {
+        return Err(TxnError::WouldSplit { sheet, what });
+    }
+    match shift {
+        CellShift::Down | CellShift::Right => insert(workbook, sheet, axis, at, count, Some(cross)),
+        CellShift::Up | CellShift::Left => delete(workbook, sheet, axis, at, count, Some(cross)),
+    }
+}
+
+/// What a block shift would cut in two: a merge, a table or a pivot that
+/// shares lines with the band without lying inside it, and reaches the lines
+/// that move. Excel refuses those too.
+pub(crate) fn block_splits(
+    sheet: &Sheet,
+    axis: Axis,
+    at: u32,
+    cross: (u32, u32),
+) -> Option<crate::SplitKind> {
+    use crate::SplitKind;
+    let cross = Some(cross);
+    let cut = |range: &CellRange| {
+        range_meets_cross(cross, axis, range)
+            && !range_in_cross(cross, axis, range)
+            && axis.coord(range.start).max(axis.coord(range.end)) >= at
+    };
+    if sheet.merges.iter().any(cut) {
+        return Some(SplitKind::Merge);
+    }
+    if sheet.tables.iter().any(|t| cut(&t.range)) {
+        return Some(SplitKind::Table);
+    }
+    let pivot_cut = |p: &PivotTable| {
+        let anchor = CellRange::new(p.anchor, p.anchor);
+        let output = p.output.unwrap_or(anchor);
+        let whole = CellRange::new(
+            CellRef::new(
+                anchor.start.row.min(output.start.row),
+                anchor.start.col.min(output.start.col),
+            ),
+            CellRef::new(
+                anchor.end.row.max(output.end.row),
+                anchor.end.col.max(output.end.col),
+            ),
+        );
+        cut(&whole)
+    };
+    if sheet.pivots.iter().any(pivot_cut) {
+        return Some(SplitKind::Pivot);
+    }
+    None
+}
+
+/// The operation that undoes an insert (`inserting`) or a delete of `count`
+/// lines at `at` — a whole-line one, or a block shift over the band.
+fn opposite_op(
+    sheet: usize,
+    axis: Axis,
+    at: u32,
+    count: u32,
+    cross: Cross,
+    inserting: bool,
+) -> Operation {
+    let Some((c0, c1)) = cross else {
+        return if inserting {
+            delete_op(sheet, axis, at, count)
+        } else {
+            insert_op(sheet, axis, at, count)
+        };
+    };
+    let last = at + count - 1;
+    let (range, shift) = match axis {
+        Axis::Row => (
+            CellRange::new(CellRef::new(at, c0), CellRef::new(last, c1)),
+            if inserting {
+                crate::CellShift::Up
+            } else {
+                crate::CellShift::Down
+            },
+        ),
+        Axis::Col => (
+            CellRange::new(CellRef::new(c0, at), CellRef::new(c1, last)),
+            if inserting {
+                crate::CellShift::Left
+            } else {
+                crate::CellShift::Right
+            },
+        ),
+    };
+    Operation::ShiftCells {
+        sheet,
+        range,
+        shift,
+    }
+}
+
+/// Shift a sheet's (or a bundle's) metadata for an insert or delete, whole
+/// lines or confined to a band.
+fn shift_metadata_scoped(
+    sheet: &mut impl Positional,
+    axis: Axis,
+    inserting: bool,
+    at: u32,
+    count: u32,
+    cross: Cross,
+) {
+    match (cross, inserting) {
+        (None, true) => shift_metadata_insert(sheet, axis, at, count),
+        (None, false) => shift_metadata_delete(sheet, axis, at, count),
+        (Some(_), _) => shift_metadata_block(sheet, axis, inserting, at, count, cross),
+    }
+}
+
+/// Move one item through the whole-line shift, by running that shift over a
+/// bundle holding nothing else. Keeps every per-kind rule (a table widening, a
+/// comment dropped with its cell) in one place rather than restated here.
+fn shift_alone<T>(
+    item: T,
+    field: fn(&mut crate::SheetMetadata) -> &mut Vec<T>,
+    run: &dyn Fn(&mut crate::SheetMetadata),
+) -> Vec<T> {
+    let mut alone = crate::SheetMetadata::default();
+    field(&mut alone).push(item);
+    run(&mut alone);
+    std::mem::take(field(&mut alone))
+}
+
+/// Shift the items wholly inside the band through the whole-line rules, in
+/// place and in order (a conditional format's position is its priority).
+fn shift_items_in_band<T>(
+    items: &mut Vec<T>,
+    inside: impl Fn(&T) -> bool,
+    field: fn(&mut crate::SheetMetadata) -> &mut Vec<T>,
+    run: &dyn Fn(&mut crate::SheetMetadata),
+) {
+    let taken = std::mem::take(items);
+    for item in taken {
+        if inside(&item) {
+            items.extend(shift_alone(item, field, run));
+        } else {
+            items.push(item);
+        }
+    }
+}
+
+/// [`shift_metadata_insert`] / [`shift_metadata_delete`] for a block shift:
+/// only what lies wholly inside the band moves. Line sizing, hidden lines,
+/// outlines, the freeze and the filter's hidden rows belong to whole lines
+/// and are left alone.
+fn shift_metadata_block(
+    sheet: &mut impl Positional,
+    axis: Axis,
+    inserting: bool,
+    at: u32,
+    count: u32,
+    cross: Cross,
+) {
+    let run = move |m: &mut crate::SheetMetadata| {
+        if inserting {
+            shift_metadata_insert(m, axis, at, count);
+        } else {
+            shift_metadata_delete(m, axis, at, count);
+        }
+    };
+    let inside = |r: &CellRange| range_in_cross(cross, axis, r);
+    shift_items_in_band(sheet.merges_mut(), |r| inside(r), |m| &mut m.merges, &run);
+    shift_items_in_band(
+        sheet.validations_mut(),
+        |v| inside(&v.range),
+        |m| &mut m.validations,
+        &run,
+    );
+    shift_items_in_band(
+        sheet.conditional_formats_mut(),
+        |f| inside(&f.range),
+        |m| &mut m.conditional_formats,
+        &run,
+    );
+    shift_items_in_band(
+        sheet.hyperlinks_mut(),
+        |l| inside(&l.range),
+        |m| &mut m.hyperlinks,
+        &run,
+    );
+    shift_items_in_band(
+        sheet.comments_mut(),
+        |c| in_cross(cross, axis, c.at),
+        |m| &mut m.comments,
+        &run,
+    );
+    shift_items_in_band(
+        sheet.charts_mut(),
+        |c| inside(&c.anchor),
+        |m| &mut m.charts,
+        &run,
+    );
+    shift_items_in_band(
+        sheet.tables_mut(),
+        |t| inside(&t.range),
+        |m| &mut m.tables,
+        &run,
+    );
+    shift_items_in_band(
+        sheet.pivots_mut(),
+        |p| in_cross(cross, axis, p.anchor) && p.output.as_ref().is_none_or(inside),
+        |m| &mut m.pivots,
+        &run,
+    );
+    let filter = sheet.auto_filter_mut();
+    if let Some(current) = filter.take() {
+        if inside(&current.range) {
+            let mut alone = crate::SheetMetadata {
+                auto_filter: Some(current),
+                ..Default::default()
+            };
+            run(&mut alone);
+            *filter = alone.auto_filter;
+        } else {
+            *filter = Some(current);
+        }
+    }
+}
+
 /// Apply an insert of `count` lines at `at` along `axis` on sheet `sheet`.
 /// Returns the inverse — the matching delete, plus restores when the insert
 /// had to clip something at the edge of the grid.
@@ -148,9 +465,10 @@ pub(crate) fn insert(
     axis: Axis,
     at: u32,
     count: u32,
+    cross: Cross,
 ) -> Result<Operation, TxnError> {
     let target = sheet_name(workbook, sheet)?;
-    if let Some(occupied) = edge_loss(&workbook.sheets[sheet], axis, at, count) {
+    if let Some(occupied) = edge_loss(&workbook.sheets[sheet], axis, at, count, cross) {
         return Err(TxnError::OffGrid {
             sheet,
             axis,
@@ -171,24 +489,27 @@ pub(crate) fn insert(
         .map(|other| snapshot_metadata(workbook, other))
         .collect();
 
-    shift_cells_insert(workbook, sheet, axis, at, count);
-    shift_metadata_insert(&mut workbook.sheets[sheet], axis, at, count);
-    let clipped_formulas =
-        rewrite_all_formulas(workbook, &target, axis, ShiftKind::Insert, at, count);
-    let names_clipped =
-        rewrite_defined_names(workbook, &target, axis, ShiftKind::Insert, at, count);
-    let sources_clipped =
-        shift_drawings_and_pivot_sources(workbook, sheet, axis, ShiftKind::Insert, at, count);
-    let series_clipped =
-        rewrite_chart_series(workbook, &target, axis, ShiftKind::Insert, at, count);
+    let shift = Shift {
+        axis,
+        kind: ShiftKind::Insert,
+        at,
+        count,
+        cross,
+    };
+    shift_cells_insert(workbook, sheet, axis, at, count, cross);
+    shift_metadata_scoped(&mut workbook.sheets[sheet], axis, true, at, count, cross);
+    let clipped_formulas = rewrite_all_formulas(workbook, &target, shift);
+    let names_clipped = rewrite_defined_names(workbook, &target, shift);
+    let sources_clipped = shift_drawings_and_pivot_sources(workbook, sheet, shift);
+    let series_clipped = rewrite_chart_series(workbook, &target, shift);
 
     // Would the matching delete put the metadata back? Asked of the metadata
     // itself rather than predicted, so a field added later cannot be missed.
     let mut probe = crate::SheetMetadata::capture(&workbook.sheets[sheet]);
-    shift_metadata_delete(&mut probe, axis, at, count);
+    shift_metadata_scoped(&mut probe, axis, false, at, count, cross);
     let metadata_clipped = probe != metadata_before;
 
-    let delete = delete_op(sheet, axis, at, count);
+    let delete = opposite_op(sheet, axis, at, count, cross, true);
     if !metadata_clipped
         && !names_clipped
         && !sources_clipped
@@ -212,7 +533,10 @@ pub(crate) fn insert(
     for (home, now, original) in clipped_formulas {
         // Where the cell was before the insert moved it — where the delete
         // puts it back — and its formula re-measured from there.
-        let was = if home == sheet && axis.coord(now) >= at.saturating_add(count) {
+        let was = if home == sheet
+            && axis.coord(now) >= at.saturating_add(count)
+            && in_cross(cross, axis, now)
+        {
             axis.with_coord(now, axis.coord(now) - count)
         } else {
             now
@@ -248,7 +572,13 @@ pub(crate) fn insert(
 /// which keeps the rule on every cell it can still apply to.
 ///
 /// A stored cell with nothing in it is not content and is dropped.
-pub(crate) fn edge_loss(sheet: &Sheet, axis: Axis, at: u32, count: u32) -> Option<CellRef> {
+pub(crate) fn edge_loss(
+    sheet: &Sheet,
+    axis: Axis,
+    at: u32,
+    count: u32,
+    cross: Cross,
+) -> Option<CellRef> {
     let limit = axis.limit();
     // The first line whose content would land past the last one. Lines before
     // `at` never move, so it is never earlier than `at`.
@@ -268,7 +598,7 @@ pub(crate) fn edge_loss(sheet: &Sheet, axis: Axis, at: u32, count: u32) -> Optio
     let lost_corner = |range: &CellRange| axis.with_coord(range.start, lo(range).max(first_lost));
 
     for (addr, cell) in sheet.cells.iter() {
-        if axis.coord(addr) >= first_lost && !cell.is_blank() {
+        if axis.coord(addr) >= first_lost && in_cross(cross, axis, addr) && !cell.is_blank() {
             note(addr);
         }
     }
@@ -280,18 +610,20 @@ pub(crate) fn edge_loss(sheet: &Sheet, axis: Axis, at: u32, count: u32) -> Optio
         .chain(sheet.charts.iter().map(|c| &c.anchor))
         .chain(sheet.images.iter().map(|i| &i.anchor))
         .chain(sheet.pivots.iter().filter_map(|p| p.output.as_ref()));
+    // Within a block shift only what lies inside the band moves; anything
+    // reaching outside it stays (or was refused by `block_splits`).
     for range in solid {
-        if hi(range) >= first_lost {
+        if hi(range) >= first_lost && range_in_cross(cross, axis, range) {
             note(lost_corner(range));
         }
     }
     for comment in &sheet.comments {
-        if axis.coord(comment.at) >= first_lost {
+        if axis.coord(comment.at) >= first_lost && in_cross(cross, axis, comment.at) {
             note(comment.at);
         }
     }
     for pivot in &sheet.pivots {
-        if axis.coord(pivot.anchor) >= first_lost {
+        if axis.coord(pivot.anchor) >= first_lost && in_cross(cross, axis, pivot.anchor) {
             note(pivot.anchor);
         }
     }
@@ -302,7 +634,7 @@ pub(crate) fn edge_loss(sheet: &Sheet, axis: Axis, at: u32, count: u32) -> Optio
         .chain(sheet.conditional_formats.iter().map(|f| &f.range))
         .chain(sheet.auto_filter.iter().map(|f| &f.range));
     for range in rules {
-        if lo(range) >= first_lost {
+        if lo(range) >= first_lost && range_in_cross(cross, axis, range) {
             note(lost_corner(range));
         }
     }
@@ -318,13 +650,18 @@ pub(crate) fn delete(
     axis: Axis,
     at: u32,
     count: u32,
+    cross: Cross,
 ) -> Result<Operation, TxnError> {
     let target = sheet_name(workbook, sheet)?;
     // Snapshot everything the delete can change, before we mutate anything. The
     // metadata snapshot is taken as a whole because a delete can drop a merge or
     // a hidden line outright — a shift alone is not invertible — so undo restores
     // the exact pre-delete metadata rather than trying to un-shift it.
-    let restores = snapshot_for_delete(workbook, sheet, axis, at);
+    let restores = snapshot_for_delete(workbook, sheet, axis, at, cross);
+    // A block shift's inverse also puts the names back: one that named a
+    // deleted cell reads `#REF!` afterwards, which re-opening the block cannot
+    // undo.
+    let names_restore = cross.map(|_| Operation::SetDefinedNames(workbook.defined_names.clone()));
     let metadata_restore = snapshot_metadata(workbook, sheet);
     // A pivot reading this sheet usually *lives* on another one, and the
     // snapshot above covers only this sheet — so until `PIV-06` the delete's
@@ -354,18 +691,26 @@ pub(crate) fn delete(
         .into_iter()
         .map(|other| snapshot_metadata(workbook, other))
         .collect();
-    shift_cells_delete(workbook, sheet, axis, at, count);
-    shift_metadata_delete(&mut workbook.sheets[sheet], axis, at, count);
-    rewrite_all_formulas(workbook, &target, axis, ShiftKind::Delete, at, count);
-    rewrite_defined_names(workbook, &target, axis, ShiftKind::Delete, at, count);
-    shift_drawings_and_pivot_sources(workbook, sheet, axis, ShiftKind::Delete, at, count);
-    rewrite_chart_series(workbook, &target, axis, ShiftKind::Delete, at, count);
+    let shift = Shift {
+        axis,
+        kind: ShiftKind::Delete,
+        at,
+        count,
+        cross,
+    };
+    shift_cells_delete(workbook, sheet, axis, at, count, cross);
+    shift_metadata_scoped(&mut workbook.sheets[sheet], axis, false, at, count, cross);
+    rewrite_all_formulas(workbook, &target, shift);
+    rewrite_defined_names(workbook, &target, shift);
+    shift_drawings_and_pivot_sources(workbook, sheet, shift);
+    rewrite_chart_series(workbook, &target, shift);
 
     // Inverse order: re-open the band (restores cell geometry), overwrite the
     // metadata with its pre-delete snapshot, then restore the touched cells.
     let mut ops = Vec::with_capacity(restores.len() + sourcing_restores.len() + 2);
-    ops.push(insert_op(sheet, axis, at, count));
+    ops.push(opposite_op(sheet, axis, at, count, cross, false));
     ops.push(metadata_restore);
+    ops.extend(names_restore);
     // After the re-insert, which shifts these pivots' sources a second time:
     // the snapshot is the pre-delete truth and has to be what lands last.
     ops.extend(sourcing_restores);
@@ -594,10 +939,17 @@ pub(crate) fn move_lines(
     let kind = ShiftKind::Move {
         landing: mv.landing,
     };
-    rewrite_all_formulas(workbook, &target, axis, kind, mv.at, mv.count);
-    rewrite_defined_names(workbook, &target, axis, kind, mv.at, mv.count);
-    shift_drawings_and_pivot_sources(workbook, sheet, axis, kind, mv.at, mv.count);
-    rewrite_chart_series(workbook, &target, axis, kind, mv.at, mv.count);
+    let shift = Shift {
+        axis,
+        kind,
+        at: mv.at,
+        count: mv.count,
+        cross: None,
+    };
+    rewrite_all_formulas(workbook, &target, shift);
+    rewrite_defined_names(workbook, &target, shift);
+    shift_drawings_and_pivot_sources(workbook, sheet, shift);
+    rewrite_chart_series(workbook, &target, shift);
 
     let (inv_at, inv_count, inv_before) = mv.inverse();
     let mut ops = Vec::with_capacity(restores.len() + 3);
@@ -821,10 +1173,17 @@ fn restore_moved_formulas(
 
 /// Rebuild the sheet's cell store, shifting every cell on or after `at` by
 /// `+count` along `axis`. The sheet index was already validated by the caller.
-fn shift_cells_insert(workbook: &mut Workbook, sheet: usize, axis: Axis, at: u32, count: u32) {
+fn shift_cells_insert(
+    workbook: &mut Workbook,
+    sheet: usize,
+    axis: Axis,
+    at: u32,
+    count: u32,
+    cross: Cross,
+) {
     let destination = |addr: CellRef| {
         let coord = axis.coord(addr);
-        if coord >= at {
+        if coord >= at && in_cross(cross, axis, addr) {
             axis.with_coord(addr, coord.saturating_add(count))
         } else {
             addr
@@ -858,12 +1217,19 @@ fn shift_cells_insert(workbook: &mut Workbook, sheet: usize, axis: Axis, at: u32
 
 /// Rebuild the sheet's cell store, dropping cells in the deleted band
 /// `[at, at+count)` and shifting cells past it back by `count` along `axis`.
-fn shift_cells_delete(workbook: &mut Workbook, sheet: usize, axis: Axis, at: u32, count: u32) {
+fn shift_cells_delete(
+    workbook: &mut Workbook,
+    sheet: usize,
+    axis: Axis,
+    at: u32,
+    count: u32,
+    cross: Cross,
+) {
     let end = at.saturating_add(count);
     let moves: Vec<(CellRef, CellRef)> = workbook.sheets[sheet]
         .cells
         .iter()
-        .filter(|(addr, _)| axis.coord(*addr) >= end)
+        .filter(|(addr, _)| axis.coord(*addr) >= end && in_cross(cross, axis, *addr))
         .map(|(addr, _)| (addr, axis.with_coord(addr, axis.coord(addr) - count)))
         .collect();
     let restored = restore_moved_formulas(workbook, sheet, &moves);
@@ -873,7 +1239,7 @@ fn shift_cells_delete(workbook: &mut Workbook, sheet: usize, axis: Axis, at: u32
     let mut rebuilt = CellStore::new();
     for (addr, cell) in old.iter() {
         let coord = axis.coord(addr);
-        if coord < at {
+        if coord < at || !in_cross(cross, axis, addr) {
             rebuilt.set(addr, cell.clone());
         } else if coord >= end {
             let mut cell = cell.clone();
@@ -1377,12 +1743,18 @@ fn reindex_set(set: &mut BTreeSet<u32>, remap: impl Fn(u32) -> Option<u32>) {
 /// (their cross-sheet references may be rewritten). Captured before mutation so
 /// each op restores the exact original cell, including its original formula
 /// handle.
-fn snapshot_for_delete(workbook: &Workbook, sheet: usize, axis: Axis, at: u32) -> Vec<Operation> {
+fn snapshot_for_delete(
+    workbook: &Workbook,
+    sheet: usize,
+    axis: Axis,
+    at: u32,
+    cross: Cross,
+) -> Vec<Operation> {
     let mut restores = Vec::new();
     for (idx, s) in workbook.sheets.iter().enumerate() {
         for (addr, cell) in s.cells.iter() {
             let touched = if idx == sheet {
-                axis.coord(addr) >= at || cell.formula.is_some()
+                (axis.coord(addr) >= at && in_cross(cross, axis, addr)) || cell.formula.is_some()
             } else {
                 cell.formula.is_some()
             };
@@ -1421,6 +1793,19 @@ struct RewriteCtx<'a> {
     /// reference turned `#REF!`. The matching delete cannot undo either, so
     /// the caller keeps the original for the inverse.
     clipped: std::cell::Cell<bool>,
+    /// The band a block shift is confined to (`XL-UX-173`); `None` for whole
+    /// lines.
+    cross: Cross,
+}
+
+/// One structural shift, in the terms every rewrite pass takes.
+#[derive(Debug, Clone, Copy)]
+struct Shift {
+    axis: Axis,
+    kind: ShiftKind,
+    at: u32,
+    count: u32,
+    cross: Cross,
 }
 
 /// Rewrite the references of every formula in the workbook that targets
@@ -1431,11 +1816,15 @@ struct RewriteCtx<'a> {
 fn rewrite_all_formulas(
     workbook: &mut Workbook,
     target: &str,
-    axis: Axis,
-    kind: ShiftKind,
-    at: u32,
-    count: u32,
+    shift: Shift,
 ) -> Vec<(usize, CellRef, Expr)> {
+    let Shift {
+        axis,
+        kind,
+        at,
+        count,
+        cross,
+    } = shift;
     let mut clipped = Vec::new();
     let mut jobs: Vec<RewriteJob> = Vec::new();
     for (idx, s) in workbook.sheets.iter().enumerate() {
@@ -1462,6 +1851,7 @@ fn rewrite_all_formulas(
             at,
             count,
             clipped: std::cell::Cell::new(false),
+            cross,
         };
         // **In and out of the absolute form.** The rewrite below works in
         // addresses — "is this reference at or past the insertion point" is a
@@ -1503,14 +1893,14 @@ fn rewrite_all_formulas(
 /// unqualified one is already unusual; treating its home as no sheet at all
 /// means such a reference is left alone rather than rewritten against a sheet
 /// picked arbitrarily. Under-rewriting an oddity beats rewriting it wrongly.
-fn rewrite_defined_names(
-    workbook: &mut Workbook,
-    target: &str,
-    axis: Axis,
-    kind: ShiftKind,
-    at: u32,
-    count: u32,
-) -> bool {
+fn rewrite_defined_names(workbook: &mut Workbook, target: &str, shift: Shift) -> bool {
+    let Shift {
+        axis,
+        kind,
+        at,
+        count,
+        cross,
+    } = shift;
     let mut clipped = false;
     let jobs: Vec<(usize, Expr, String)> = workbook
         .defined_names
@@ -1535,6 +1925,7 @@ fn rewrite_defined_names(
             at,
             count,
             clipped: std::cell::Cell::new(false),
+            cross,
         };
         // A defined name has no holding cell, so its tree is already the
         // absolute form and needs no conversion.
@@ -1555,14 +1946,14 @@ fn rewrite_defined_names(
 /// **A pivot's `source`** lives on `source_sheet`, which is very often *not*
 /// the sheet holding the pivot; deciding whether it moves means comparing sheet
 /// identities, and a lone `&mut impl Positional` has none to compare.
-fn shift_drawings_and_pivot_sources(
-    workbook: &mut Workbook,
-    sheet: usize,
-    axis: Axis,
-    kind: ShiftKind,
-    at: u32,
-    count: u32,
-) -> bool {
+fn shift_drawings_and_pivot_sources(workbook: &mut Workbook, sheet: usize, shift: Shift) -> bool {
+    let Shift {
+        axis,
+        kind,
+        at,
+        count,
+        cross,
+    } = shift;
     let mut clipped = false;
     let target_id = workbook.sheets[sheet].id;
 
@@ -1572,11 +1963,17 @@ fn shift_drawings_and_pivot_sources(
     match kind {
         ShiftKind::Insert => {
             for image in images.iter_mut() {
+                if !range_in_cross(cross, axis, &image.anchor) {
+                    continue;
+                }
                 insert_coord(axis, &mut image.anchor.start, at, count);
                 insert_coord(axis, &mut image.anchor.end, at, count);
             }
         }
         ShiftKind::Delete => images.retain_mut(|image| {
+            if !range_in_cross(cross, axis, &image.anchor) {
+                return true;
+            }
             let lo = axis.coord(image.anchor.start);
             let hi = axis.coord(image.anchor.end);
             match map_range_delete(lo, hi, at, count) {
@@ -1607,7 +2004,7 @@ fn shift_drawings_and_pivot_sources(
     // rectangle that now starts on the header row, or ends one record short.
     for other in workbook.sheets.iter_mut() {
         for pivot in other.pivots.iter_mut() {
-            if pivot.source_sheet != target_id {
+            if pivot.source_sheet != target_id || !range_in_cross(cross, axis, &pivot.source) {
                 continue;
             }
             // Where the source began *before* the shift. Every `source_column`
@@ -1843,6 +2240,7 @@ pub(crate) fn shift_bundle_references(data: &mut crate::SheetMetadata, shift: &B
         at,
         count,
         clipped: std::cell::Cell::new(false),
+        cross: None,
     };
     for chart in data.charts.iter_mut() {
         for series in chart.series.iter_mut() {
@@ -1919,6 +2317,8 @@ pub(crate) struct CarriedShift<'a> {
     pub kind: ShiftKind,
     pub at: u32,
     pub count: u32,
+    /// The band a block shift is confined to; `None` for whole lines.
+    pub cross: Cross,
 }
 
 impl CarriedShift<'_> {
@@ -1931,6 +2331,7 @@ impl CarriedShift<'_> {
             at: self.at,
             count: self.count,
             clipped: std::cell::Cell::new(false),
+            cross: self.cross,
         }
     }
 
@@ -1971,14 +2372,14 @@ impl CarriedShift<'_> {
 /// references, and that part is what the writer emits. Shifting the model
 /// therefore fixes what is drawn on screen but not yet what is saved — see
 /// `FID-27`, which is that half.
-fn rewrite_chart_series(
-    workbook: &mut Workbook,
-    target: &str,
-    axis: Axis,
-    kind: ShiftKind,
-    at: u32,
-    count: u32,
-) -> bool {
+fn rewrite_chart_series(workbook: &mut Workbook, target: &str, shift: Shift) -> bool {
+    let Shift {
+        axis,
+        kind,
+        at,
+        count,
+        cross,
+    } = shift;
     let mut clipped = false;
     for sheet in workbook.sheets.iter_mut() {
         let home = sheet.name.clone();
@@ -1990,6 +2391,7 @@ fn rewrite_chart_series(
             at,
             count,
             clipped: std::cell::Cell::new(false),
+            cross,
         };
         for chart in sheet.charts.iter_mut() {
             for series in chart.series.iter_mut() {
@@ -2179,6 +2581,13 @@ fn rewrite_reference(reference: &StoredRef, ctx: &RewriteCtx) -> Expr {
     if !targets(reference, ctx) {
         return Expr::Reference(reference.clone());
     }
+    // A block shift moves only the cells in its band.
+    if let Some((c0, c1)) = ctx.cross {
+        let across = ctx.axis.other().ref_coord(reference);
+        if across < c0 || across > c1 {
+            return Expr::Reference(reference.clone());
+        }
+    }
     let coord = ctx.axis.ref_coord(reference);
     match ctx.kind {
         ShiftKind::Insert => {
@@ -2239,6 +2648,27 @@ fn rewrite_range(a: &StoredRef, b: &StoredRef, ctx: &RewriteCtx) -> Expr {
     };
     if open_on_axis {
         return Expr::Range(a.clone(), b.clone());
+    }
+    // A block shift moves a range only when the range's columns (rows) lie
+    // inside the band; one reaching outside it is left alone, because after a
+    // partial shift no rectangle names the cells it held. A range open on the
+    // other axis (`1:3` against a vertical shift) spans every column, so only
+    // a band covering every column contains it.
+    if let Some((c0, c1)) = ctx.cross {
+        let other = ctx.axis.other();
+        let open_across = match other {
+            Axis::Row => a.row_implicit || b.row_implicit,
+            Axis::Col => a.col_implicit || b.col_implicit,
+        };
+        let (lo, hi) = if open_across {
+            (0, other.limit())
+        } else {
+            let (x, y) = (other.ref_coord(a), other.ref_coord(b));
+            (x.min(y), x.max(y))
+        };
+        if lo < c0 || hi > c1 {
+            return Expr::Range(a.clone(), b.clone());
+        }
     }
     match ctx.kind {
         ShiftKind::Insert => {

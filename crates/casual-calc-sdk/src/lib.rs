@@ -3095,6 +3095,9 @@ fn recalc_plan(op: &Operation) -> RecalcPlan {
         Operation::MoveColumns { .. }
         | Operation::MoveRows { .. }
         | Operation::MoveRange { .. }
+        // Insert/Delete Cells renumbers the addresses in its block's band and
+        // rewrites references to them (`XL-UX-173`): the same hazard.
+        | Operation::ShiftCells { .. }
         | Operation::InsertRows { .. }
         | Operation::DeleteRows { .. }
         | Operation::InsertColumns { .. }
