@@ -6,6 +6,7 @@
 // without touching a single body.
 
 import { run as runRegistered } from "./commands.js";
+import { setStatusAlert } from "./editor.i18n.js";
 import {
   A1,
   A1range,
@@ -2151,10 +2152,7 @@ export function hyperlinkDialog() {
   }
 
   /// The address a mode would link to, as Excel shows it in Text to display.
-  const sheetPrefix = (i) => {
-    const n = sheetNames[i] ?? "";
-    return /^[A-Za-z_][A-Za-z0-9_.]*$/.test(n) && !/^[A-Za-z]{1,3}\d+$/.test(n) ? n : `'${n.replace(/'/g, "''")}'`;
-  };
+  const sheetPrefix = (i) => sheetRef(sheetNames[i] ?? "");
   const locationText = () => {
     if (place.kind === "name") {
       return place.scope >= 0 ? `${sheetPrefix(place.scope)}!${place.name}` : place.name;
@@ -2513,6 +2511,9 @@ export function confirmModal(title, message, confirmLabel = "OK") {
 /// The box that is up, if any: one at a time, as in Excel.
 let msgBoxOpen = null;
 
+/// Whether a message box is up — while one is, nothing behind it acts.
+export const messageBoxUp = () => msgBoxOpen !== null;
+
 /// The box's DOM, built once on first use rather than written into every host
 /// page: `editor.html` and the embed both get it without either knowing.
 function msgBoxRoot() {
@@ -2541,11 +2542,9 @@ function msgBoxRoot() {
   const text = el("p", "oc-msgbox-text");
   text.id = "oc-msgbox-text";
   row.append(icon, text);
+  // The buttons are made per message: Excel's sets differ (OK; OK, Cancel;
+  // Retry, Cancel; Yes, No, Cancel).
   const actions = el("div", "oc-confirm-actions oc-msgbox-actions");
-  const ok = el("button", "oc-btn primary", "OK");
-  ok.id = "oc-msgbox-ok";
-  ok.type = "button";
-  actions.append(ok);
   box.append(title, row, actions);
   root.append(box);
   // Beside `#oc-modal`, so a shadow-root mount keeps it inside the mount and
@@ -2557,63 +2556,140 @@ function msgBoxRoot() {
 /// Excel's icons, mapped to the Fluent sprite (our own artwork, docs/95).
 const MSGBOX_ICONS = { warning: "warning", info: "info", error: "error_circle" };
 
+/// Excel's button sets, by name. Each button is `[answer, label]`; the answer
+/// is what `messageBox` resolves to when it is pressed.
+const MSGBOX_BUTTONS = {
+  ok: [["ok", "OK"]],
+  okCancel: [["ok", "OK"], ["cancel", "Cancel"]],
+  retryCancel: [["retry", "Retry"], ["cancel", "Cancel"]],
+  yesNo: [["yes", "Yes"], ["no", "No"]],
+  yesNoCancel: [["yes", "Yes"], ["no", "No"], ["cancel", "Cancel"]],
+};
+
 /// Raise Excel's message box: the title bar (our name where Excel says
-/// "Microsoft Excel"), an icon, the message and OK, over whatever is open.
+/// "Microsoft Excel", or the caller's `title`), an icon, the message and one
+/// of Excel's button sets (`buttons`: `ok` by default, `okCancel`,
+/// `retryCancel`, `yesNo`, `yesNoCancel`), over whatever is open.
 ///
-/// OK has the focus and Enter, Space or Escape dismisses it, as in Excel.
-/// While it is up nothing behind it takes a key or a click. Dismissed, it
-/// gives the focus back to `field` — the input the message is about — with
-/// that input's text selected for retyping, or to whatever had the focus when
-/// it was raised. Resolves once dismissed.
+/// `defaultButton` (an answer; the first button otherwise) has the focus, and
+/// Enter or Space presses the focused button. Escape answers `cancel` where
+/// there is a Cancel, and `ok` where OK is the only button; a Yes/No box
+/// ignores it, as Windows does. Tab and the arrow keys move between the
+/// buttons. While it is up nothing behind it takes a key or a click.
+/// Dismissed, it gives the focus back to `field` — the input the message is
+/// about — with that input's text selected for retyping, or to whatever had
+/// the focus when it was raised. Resolves to the answer pressed.
 ///
 /// Every message a dialog gives about its own input goes through here; no
 /// dialog shows one inline (`editor.message-box` checks each site).
-export function messageBox(message, { icon = "warning", field = null } = {}) {
+export function messageBox(message, {
+  icon = "warning", field = null, title = "", buttons = "ok", defaultButton = "",
+} = {}) {
   if (msgBoxOpen) msgBoxOpen.dismiss();
   const root = msgBoxRoot();
-  const ok = root.querySelector("#oc-msgbox-ok");
+  root.querySelector("#oc-msgbox-title").textContent = title || "OpenCalc";
   root.querySelector("#oc-msgbox-text").textContent = String(message ?? "");
   root.dataset.icon = MSGBOX_ICONS[icon] ? icon : "warning";
   root.querySelector(".oc-msgbox-icon use").setAttribute("href", `#fi-${MSGBOX_ICONS[root.dataset.icon]}`);
+  const set = MSGBOX_BUTTONS[buttons] ?? MSGBOX_BUTTONS.ok;
+  const actions = root.querySelector(".oc-msgbox-actions");
+  const btns = set.map(([answer, label]) => {
+    const b = el("button", "oc-btn", label);
+    b.type = "button";
+    b.id = `oc-msgbox-${answer}`;
+    b.dataset.answer = answer;
+    return b;
+  });
+  const first = btns.find((b) => b.dataset.answer === defaultButton) ?? btns[0];
+  first.classList.add("primary");
+  actions.replaceChildren(...btns);
   const active = (root.getRootNode() ?? document).activeElement;
   const back = field || (active instanceof HTMLElement ? active : null);
   root.hidden = false;
-  ok.focus();
+  first.focus();
+  const escape = set.some(([a]) => a === "cancel") ? "cancel" : set.length === 1 ? set[0][0] : null;
   return new Promise((resolve) => {
+    const focused = () => btns.indexOf((root.getRootNode() ?? document).activeElement);
     const onKey = (e) => {
       // Modal: nothing behind the box takes a key while it is up.
       e.stopImmediatePropagation();
-      if (e.key === "Enter" || e.key === "Escape" || e.key === " ") {
+      if (e.key === "Enter" || e.key === " ") {
         e.preventDefault();
-        dismiss();
-      } else if (e.key === "Tab") {
+        dismiss(btns[Math.max(0, focused())]?.dataset.answer ?? first.dataset.answer);
+      } else if (e.key === "Escape") {
         e.preventDefault();
-        ok.focus();
+        if (escape) dismiss(escape);
+      } else if (["Tab", "ArrowRight", "ArrowLeft", "ArrowDown", "ArrowUp"].includes(e.key)) {
+        e.preventDefault();
+        const back1 = (e.key === "Tab" && e.shiftKey) || e.key === "ArrowLeft" || e.key === "ArrowUp";
+        const at = Math.max(0, focused());
+        btns[(at + (back1 ? btns.length - 1 : 1)) % btns.length].focus();
       } else if (!["Control", "Shift", "Alt", "Meta"].includes(e.key) && !(e.ctrlKey || e.metaKey)) {
         e.preventDefault();
       }
     };
-    const onClick = () => dismiss();
-    const holdFocus = (e) => { if (!root.contains(e.composedPath()[0])) ok.focus(); };
-    function dismiss() {
+    const onClick = (e) => {
+      const b = e.target.closest?.(".oc-btn");
+      if (b && btns.includes(b)) dismiss(b.dataset.answer);
+    };
+    const holdFocus = (e) => { if (!root.contains(e.composedPath()[0])) first.focus(); };
+    function dismiss(answer = escape ?? first.dataset.answer) {
       if (msgBoxOpen?.dismiss !== dismiss) return;
       msgBoxOpen = null;
       root.hidden = true;
       window.removeEventListener("keydown", onKey, true);
       document.removeEventListener("focusin", holdFocus, true);
-      ok.removeEventListener("click", onClick);
-      if (back && back.isConnected) {
+      actions.removeEventListener("click", onClick);
+      if (field && field.isConnected) {
+        field.focus();
+        if (typeof field.select === "function") field.select();
+      } else if (!back || !back.isConnected || back === canvas || back.id === "inline-edit") {
+        // Raised over the grid: give the grid its keyboard back through its
+        // own path. Since the input-method host (XL-FEAT-023), the grid's
+        // focus is the hidden in-cell editor, which may be hidden or moved by
+        // the time the box closes — refocusing that element left focus on the
+        // page body (XL-UX-187).
+        canvas.focus();
+      } else {
         back.focus();
-        if (field && typeof field.select === "function") field.select();
       }
-      resolve();
+      resolve(answer);
     }
     msgBoxOpen = { dismiss };
     window.addEventListener("keydown", onKey, true);
     document.addEventListener("focusin", holdFocus, true);
-    ok.addEventListener("click", onClick);
+    actions.addEventListener("click", onClick);
   });
 }
+
+// ---- Excel's alerts for refusals the engine makes (XL-UX-174) ----------------
+
+/// Excel's words for a locked cell on a protected sheet.
+export const PROTECTED_SHEET_TEXT =
+  "The cell or chart you're trying to change is on a protected sheet. " +
+  "To make a change, unprotect the sheet. You might be requested to enter a password.";
+/// Excel's words for deleting or hiding the last visible sheet.
+export const LAST_SHEET_TEXT =
+  "A workbook must contain at least one visible worksheet. To hide, delete, or move the " +
+  "selected sheet(s), you must first insert a new sheet or unhide a sheet that is already hidden.";
+/// Excel's words for typing into a PivotTable report.
+export const PIVOT_CELL_TEXT = "Cannot change this part of a PivotTable report.";
+
+/// The engine's refusals that Excel answers with a message box rather than a
+/// line of text, by the engine's own sentence. Every path that reports one —
+/// typing, Delete, paste, fill, a sheet command — goes through `statusError`,
+/// so mapping them there catches every path at once instead of each call site.
+const ENGINE_ALERTS = new Map([
+  ["this sheet is protected — unprotect it to change locked cells", PROTECTED_SHEET_TEXT],
+  ["cannot delete the last sheet", LAST_SHEET_TEXT],
+  ["a workbook needs at least one visible sheet", LAST_SHEET_TEXT],
+]);
+setStatusAlert((text) => {
+  const box = ENGINE_ALERTS.get(String(text));
+  if (!box) return false;
+  messageBox(box);
+  return true;
+});
 
 export function reportImportIssues() {
   let summary = "";
@@ -2893,7 +2969,7 @@ export async function deleteSheetWithConfirm(i) {
   // The engine refuses this anyway, in these words. Asking first and *then*
   // failing would be a dialog that talks somebody into a click that cannot
   // work.
-  if (names.length <= 1) { statusError("cannot delete the last sheet"); return; }
+  if (names.length <= 1) { messageBox(LAST_SHEET_TEXT); return; }
   const name = names[i];
   const ok = await confirmModal(
     `Delete "${name}"?`,
@@ -3584,7 +3660,24 @@ const GOTO_MAX_COLS = 16384;
 /// reload would be remembering somebody else's document.
 const goToRecent = [];
 
-const quoteSheet = (n) => (/^[A-Za-z_][A-Za-z0-9_.]*$/.test(n) ? n : `'${n.replace(/'/g, "''")}'`);
+/// A sheet name as written before a reference's `!` — the engine's own rule
+/// (`sheet_name_quoted`, the formula printer's), so the name box, Go To, New
+/// Name, Insert Hyperlink, a reference picked while typing and a chart all
+/// quote alike. Bare only for a plain identifier that cannot be read as
+/// anything else: `Sheet1`, but `'A1'`, `'R1C1'`, `'2024'`, `'My Sheet'`
+/// (XL-UX-166).
+///
+/// The fallback is the same rule, for a host whose engine predates the
+/// binding; quoting more than needed is always safe, quoting less is not.
+export function sheetRef(name) {
+  const n = String(name ?? "");
+  try { if (wasm && wasm.sheet_name_quoted) return wasm.sheet_name_quoted(n); } catch {}
+  const plain = /^[A-Za-z_][A-Za-z0-9_]*$/.test(n)
+    && !/^[A-Za-z]{1,3}\d{1,7}$/.test(n)
+    && !/^(R\d*C\d*|R\d+|C\d+|R|C)$/i.test(n);
+  return plain ? n : `'${n.replace(/'/g, "''")}'`;
+}
+const quoteSheet = sheetRef;
 
 /// `$C$5`, `$B$2:$D$4`, `$A:$C`, `$2:$4` — the way Excel writes a reference it
 /// remembers.
@@ -4202,13 +4295,15 @@ export function openNameManager() {
     // "Do you want to save the changes you made to the name reference?".
     if (!refDirty) { finish(); return; }
     const pending = { ...selected(), text: ref.value };
-    frame.close();
-    confirmModal("Name Manager", "Do you want to save the changes you made to the name reference?", "Yes").then((yes) => {
-      if (yes) {
+    // Asked over the dialog, as Excel asks (XL-UX-174); the dialog closes after.
+    messageBox("Do you want to save the changes you made to the name reference?", {
+      buttons: "yesNo",
+    }).then((answer) => {
+      if (answer === "yes") {
         try { wasm.session_set_name(pending.name, pending.sheet, pending.name, pending.sheet, pending.text, pending.comment || ""); draw(); }
         catch (e) { statusError(errText(e)); }
       }
-      canvas.focus();
+      finish();
     });
   });
   neu.addEventListener("click", () => { frame.close(); nameDialog(null, true); });
@@ -4222,14 +4317,14 @@ export function openNameManager() {
   del.addEventListener("click", () => {
     const n = selected();
     if (!n) return;
-    frame.close();
-    confirmModal("Name Manager", `Are you sure you want to delete the name ${n.name}?`, "OK").then((yes) => {
-      if (yes) {
-        // The row only goes when the name did.
-        try { wasm.session_delete_name_in(n.name, n.sheet); nmState.selected = null; draw(); }
-        catch (e) { statusError(errText(e)); }
-      }
-      openNameManager();
+    // Asked over the dialog, which stays open, as Excel asks (XL-UX-174). It
+    // used to close, ask in its place, and reopen.
+    messageBox(`Are you sure you want to delete the name ${n.name}?`, { buttons: "okCancel" }).then((answer) => {
+      if (answer !== "ok") return;
+      // The row only goes when the name did.
+      try { wasm.session_delete_name_in(n.name, n.sheet); nmState.selected = null; draw(); }
+      catch (e) { statusError(errText(e)); }
+      render();
     });
   });
 

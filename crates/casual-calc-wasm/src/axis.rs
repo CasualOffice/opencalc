@@ -628,21 +628,115 @@ pub fn session_cells(
     last_row: u32,
     last_col: u32,
 ) -> String {
+    cells_in_bands(sheet, &[(first_row, last_row)], &[(first_col, last_col)])
+}
+
+/// The cells of several row bands crossed with several column bands, in one
+/// call — what a window with frozen panes is (`PERF-23`).
+///
+/// `rows` and `cols` are flat `[first, last, first, last, …]` pairs. A frozen
+/// row and column make the window four rectangles — the corner, the frozen
+/// row's scrolled part, the frozen column's scrolled part, and the body — and
+/// asking for their bounding box instead fetched every cell scrolled past: at
+/// row 20,000 a frame read 100k cells to draw a few hundred. Asked as one call
+/// rather than four, so the per-call work (the rule order, the formula rules'
+/// parse) is paid once.
+///
+/// The answer has the same shape as [`session_cells`]: stored cells in row
+/// order (bands are sorted and merged first, so overlapping or out-of-order
+/// pairs cannot duplicate or reorder a cell), then the empty positions a
+/// conditional format paints.
+#[wasm_bindgen]
+pub fn session_cells_bands(sheet: usize, rows: &[u32], cols: &[u32]) -> String {
+    cells_in_bands(sheet, &bands_from_pairs(rows), &bands_from_pairs(cols))
+}
+
+/// Flat `[first, last, …]` pairs as sorted, disjoint, inclusive bands. A
+/// trailing odd value is ignored; a reversed pair is read as written the other
+/// way round.
+pub(crate) fn bands_from_pairs(flat: &[u32]) -> Vec<(u32, u32)> {
+    let mut bands: Vec<(u32, u32)> = flat
+        .chunks_exact(2)
+        .map(|p| (p[0].min(p[1]), p[0].max(p[1])))
+        .collect();
+    bands.sort_unstable();
+    let mut merged: Vec<(u32, u32)> = Vec::with_capacity(bands.len());
+    for (a, b) in bands {
+        match merged.last_mut() {
+            Some(last) if a <= last.1.saturating_add(1) => last.1 = last.1.max(b),
+            _ => merged.push((a, b)),
+        }
+    }
+    merged
+}
+
+/// One sheet's conditional-format range statistics, shared with the caller.
+type SharedStats = std::rc::Rc<Vec<casual_calc_layout::conditional::RangeStats>>;
+
+thread_local! {
+    /// The last range statistics computed, with the session generation and
+    /// sheet they were computed for (`PERF-24`).
+    static CF_STATS: RefCell<Option<(u64, usize, SharedStats)>> = const { RefCell::new(None) };
+    /// How many times the statistics were actually computed. Diagnostics: a
+    /// scroll over an unchanged sheet should not move it.
+    static CF_STATS_COMPUTED: core::cell::Cell<u64> = const { core::cell::Cell::new(0) };
+}
+
+/// Every conditional format's range statistics for a sheet, computed once per
+/// session generation (`PERF-24`).
+///
+/// A colour scale, a data bar, a top-N, an above-average and a duplicate rule
+/// all need a pass over their whole applies-to range — extremes, mean, cutoff,
+/// counts — and that pass ran on *every* `session_cells` call: on a frame, at
+/// a hundred thousand cells, it was most of the frame. The statistics depend
+/// only on the workbook, so they are kept until the session's generation moves,
+/// which it does on any mutable access whatsoever (see `SessionCell`): an
+/// edit, an undo, a recalculation, a remote operation, a new document. Keyed
+/// on the sheet too, because two sheets' rules are different rules.
+pub(crate) fn cached_cf_stats(wb: &Workbook, sheet_index: usize, sheet: &Sheet) -> SharedStats {
+    let generation = SESSION.with(SessionCell::generation);
+    if let Some(hit) = CF_STATS.with(|c| {
+        c.borrow()
+            .as_ref()
+            .filter(|(g, sh, _)| *g == generation && *sh == sheet_index)
+            .map(|(_, _, stats)| std::rc::Rc::clone(stats))
+    }) {
+        return hit;
+    }
+    // One pass per rule that needs the whole range — its extremes, its mean,
+    // its top-N cutoff, how often each value repeats.
+    let stats: Vec<casual_calc_layout::conditional::RangeStats> = sheet
+        .conditional_formats
+        .iter()
+        .map(|cf| casual_calc_layout::conditional::range_stats(wb, sheet, cf))
+        .collect();
+    if !stats.is_empty() {
+        CF_STATS_COMPUTED.with(|n| n.set(n.get() + 1));
+    }
+    let stats = std::rc::Rc::new(stats);
+    CF_STATS
+        .with(|c| *c.borrow_mut() = Some((generation, sheet_index, std::rc::Rc::clone(&stats))));
+    stats
+}
+
+/// How many times conditional-format range statistics have been computed in
+/// this page (`PERF-24`). Diagnostics for a test: scrolling an unchanged sheet
+/// must not move it, and any edit must.
+#[wasm_bindgen]
+#[must_use]
+pub fn session_cf_stats_computed() -> f64 {
+    CF_STATS_COMPUTED.with(core::cell::Cell::get) as f64
+}
+
+fn cells_in_bands(sheet: usize, row_bands: &[(u32, u32)], col_bands: &[(u32, u32)]) -> String {
     with_session(|s| {
         let wb = s.workbook();
         let sheet_index = sheet;
         let Some(sheet) = wb.sheets.get(sheet_index) else {
             return "[]".to_owned();
         };
-        // One pass per rule that needs the whole range — its extremes, its mean,
-        // its top-N cutoff, how often each value repeats. Done once per call
-        // rather than per cell: a colour scale over a thousand rows would
-        // otherwise cost a thousand scans.
-        let cf_stats: Vec<casual_calc_layout::conditional::RangeStats> = sheet
-            .conditional_formats
-            .iter()
-            .map(|cf| casual_calc_layout::conditional::range_stats(wb, sheet, cf))
-            .collect();
+        let in_cols = |col: u32| col_bands.iter().any(|&(a, b)| col >= a && col <= b);
+        let cf_stats = cached_cf_stats(wb, sheet_index, sheet);
         let cf_order = casual_calc_layout::conditional::priority_order(sheet);
         // The formula rules, parsed once for this call. The canvas is the one
         // renderer with a formula engine behind it, so it is the one that can
@@ -650,8 +744,11 @@ pub fn session_cells(
         let cf_exprs = casual_calc_eval::conditional::CfExpressionRules::new(wb, sheet_index);
 
         let mut items = Vec::new();
-        for (at, cell) in sheet.cells.row_band(first_row, last_row) {
-            if at.col < first_col || at.col > last_col {
+        for (at, cell) in row_bands
+            .iter()
+            .flat_map(|&(first_row, last_row)| sheet.cells.row_band(first_row, last_row))
+        {
+            if !in_cols(at.col) {
                 continue;
             }
             // Two sheet-view switches change what a cell reads as, so they are
@@ -961,7 +1058,14 @@ pub fn session_cells(
         // hundred it can draw. Each empty position costs one `effect_for`,
         // which is the same call the stored cells make.
         let mut painted_empty = Vec::new();
-        for cf in &sheet.conditional_formats {
+        let rects = row_bands
+            .iter()
+            .flat_map(|&rows| col_bands.iter().map(move |&cols| (rows, cols)));
+        for (cf, ((first_row, last_row), (first_col, last_col))) in sheet
+            .conditional_formats
+            .iter()
+            .flat_map(|cf| rects.clone().map(move |rect| (cf, rect)))
+        {
             let r0 = cf.range.start.row.max(first_row);
             let r1 = cf.range.end.row.min(last_row);
             let c0 = cf.range.start.col.max(first_col);
@@ -1610,6 +1714,155 @@ mod center_across_tests {
         assert_eq!(
             session_center_across_runs(0, 0, 0, 0, 7),
             "[{\"r\":0,\"c0\":0,\"c1\":3},{\"r\":0,\"c0\":4,\"c1\":7}]"
+        );
+    }
+}
+
+#[cfg(test)]
+mod frame_fetch_tests {
+    use super::{bands_from_pairs, session_cells, session_cells_bands, session_cf_stats_computed};
+    use crate::{
+        session_add_cf, session_generation, session_new, session_recalculate,
+        session_set_calculation_mode, session_set_cell, session_undo,
+    };
+
+    /// The fill the colour scale gives A5.
+    fn a5_fill() -> String {
+        let json = session_cells(0, 4, 0, 4, 0);
+        let at = json.find("\"bg\":\"").expect("A5 is painted");
+        json[at + 6..at + 12].to_owned()
+    }
+
+    fn seeded() {
+        session_new();
+        for r in 0..10u32 {
+            session_set_cell(0, r, 0, &r.to_string()).unwrap();
+        }
+        session_add_cf(0, 0, 0, 19, 0, "colorscale", 0.0, 0.0, "FF0000,00FF00", "").unwrap();
+    }
+
+    /// **The statistics are computed once and then reused** (`PERF-24`):
+    /// asking again with nothing changed does no range pass.
+    #[test]
+    fn unchanged_sheet_reuses_its_statistics() {
+        seeded();
+        let first = a5_fill();
+        let runs = session_cf_stats_computed();
+        for _ in 0..5 {
+            assert_eq!(a5_fill(), first);
+        }
+        assert_eq!(
+            session_cf_stats_computed(),
+            runs,
+            "asking for the same cells of an unchanged sheet recomputed its statistics"
+        );
+    }
+
+    /// **Every way the values can change shows on the next fetch** — an edit,
+    /// an undo, an F9 in manual mode (which does not move the edit counter),
+    /// and a new document with a sheet at the same index. A stale cache is
+    /// worse than none.
+    #[test]
+    fn statistics_follow_edits_undo_recalculation_and_a_new_document() {
+        seeded();
+        let start = a5_fill();
+        session_set_cell(0, 10, 0, "1000").unwrap();
+        let widened = a5_fill();
+        assert_ne!(widened, start, "a new maximum must recolour A5");
+        session_undo().unwrap();
+        assert_eq!(a5_fill(), start, "undo must restore A5's colour");
+
+        // A12 = A2*1000 is the maximum; in manual mode clearing A2 leaves it
+        // stale until F9, which then moves the maximum without an edit.
+        session_set_cell(0, 11, 0, "=A2*1000").unwrap();
+        session_set_calculation_mode("manual");
+        session_set_cell(0, 1, 0, "0").unwrap();
+        let stale = a5_fill();
+        session_recalculate();
+        assert_ne!(
+            a5_fill(),
+            stale,
+            "a recalculation that moves the maximum must recolour A5"
+        );
+        session_set_calculation_mode("auto");
+
+        // Same sheet index, different book, reversed values.
+        session_new();
+        for r in 0..10u32 {
+            session_set_cell(0, r, 0, &(9 - r).to_string()).unwrap();
+        }
+        session_add_cf(0, 0, 0, 19, 0, "colorscale", 0.0, 0.0, "FF0000,00FF00", "").unwrap();
+        assert_ne!(
+            a5_fill(),
+            start,
+            "a new document must not be given the last one's statistics"
+        );
+    }
+
+    /// The generation moves on a mutable access that the edit counter does
+    /// not see — F9 — and stays put across reads.
+    #[test]
+    fn generation_moves_on_recalculation_and_not_on_reads() {
+        seeded();
+        let g = session_generation();
+        let _ = session_cells(0, 0, 0, 30, 3);
+        assert_eq!(session_generation(), g, "a read moved the generation");
+        session_recalculate();
+        assert_ne!(session_generation(), g, "F9 must move the generation");
+    }
+
+    #[test]
+    fn bands_are_sorted_merged_and_inclusive() {
+        assert_eq!(bands_from_pairs(&[20, 30, 0, 0]), vec![(0, 0), (20, 30)]);
+        assert_eq!(bands_from_pairs(&[0, 4, 5, 9]), vec![(0, 9)]);
+        assert_eq!(bands_from_pairs(&[0, 6, 3, 9, 7]), vec![(0, 9)]);
+        assert_eq!(bands_from_pairs(&[9, 3]), vec![(3, 9)]);
+        assert!(bands_from_pairs(&[]).is_empty());
+    }
+
+    /// **The four panes of a frozen window are the bounding box's cells that
+    /// lie in them, in the same order** (`PERF-23`), and nothing scrolled
+    /// past. Compared item by item against one bounding-box fetch, filtered.
+    #[test]
+    fn frozen_panes_fetch_their_own_cells_and_nothing_between() {
+        session_new();
+        for r in 0..60u32 {
+            for c in 0..12u32 {
+                session_set_cell(0, r, c, &format!("{r}:{c}")).unwrap();
+            }
+        }
+        let rows = [(0u32, 1u32), (40, 50)];
+        let cols = [(0u32, 0u32), (7, 10)];
+        let bands = session_cells_bands(0, &[40, 50, 0, 1], &[7, 10, 0, 0]);
+        let whole = session_cells(0, 0, 0, 50, 10);
+        let pick = |json: &str| -> Vec<(u32, u32)> {
+            json.split("{\"r\":")
+                .skip(1)
+                .map(|item| {
+                    let mut it = item
+                        .split(|ch: char| !ch.is_ascii_digit())
+                        .filter(|s| !s.is_empty());
+                    (
+                        it.next().unwrap().parse().unwrap(),
+                        it.next().unwrap().parse().unwrap(),
+                    )
+                })
+                .collect()
+        };
+        let inside = |&(r, c): &(u32, u32)| {
+            rows.iter().any(|&(a, b)| r >= a && r <= b)
+                && cols.iter().any(|&(a, b)| c >= a && c <= b)
+        };
+        let expected: Vec<(u32, u32)> = pick(&whole).into_iter().filter(inside).collect();
+        let got = pick(&bands);
+        assert_eq!(
+            got.len(),
+            2 * 5 + 11 * 5,
+            "two frozen rows and eleven body rows, five columns each"
+        );
+        assert_eq!(
+            got, expected,
+            "the bands must be the bounding box's cells in them, in its order"
         );
     }
 }

@@ -61,6 +61,11 @@ import {
   conditionDialog,
   confirmModal,
   messageBox,
+  messageBoxUp,
+  PIVOT_CELL_TEXT,
+  PROTECTED_SHEET_TEXT,
+  selectBoxes,
+  sheetRef,
   customFormatDialog,
   deleteSheetWithConfirm,
   formatCellsDialog,
@@ -516,6 +521,9 @@ export {
   conditionDialog,
   confirmModal,
   messageBox,
+  messageBoxUp,
+  selectBoxes,
+  sheetRef,
   customFormatDialog,
   deleteSheetWithConfirm,
   formatCellsDialog,
@@ -633,6 +641,7 @@ export {
   updateGridCounts,
   updateResize,
   usedBounds,
+  usedBoundsStatsForTest,
   valueExtent,
 } from "./editor.geometry.js";
 export {
@@ -2267,7 +2276,6 @@ function measure() {
   // and grow rows that contain wrapped text / tall fonts (auto row height).
   const lastRowIdx = geo.rowIdx[geo.rowIdx.length - 1] ?? fsr;
   const lastColIdx = geo.colIdx[geo.colIdx.length - 1] ?? fsc;
-  const firstRowIdx = fr > 0 ? 0 : fsr;
   const firstColIdx = fc > 0 ? 0 : fsc;
   // **One line more on the leading edges, for borders** (`XL-UX-183`). A
   // border wider than a pixel is centred on its edge, so half of the right
@@ -2278,10 +2286,36 @@ function measure() {
   // apart in `edgeItems` so nothing else mistakes them for window cells.
   const edgeCol = fc > 0 ? -1 : fsc - 1;
   const edgeRow = fr > 0 ? -1 : fsr - 1;
+  //
+  // **Per pane, not the bounding box** (`PERF-23`). With frozen panes the
+  // window is up to four rectangles — the corner, the frozen rows' scrolled
+  // part, the frozen columns' scrolled part, and the body — and fetching their
+  // bounding box from row and column 0 read every cell scrolled past: 100k
+  // cells a frame at row 20,000, to draw a few hundred. Each axis is now its
+  // frozen band plus its body band, crossed in one engine call. On a frozen
+  // axis the body band starts one line early — the edge line, which the border
+  // pass takes from `geoItems` there (it always did: the old fetch from 0
+  // held it) — and an unfrozen axis keeps its edge in `edgeItems` as before.
+  const axisBands = (frozenN, first, edge, last) => {
+    if (frozenN <= 0) return [[Math.max(0, edge), last]];
+    const bands = [[0, Math.min(frozenN - 1, last)]];
+    const bodyStart = first - 1 >= frozenN ? first - 1 : first;
+    if (last >= bodyStart) bands.push([bodyStart, last]);
+    return bands;
+  };
+  const rowBands = axisBands(fr, fsr, edgeRow, lastRowIdx);
+  const colBands = axisBands(fc, fsc, edgeCol, lastColIdx);
+  // The rows actually drawn — without the edge row — which is what the spill
+  // and centre-across scans below are about.
+  const drawnRowBands = (fr > 0 ? [[0, Math.min(fr - 1, lastRowIdx)], [fsr, lastRowIdx]] : [[fsr, lastRowIdx]])
+    .filter(([a, b]) => b >= a);
+  // Where the body's columns start, as fetched: anything left of it (and right
+  // of the frozen columns) has scrolled out and can only reach in by spilling.
+  const bodyColStart = colBands[colBands.length - 1][0];
   edgeItems = [];
   geoItems = [];
   for (const it of JSON.parse(
-    wasm.session_cells(state.sheet, Math.max(0, edgeRow < 0 ? firstRowIdx : edgeRow), Math.max(0, edgeCol < 0 ? firstColIdx : edgeCol), lastRowIdx, lastColIdx),
+    wasm.session_cells_bands(state.sheet, rowBands.flat(), colBands.flat()),
   )) {
     if (it.c === edgeCol || it.r === edgeRow) { if (it.bd) edgeItems.push(it); }
     else geoItems.push(it);
@@ -2297,10 +2331,8 @@ function measure() {
   if (geoItems.some((it) => it.a === "cont")) {
     // Per drawn band: with frozen rows the window's rows are not contiguous,
     // and asking across the gap would scan every row scrolled past.
-    const bands = fr > 0 ? [[0, fr - 1], [fsr, lastRowIdx]] : [[fsr, lastRowIdx]];
     try {
-      for (const [b0, b1] of bands) {
-        if (b1 < b0) continue;
+      for (const [b0, b1] of drawnRowBands) {
         for (const run of JSON.parse(
           wasm.session_center_across_runs(state.sheet, b0, b1, firstColIdx, lastColIdx),
         )) contRuns.set(run.r + "," + run.c0, run);
@@ -2317,9 +2349,16 @@ function measure() {
   // owner and the window is empty by definition, so one window per side picks
   // up exactly the owners.
   try {
-    const span = JSON.parse(
-      wasm.session_spill_owners(state.sheet, firstRowIdx, lastRowIdx, firstColIdx, lastColIdx),
-    );
+    // Per drawn row band, for the reason the fetch above is (`PERF-23`):
+    // across the gap between a frozen row and the body is every row scrolled
+    // past. The body's columns start at `bodyColStart`; on an unfrozen axis
+    // that is the window's first column, as it always was.
+    const span = { left: null, right: null };
+    for (const [b0, b1] of drawnRowBands) {
+      const one = JSON.parse(wasm.session_spill_owners(state.sheet, b0, b1, fc > 0 ? bodyColStart : fsc, lastColIdx));
+      if (one.left !== null) span.left = span.left === null ? one.left : Math.min(span.left, one.left);
+      if (one.right !== null) span.right = span.right === null ? one.right : Math.max(span.right, one.right);
+    }
     // **Reduce to the nearest populated cell per row, and filter after.**
     //
     // The band between the furthest owner and the window is not empty — only
@@ -2336,7 +2375,7 @@ function measure() {
     const gather = (a, b, fromLeft) => {
       const nearest = new Map();
       const pushed = new Set();
-      const fetched = JSON.parse(wasm.session_cells(state.sheet, firstRowIdx, a, lastRowIdx, b));
+      const fetched = JSON.parse(wasm.session_cells_bands(state.sheet, drawnRowBands.flat(), [a, b]));
       for (const it of fetched) {
         const held = nearest.get(it.r);
         if (held === undefined || (fromLeft ? it.c > held.c : it.c < held.c)) {
@@ -2356,7 +2395,12 @@ function measure() {
         }
       }
     };
-    if (span.left !== null && firstColIdx > 0) gather(span.left, firstColIdx - 1, true);
+    // With frozen columns the scrolled-out band is `fc..bodyColStart-1`: a
+    // frozen column is already fetched, and is clipped to its own pane.
+    if (fc > 0) {
+      const from = span.left === null ? null : Math.max(span.left, fc);
+      if (from !== null && from <= bodyColStart - 1) gather(from, bodyColStart - 1, true);
+    } else if (span.left !== null && fsc > 0) gather(span.left, fsc - 1, true);
     if (span.right !== null) gather(lastColIdx + 1, span.right, false);
   } catch { /* nothing outside the window is the common case */ }
   // A label the left gather already picked up needs nothing more; one it did
@@ -3295,9 +3339,9 @@ export function draw() {
   //
   // Including the cells just outside the leading edges: a wide border is
   // centred on its edge, so the left neighbour's right border and the upper
-  // neighbour's bottom border are partly inside the window (`XL-UX-183`). With
-  // frozen panes the main fetch already starts at 0 and holds those cells;
-  // without, `edgeItems` does.
+  // neighbour's bottom border are partly inside the window (`XL-UX-183`). On a
+  // frozen axis the body's band of the main fetch starts one line early and
+  // holds those cells (`PERF-23`); on an unfrozen one, `edgeItems` does.
   const edgeC = firstBodyCol() - 1 >= F.fc ? firstBodyCol() - 1 : -1;
   const edgeR = firstBodyRow() - 1 >= F.fr ? firstBodyRow() - 1 : -1;
   const borderX = (c) => colXAt(c) ?? (c === edgeC ? fscreenX(c) : undefined);
@@ -3305,9 +3349,9 @@ export function draw() {
   // In sheet order, whichever list a cell came from: where two borders meet,
   // the later one is drawn over the earlier, so the order is part of the
   // picture and must not depend on which cells are the window's. Both lists
-  // come out of one row-major fetch, so this is a merge, not a sort — `items`
-  // can be every cell above a frozen row. An edge cell is taken from `items`
-  // only on a frozen axis (where the fetch starts at 0); otherwise it is
+  // come out of one row-major fetch, so this is a merge, not a sort. An edge
+  // cell is taken from `items` only on a frozen axis (where the body's band
+  // of the fetch starts one line early); otherwise it is
   // `edgeItems`' — a spill owner gathered into `items` at the same address
   // would be drawn twice.
   const bordered = [];
@@ -4810,7 +4854,7 @@ export function buildChartPanel(body) {
     c.series.push({
       name: "",
       categories: c.series[0] ? c.series[0].categories : null,
-      values: `${/^[A-Za-z_][A-Za-z0-9_.]*$/.test(sheetName) ? sheetName : `'${sheetName.replace(/'/g, "''")}'`}!$${colName(r.c0)}$${r.r0 + 1}:$${colName(r.c1)}$${r.r1 + 1}`,
+      values: `${sheetRef(sheetName)}!$${colName(r.c0)}$${r.r0 + 1}:$${colName(r.c1)}$${r.r1 + 1}`,
     });
     applyChart(c);
   });
@@ -5027,7 +5071,7 @@ export function buildPivotPanel(body) {
   body.appendChild(name);
 
   const src = el("div", "panel-range",
-    `${sheetNameAt(p.sourceSheet) || "?"}!${A1(p.source[0], p.source[1])}:${A1(p.source[2], p.source[3])}`);
+    `${sheetNameAt(p.sourceSheet) ? sheetRef(sheetNameAt(p.sourceSheet)) : "?"}!${A1(p.source[0], p.source[1])}:${A1(p.source[2], p.source[3])}`);
   body.appendChild(src);
   if (p.imported) {
     body.appendChild(el("div", "panel-note",
@@ -6199,10 +6243,20 @@ export function stopMarch() {
   draw();
 }
 
-export async function clipToOS(s, cut) {
-  wasm.session_clip_copy(state.sheet, s.r0, s.c0, s.r1, s.c1, cut);
+/// Copy `s` — or, given `grid`, exactly the rows and columns of a multiple
+/// selection (`selectionGrid`) — to the app's clipboard and the system's.
+export async function clipToOS(s, cut, grid = null) {
+  const rows = grid && Uint32Array.from(grid.rows);
+  const cols = grid && Uint32Array.from(grid.cols);
+  if (grid) wasm.session_clip_copy_grid(state.sheet, rows, cols);
+  else wasm.session_clip_copy(state.sheet, s.r0, s.c0, s.r1, s.c1, cut);
   startMarch(s, cut);
-  const tsv = wasm.session_copy_tsv(state.sheet, s.r0, s.c0, s.r1, s.c1);
+  const copyHtml = () => (grid
+    ? wasm.session_copy_html_grid(state.sheet, rows, cols)
+    : wasm.session_copy_html(state.sheet, s.r0, s.c0, s.r1, s.c1));
+  const tsv = grid
+    ? wasm.session_copy_tsv_grid(state.sheet, rows, cols)
+    : wasm.session_copy_tsv(state.sheet, s.r0, s.c0, s.r1, s.c1);
   lastClipTsv = tsv;
   // Write a formatted HTML table alongside the plain-text TSV so external apps
   // (Excel, Sheets, mail, docs) receive styling; fall back to text-only when
@@ -6219,13 +6273,13 @@ export async function clipToOS(s, cut) {
   const nativeClip = window.__opencalcNative;
   if (nativeClip && nativeClip.clipboardWrite) {
     try {
-      const html = wasm.session_copy_html(state.sheet, s.r0, s.c0, s.r1, s.c1);
+      const html = copyHtml();
       await nativeClip.clipboardWrite(tsv, html);
       return true;
     } catch { return false; }
   }
   try {
-    const html = wasm.session_copy_html(state.sheet, s.r0, s.c0, s.r1, s.c1);
+    const html = copyHtml();
     if (navigator.clipboard.write && typeof ClipboardItem !== "undefined") {
       const item = new ClipboardItem({
         "text/html": new Blob([html], { type: "text/html" }),
@@ -6673,7 +6727,8 @@ export function beginEdit(surface, initial, caretAtEnd = false) {
   // The message is the engine's own sentence, word for word: one rule that
   // refuses in two places must not explain itself in two ways.
   if (activeCellLocked()) {
-    statusError("this sheet is protected — unprotect it to change locked cells");
+    // Excel's message box, in Excel's words (XL-UX-174).
+    messageBox(PROTECTED_SHEET_TEXT);
     return;
   }
   // A pivot's report is written by the engine and rewritten on every refresh.
@@ -6682,7 +6737,7 @@ export function beginEdit(surface, initial, caretAtEnd = false) {
   // until something else erases it is worse than one never accepted.
   const owner = pivotBlocks(state.sel.row, state.sel.col);
   if (owner) {
-    statusError(`this cell is part of the pivot table “${owner}” — change it in the fields panel`);
+    messageBox(PIVOT_CELL_TEXT);
     return;
   }
   editSurface = surface;
@@ -9618,15 +9673,15 @@ function wireEvents() {
         !surface.value.trim().startsWith("=") &&
         ["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"].includes(e.key)
       ) {
-        if (commit(surface.value, false)) {
-          const d = { ArrowUp: [-1, 0], ArrowDown: [1, 0], ArrowLeft: [0, -1], ArrowRight: [0, 1] }[e.key];
-          select(state.sel.row + d[0], state.sel.col + d[1]);
-        }
+        const d = { ArrowUp: [-1, 0], ArrowDown: [1, 0], ArrowLeft: [0, -1], ArrowRight: [0, 1] }[e.key];
+        const move = () => select(state.sel.row + d[0], state.sel.col + d[1]);
+        if (commit(surface.value, false, "user", { after: move })) move();
         e.preventDefault();
       }
       else if (e.key === "Tab") {
         // Shift+Tab while editing moves left, which it previously could not.
-        if (commit(surface.value, false)) tabStep(e.shiftKey);
+        const step = () => tabStep(e.shiftKey);
+        if (commit(surface.value, false, "user", { after: step })) step();
         e.preventDefault();
       }
     });

@@ -23,6 +23,8 @@ import {
   errText,
   findState,
   messageBox,
+  selectBoxes,
+  sheetRef,
   invalidateGrowth,
   navBlock,
   select,
@@ -602,18 +604,16 @@ export function gotoName(v) {
   const s = (v || "").trim();
   if (!s) { updateNameBox(); return; }
 
-  // A comma-separated list builds a multi-range selection, as in Excel.
+  // A comma-separated list builds a multi-range selection, as in Excel. The
+  // active cell is the top-left of the first range (XL-UX-165): `selectBoxes`
+  // makes the *last* box the active one, so the first goes to the end.
   if (s.includes(",")) {
     const parts = s.split(",").map((x) => x.trim()).filter(Boolean);
     const boxes = parts.map(parseNameRange).filter(Boolean);
     if (boxes.length === parts.length && boxes.length > 1) {
-      state.ranges = boxes.slice(0, -1);
-      const last = boxes[boxes.length - 1];
-      state.anchor = { row: last.r0, col: last.c0 };
-      state.sel = { row: last.r1, col: last.c1 };
-      state.selKind = "cells";
+      boxes.push(boxes.shift());
+      selectBoxes(state.sheet, boxes);
       ensureVisible();
-      draw();
       return;
     }
   }
@@ -622,7 +622,7 @@ export function gotoName(v) {
   let text = s;
   const bang = text.lastIndexOf("!");
   if (bang > 0) {
-    const name = text.slice(0, bang).replace(/^'|'$/g, "");
+    const name = text.slice(0, bang).replace(/^'|'$/g, "").replace(/''/g, "'");
     try {
       const idx = JSON.parse(wasm.session_sheet_names())
         .findIndex((n) => n.toLowerCase() === name.toLowerCase());
@@ -630,15 +630,14 @@ export function gotoName(v) {
     } catch {}
   }
 
+  // A range — typed, or a defined name's — is selected with its top-left cell
+  // active, as Excel and the Go To dialog (`selectBoxes`) do. The active cell
+  // used to be the bottom-right, so what was typed next landed there.
   const box = parseNameRange(text);
   if (box) {
     if (box.r0 === box.r1 && box.c0 === box.c1) { select(box.r0, box.c0); return; }
-    state.ranges = [];
-    state.anchor = { row: box.r0, col: box.c0 };
-    state.sel = { row: box.r1, col: box.c1 };
-    state.selKind = box.kind || "cells";
+    selectBoxes(state.sheet, [box]);
     ensureVisible();
-    draw();
     return;
   }
   // An existing defined name → jump to its target range.
@@ -646,12 +645,8 @@ export function gotoName(v) {
     const t = wasm.session_name_target(s);
     if (t !== "null") {
       const r = JSON.parse(t);
-      state.anchor = { row: r.r0, col: r.c0 };
-      state.sel = { row: r.r1, col: r.c1 };
-      state.selKind = "cells";
-      state.ranges = [];
+      selectBoxes(state.sheet, [{ r0: r.r0, c0: r.c0, r1: r.r1, c1: r.c1 }]);
       ensureVisible();
-      draw();
       return;
     }
   } catch {}
@@ -660,7 +655,7 @@ export function gotoName(v) {
     const r = effectiveRange();
     const names = JSON.parse(wasm.session_sheet_names());
     const sn = names[state.sheet] || "Sheet1";
-    const q = /[^A-Za-z0-9_]/.test(sn) ? `'${sn.replace(/'/g, "''")}'` : sn;
+    const q = sheetRef(sn);
     const refers = `${q}!${A1(r.r0, r.c0)}:${A1(r.r1, r.c1)}`;
     try { wasm.session_define_name(s, refers); status.textContent = `defined name “${s}”`; }
     catch (e) { statusError(errText(e)); }

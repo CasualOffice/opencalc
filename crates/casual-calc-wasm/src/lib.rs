@@ -83,8 +83,65 @@ pub use style::*;
 pub use transfer::*;
 pub use view::*;
 
+/// The live session, and a count of every chance anything had to change it.
+///
+/// **Why a generation and not the edit counter** (`PERF-22`, `PERF-24`). A
+/// cache of something derived from the workbook — the used range, a
+/// conditional format's range statistics — is correct only while nothing it
+/// read has changed, and `edits_applied` does not say that: an F9 in manual
+/// mode recalculates without moving it, so does `workbook_mut`, and a new
+/// document starts its count again from zero, so the old book's numbers can
+/// come back under the new book's key. Every one of those is a stale picture.
+///
+/// What every one of them *does* do is borrow the session mutably — there is
+/// no other way to reach it from this crate. So the count moves on each
+/// `borrow_mut`, before the caller gets the reference: a mutable borrow that
+/// changes nothing costs a cache rebuild, and one that changes something can
+/// never be missed. Over-invalidation is the safe direction; a new write path
+/// cannot forget to say so, because it cannot write without passing here.
+pub(crate) struct SessionCell {
+    inner: RefCell<Option<WorkbookSession>>,
+    generation: core::cell::Cell<u64>,
+}
+
+impl SessionCell {
+    const fn new() -> Self {
+        Self {
+            inner: RefCell::new(None),
+            generation: core::cell::Cell::new(0),
+        }
+    }
+
+    pub(crate) fn borrow(&self) -> core::cell::Ref<'_, Option<WorkbookSession>> {
+        self.inner.borrow()
+    }
+
+    /// Mutable access, which is the only way to change the session — and so
+    /// the one place the generation has to move.
+    pub(crate) fn borrow_mut(&self) -> core::cell::RefMut<'_, Option<WorkbookSession>> {
+        self.generation.set(self.generation.get().wrapping_add(1));
+        self.inner.borrow_mut()
+    }
+
+    pub(crate) fn generation(&self) -> u64 {
+        self.generation.get()
+    }
+}
+
+/// The session's generation: a number that changes whenever the session could
+/// have (see `SessionCell`). For a host caching something it derived from the
+/// document — compare, and rebuild on any difference. Not a count of edits and
+/// not comparable across page loads; only equality means anything.
+#[wasm_bindgen]
+#[must_use]
+pub fn session_generation() -> f64 {
+    // `f64` for the reason `session_edits_applied` gives: a `u64` arrives as a
+    // `BigInt`, which never `===` a cached `Number`. Exact to 2^53.
+    SESSION.with(SessionCell::generation) as f64
+}
+
 thread_local! {
-    static SESSION: RefCell<Option<WorkbookSession>> = const { RefCell::new(None) };
+    static SESSION: SessionCell = const { SessionCell::new() };
     /// How long the next long job may hold the thread, in milliseconds, or
     /// `None` for "until it finishes". See [`session_set_time_budget_ms`].
     static TIME_BUDGET_MS: std::cell::Cell<Option<f64>> = const { std::cell::Cell::new(None) };
@@ -494,7 +551,7 @@ mod tests {
     }
 
     #[test]
-    fn clip_capture_skips_hidden_rows_and_compresses() {
+    fn clip_capture_compresses_the_rows_it_is_given() {
         use casual_calc_model::{Cell, CellRef, CellValue, Id, Sheet, SheetId, Workbook};
         let wb = Workbook::new(Id::from_parts(1, 1));
         let mut sheet = Sheet::new(SheetId(Id::from_parts(2, 1)), "S");
@@ -504,9 +561,9 @@ mod tests {
                 Cell::value(CellValue::Number((r + 1) as f64)),
             );
         }
-        sheet.hidden_rows.insert(1); // hide the second row
 
-        let clip = super::clip_capture(&wb, &sheet, 0, 0, 3, 0);
+        // The rows a filtered-out row 1 leaves (`copied_axes` decides which).
+        let clip = super::clip_capture(&wb, &sheet, &[0, 2, 3], &[0]);
         // Row 1 is skipped; the three survivors compress to dr 0,1,2 while
         // keeping their true source rows for cut/formula math.
         assert_eq!(clip.len(), 3);

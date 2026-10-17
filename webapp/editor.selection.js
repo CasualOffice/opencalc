@@ -33,6 +33,8 @@ import {
   commandRules,
   confirmModal,
   messageBox,
+  messageBoxUp,
+  sheetRef,
   ctx,
   draw,
   editHome,
@@ -465,13 +467,15 @@ export function addRowRange(r) {
 //
 // It routes through `commit` first so the entry meets the same validation rule
 // and formula guard as any other typed value. A refused entry fills nothing.
-export function commitToSelection(value) {
+export function commitToSelection(value, validated = false) {
   const r = effectiveRange();
   // Captured before committing, because commit moves the selection and the
   // block being filled is the one that was selected when the user pressed.
   const anchor = { ...state.anchor };
   const sel = { ...state.sel };
-  if (!commit(value, false)) return false;
+  // A data-validation alert answered Yes / OK comes back here, so the fill
+  // still happens (XL-UX-174).
+  if (!commit(value, false, "user", { validated, resume: () => commitToSelection(value, true) })) return false;
   if (r.r0 === r.r1 && r.c0 === r.c1) return true;
   try {
     // Source is the cell just written; it sits inside the destination, which is
@@ -511,7 +515,35 @@ export function closeFormula(value) {
   return out;
 }
 
-export function commit(value, advance, source = "user") {
+/// Excel's default data-validation alert text, for a rule that has none of
+/// its own.
+export const DV_DEFAULT_TEXT = "This value doesn't match the data validation restrictions defined for this cell.";
+
+/// Excel's data-validation alert (XL-UX-174): Stop is Retry / Cancel, Warning
+/// asks "Continue?" with Yes / No / Cancel, Information is OK / Cancel; the
+/// rule's own title and message when it has them. The entry stays open while
+/// it asks. Yes and OK `accept` it; Retry and No go back to it with the text
+/// selected; Cancel puts the old value back.
+function validationAlert(alert, accept) {
+  const style = alert.style === "warning" || alert.style === "information" ? alert.style : "stop";
+  const text = alert.own === false ? DV_DEFAULT_TEXT : alert.text;
+  const surface = editSurface;
+  messageBox(style === "warning" ? `${text}\n\nContinue?` : text, {
+    title: alert.title || "",
+    icon: { stop: "error", warning: "warning", information: "info" }[style],
+    buttons: { stop: "retryCancel", warning: "yesNoCancel", information: "okCancel" }[style],
+    field: surface,
+  }).then((answer) => {
+    if (editSurface !== surface) return;   // the edit ended some other way
+    if (answer === "yes" || answer === "ok") accept();
+    else if (answer === "cancel") cancelEdit();
+  });
+}
+
+export function commit(value, advance, source = "user", opts = {}) {
+  // A message box is asking about this entry: the blur its button causes in
+  // the formula bar must not commit (or ask) a second time.
+  if (messageBoxUp()) return false;
   value = closeFormula(value);
   // Cancellable before it is written, and told who is writing. A host without
   // either cannot enforce its own permissions, and cannot tell its own
@@ -539,8 +571,13 @@ export function commit(value, advance, source = "user") {
   // dropdown was previously a suggestion — anything typed over it was accepted,
   // which is the opposite of what a validation is for. Gated on typed entry
   // only, as in Excel: fill and paste are not checked.
-  let advisory = "";
-  if (!value.startsWith("=")) {
+  //
+  // Excel asks in a message box (XL-UX-174), which this cannot await: the
+  // commit is refused for now, the editor stays open, and an answer of Yes or
+  // OK runs the commit again past the rule — `opts.resume` when the caller has
+  // more to do than commit (Ctrl+Enter's fill), else this commit and the
+  // caller's `opts.after` (Tab's or an arrow's move).
+  if (!value.startsWith("=") && !opts.validated) {
     let bad = "";
     // The `catch` is belt and braces, not a decision: `session_validation_error`
     // returns a `String` rather than a `Result`, so it has no ordinary failure
@@ -552,23 +589,10 @@ export function commit(value, advance, source = "user") {
     if (bad) {
       let alert = { style: "stop", title: "", text: bad };
       try { alert = JSON.parse(bad); } catch {}
-      const label = alert.title ? `${alert.title} — ${alert.text}` : alert.text;
-      // Only `stop` refuses. `warning` lets the value through after a
-      // confirmation and `information` merely says so — the author chose which,
-      // and blocking all three leaves no way past an advisory rule.
-      if (alert.style === "stop") {
-        statusError(`Not allowed here — ${label}`);
-        if (editSurface) { editSurface.classList.add("invalid"); editSurface.focus({ preventScroll: true }); }
-        return false;
-      }
-      // `warning` and `information` both let the value through. Excel asks
-      // "continue?" for a warning; this reports it instead, because the commit
-      // path is synchronous and cannot await a dialog. Accepting with a visible
-      // message is the same outcome as answering yes, and the edit is undoable.
-      //
-      // Held until after the commit: the success path ends with "ok", which
-      // would otherwise wipe the only sign the value broke a rule.
-      advisory = label;
+      validationAlert(alert, opts.resume || (() => {
+        if (commit(value, advance, source, { ...opts, validated: true }) && opts.after) opts.after();
+      }));
+      return false;
     }
   }
   // Reject an unparseable formula instead of silently storing it as text —
@@ -608,8 +632,7 @@ export function commit(value, advance, source = "user") {
     // A number or date too wide for a default-width column widens it, in the
     // same undo step (`XL-UX-036`).
     widenForEntry(mark, [{ r0: state.sel.row, c0: state.sel.col, r1: state.sel.row, c1: state.sel.col }]);
-    if (advisory) statusError(advisory);
-    else status.textContent = "ok";
+    status.textContent = "ok";
   } catch (e) {
     // A refused edit keeps the editor open on its own cell. Advancing would
     // move the cursor away from the thing that just failed and leave the
@@ -1893,8 +1916,7 @@ export function insertRef(text) {
   // it is not a bare word, and double any quote inside it, as Excel does.
   if (editHome && editHome.sheet !== state.sheet) {
     const name = sheetNameAt(state.sheet) || "";
-    const q = /^[A-Za-z_][A-Za-z0-9_.]*$/.test(name) ? name : `'${name.replace(/'/g, "''")}'`;
-    text = `${q}!${text}`;
+    text = `${sheetRef(name)}!${text}`;
   }
   const pending = formulaRefDrag ?? pointMode;
   const val = editSurface.value;

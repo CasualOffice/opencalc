@@ -229,7 +229,9 @@ test("a link to a place that does not exist raises the box over the grid", async
   await expect(page.locator("#oc-msgbox-ok")).toBeFocused();
   await page.keyboard.press("Enter");
   await expect(box(page)).toBeHidden();
-  expect(await page.evaluate(() => document.activeElement?.id)).toBe("grid");
+  // The grid has the keyboard again — through its input-method host since
+  // XL-FEAT-023, so "the active element is #grid" is no longer the question.
+  expect(await page.evaluate(() => window.opencalcEditor.gridHasKeyboard())).toBe(true);
 });
 
 test("a Name Manager Refers to that does not parse raises the box and keeps the text", async ({ page }) => {
