@@ -335,10 +335,37 @@ export function fzOffset(_line, columns, count) {
     : rowOffsetPx(count);
 }
 
+// **The used range, asked once per document state** (`PERF-22`).
+//
+// The engine answers `session_used_bounds` by walking every stored cell, and
+// the frame asked on every draw — the scrollbars size their thumbs from it and
+// the grid's ARIA counts from it — so a scroll over an unchanged sheet paid a
+// whole-sheet scan per frame.
+//
+// Keyed on the sheet and on the session's *generation*, not on the edit
+// counter: the generation moves on every mutable access to the session (an
+// edit, an undo, a remote operation, an F9 that spills, a new document), while
+// the edit counter misses a recalculation and restarts at zero in a new book —
+// either of which would hand back the previous answer. An engine without the
+// export never caches.
+let boundsKey = null;
+let boundsValue = null;
+let boundsScans = 0;
 export function usedBounds() {
+  let key = null;
+  try {
+    if (typeof wasm.session_generation === "function") key = `${state.sheet}|${wasm.session_generation()}`;
+  } catch { /* no session yet */ }
+  if (key !== null && key === boundsKey) return { ...boundsValue };
+  boundsScans += 1;
   const b = JSON.parse(wasm.session_used_bounds(state.sheet));
-  return { rows: Math.max(1, b.rows), cols: Math.max(1, b.cols) };
+  boundsValue = { rows: Math.max(1, b.rows), cols: Math.max(1, b.cols) };
+  boundsKey = key;
+  return { ...boundsValue };
 }
+
+/// How many times the used range was actually asked of the engine (`PERF-22`).
+export function usedBoundsStatsForTest() { return { scans: boundsScans }; }
 
 export function hiddenMarkAt(px, py) {
   if (py < HH && px >= HW) {

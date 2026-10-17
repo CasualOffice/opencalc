@@ -115,6 +115,15 @@ async function scrollFrames(page, { freeze, frames = 24 }) {
 
 const round = (m) => Object.fromEntries(Object.entries(m).map(([k, v]) => [k, typeof v === "number" ? Math.round(v * 10) / 10 : v]));
 
+test("a scroll frame does not scan the used range (PERF-22)", async ({ page }) => {
+  test.setTimeout(120_000);
+  await boot(page);
+  await seed(page);
+  const m = await scrollFrames(page, { freeze: 0, frames: 12 });
+  expect(m.boundsScans, "the editor exposes its used-range scan count").not.toBeNull();
+  expect(m.boundsScans, `${m.boundsScans} used-range scans over 12 frames with nothing edited`).toBe(0);
+});
+
 test("a scroll frame does no conditional-format statistics work (PERF-24)", async ({ page }) => {
   test.setTimeout(120_000);
   await boot(page);
@@ -122,6 +131,59 @@ test("a scroll frame does no conditional-format statistics work (PERF-24)", asyn
   const m = await scrollFrames(page, { freeze: 0, frames: 12 });
   expect(m.statsRuns, "the engine exposes its statistics count").not.toBeNull();
   expect(m.statsRuns, `${m.statsRuns} range-statistics passes over 12 frames with nothing edited`).toBe(0);
+});
+
+test("the used range follows an edit by the editor, by the engine, by undo and by a new document (PERF-22)", async ({ page }) => {
+  await boot(page);
+  const counts = await page.evaluate(() => import("/editor.core.js").then(async (c) => {
+    const a = c.wasm;
+    const grid = document.querySelector("#grid");
+    const rows = () => { c.draw(); return Number(grid.getAttribute("aria-rowcount")); };
+    c.switchSheet(a.session_add_sheet());
+    const s = c.state.sheet;
+    const out = { empty: rows() };
+    // The engine directly, as a macro or an agent would.
+    a.session_set_cell(s, 499, 0, "far");
+    out.engine = rows();
+    // Undo.
+    a.session_undo();
+    out.undone = rows();
+    // The editor's own edit path: type into a cell and commit.
+    c.selectForTest(899, 0);
+    c.draw();
+    await new Promise((r) => setTimeout(r, 50));
+    return out;
+  }));
+  // Typing goes through the real keyboard path.
+  await page.keyboard.type("typed");
+  await page.keyboard.press("Enter");
+  const typed = await page.evaluate(() => import("/editor.core.js").then((c) => {
+    c.draw();
+    return Number(document.querySelector("#grid").getAttribute("aria-rowcount"));
+  }));
+  const fresh = await page.evaluate(() => import("/editor.core.js").then((c) => {
+    const a = c.wasm;
+    const rows = () => { c.draw(); return Number(document.querySelector("#grid").getAttribute("aria-rowcount")); };
+    // Two new documents with the same sheet and the same edit count — one
+    // edit each — and different used ranges: a cache keyed on the edit
+    // counter hands the second the first one's answer.
+    a.session_new();
+    c.switchSheet(0);
+    const empty = rows();
+    a.session_set_cell(0, 99, 0, "x");
+    const first = rows();
+    a.session_new();
+    c.switchSheet(0);
+    a.session_set_cell(0, 299, 0, "x");
+    return { empty, first, edited: rows() };
+  }));
+  // aria-rowcount is max(used rows + 30, last drawn row) + 1.
+  expect(counts.engine, "a session_set_cell at row 500 shows on the next frame").toBe(500 + 30 + 1);
+  expect(counts.undone, "undoing it shows on the next frame").toBe(counts.empty);
+  expect(typed, "a cell typed at row 900 shows on the next frame").toBe(900 + 30 + 1);
+  expect(fresh.edited, "a new document's edit shows on the next frame").toBe(300 + 30 + 1);
+  expect(fresh.first, "the first new document's edit shows").toBe(100 + 30 + 1);
+  expect(fresh.empty).toBeLessThan(100);
 });
 
 test("conditional-format statistics follow an edit, an undo, a recalculation and a new document (PERF-24)", async ({ page }) => {

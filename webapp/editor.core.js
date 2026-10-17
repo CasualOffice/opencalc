@@ -634,6 +634,7 @@ export {
   updateGridCounts,
   updateResize,
   usedBounds,
+  usedBoundsStatsForTest,
   valueExtent,
 } from "./editor.geometry.js";
 export {
