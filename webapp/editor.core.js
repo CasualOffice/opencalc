@@ -1982,6 +1982,8 @@ export const geo = {
 export const MIN_LINE = 8; // conservative floor used to bound how many lines to fetch
 export const RESIZE_GRAB = 5; // px proximity to a header boundary that arms a resize
 export let geoItems = []; // cells for the visible window, fetched in measure(), reused by draw()
+// Bordered cells just left of / above the window, whose borders reach into it.
+let edgeItems = [];
 export let sheetMerges = []; // merged ranges of the active sheet, refreshed each draw
 let dragTab = -1; // index of the sheet tab being dragged (reorder)
 
@@ -2256,9 +2258,23 @@ function measure() {
   const lastColIdx = geo.colIdx[geo.colIdx.length - 1] ?? fsc;
   const firstRowIdx = fr > 0 ? 0 : fsr;
   const firstColIdx = fc > 0 ? 0 : fsc;
-  geoItems = JSON.parse(
-    wasm.session_cells(state.sheet, firstRowIdx, firstColIdx, lastRowIdx, lastColIdx),
-  );
+  // **One line more on the leading edges, for borders** (`XL-UX-183`). A
+  // border wider than a pixel is centred on its edge, so half of the right
+  // border of the column just left of the window — and of the bottom border of
+  // the row just above it — lies inside the first drawn column/row. Without
+  // those cells the half went missing exactly when the view stopped on a
+  // boundary. Same call, a slightly larger rectangle; the extra cells are held
+  // apart in `edgeItems` so nothing else mistakes them for window cells.
+  const edgeCol = fc > 0 ? -1 : fsc - 1;
+  const edgeRow = fr > 0 ? -1 : fsr - 1;
+  edgeItems = [];
+  geoItems = [];
+  for (const it of JSON.parse(
+    wasm.session_cells(state.sheet, Math.max(0, edgeRow < 0 ? firstRowIdx : edgeRow), Math.max(0, edgeCol < 0 ? firstColIdx : edgeCol), lastRowIdx, lastColIdx),
+  )) {
+    if (it.c === edgeCol || it.r === edgeRow) { if (it.bd) edgeItems.push(it); }
+    else geoItems.push(it);
+  }
   // Text spills across empty neighbours, so a label whose own cell is outside
   // the window can still be showing inside it — and only the *nearest*
   // populated cell on each side can, since anything beyond is blocked by it.
@@ -3221,13 +3237,27 @@ export function draw() {
   if (tablesInView.length) drawTableOutlines(withQuad, tablesInView, geo);
 
   // Cell borders (from the engine), drawn over fills/text.
-  for (const it of items) {
-    if (!it.bd) continue;
-    const x = colXAt(it.c);
-    const yTop = rowYAt(it.r);
+  //
+  // Including the cells just outside the leading edges: a wide border is
+  // centred on its edge, so the left neighbour's right border and the upper
+  // neighbour's bottom border are partly inside the window (`XL-UX-183`). With
+  // frozen panes the main fetch already starts at 0 and holds those cells;
+  // without, `edgeItems` does.
+  const edgeC = firstBodyCol() - 1 >= F.fc ? firstBodyCol() - 1 : -1;
+  const edgeR = firstBodyRow() - 1 >= F.fr ? firstBodyRow() - 1 : -1;
+  const borderX = (c) => colXAt(c) ?? (c === edgeC ? fscreenX(c) : undefined);
+  const borderY = (r) => rowYAt(r) ?? (r === edgeR ? fscreenY(r) : undefined);
+  // In sheet order, whichever list a cell came from: where two borders meet,
+  // the later one is drawn over the earlier, so the order is part of the
+  // picture and must not depend on which cells are the window's.
+  const bordered = items.filter((it) => it.bd).concat(edgeItems);
+  bordered.sort((a, b) => a.r - b.r || a.c - b.c);
+  for (const it of bordered) {
+    const x = borderX(it.c);
+    const yTop = borderY(it.r);
     if (x === undefined || yTop === undefined) continue;
-    const w = colWAt(it.c);
-    const h = rowHAt(it.r);
+    const w = colXAt(it.c) !== undefined ? colWAt(it.c) : fscreenXEnd(it.c) - x;
+    const h = rowYAt(it.r) !== undefined ? rowHAt(it.r) : fscreenYEnd(it.r) - yTop;
     withQuad(it.r, it.c, () => {
       drawEdge(it.bd.l, x, yTop, x, yTop + h);
       drawEdge(it.bd.r, x + w, yTop, x + w, yTop + h);

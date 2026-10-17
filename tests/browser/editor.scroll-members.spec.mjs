@@ -75,3 +75,27 @@ test("a long label does not spill through an empty merged block that has scrolle
   expect(merged.firstCol, "D and E must be out of view").toBe(5);
   expect(differing(inView, merged), "G22 showed text that the merge stops on screen").toBe(0);
 });
+
+test("a border on the edge shared with a cell that has scrolled out is still drawn", async ({ page }) => {
+  // A border wider than a pixel is centred on its edge, so half of a cell's
+  // thick right border lies in the cell to its right. The border pass drew
+  // only the window's cells, so once the bordered cell scrolled out exactly to
+  // that edge, its neighbour lost the half that sat inside it: a green rule
+  // along G31's left side thinned, and a purple rule along the top of row 31,
+  // depending on nothing but where the view stopped.
+  await boot(page);
+  await seed(page, `
+    a.session_set_border(s, 30, 5, 30, 5, "right", "thick", "00B050");
+    a.session_set_border(s, 29, 2, 29, 9, "bottom", "medium", "7030A0");
+  `);
+  // Column F out of view, column G exactly at the left edge.
+  const before = await cellAt(page, 30, 6, 0, 400);
+  const after = await cellAt(page, 30, 6, 384, 400);
+  expect(after.firstCol, "G must be the first column, at the edge").toBe(6);
+  expect(differing(before, after), "G31 lost the half of F31's border that lies inside it").toBe(0);
+  // Row 30 out of view, row 31 exactly at the top edge.
+  const top0 = await cellAt(page, 30, 4, 0, 400);
+  const top1 = await cellAt(page, 30, 4, 0, 600);
+  expect(top1.firstRow, "row 31 must be the first row, at the edge").toBe(30);
+  expect(differing(top0, top1), "E31 lost the half of E30's bottom border that lies inside it").toBe(0);
+});
