@@ -56,3 +56,19 @@ test("a list of ranges activates the first range's top-left", async ({ page }) =
   await go(page, "B2:C3,E5:F6");
   await expect(nameBox(page)).toHaveValue("B2");
 });
+
+test("a defined name on another sheet goes to that sheet (XL-UX-190)", async ({ page }) => {
+  // Excel's name box: choosing a name selects its range on the sheet it refers
+  // to. The lookup returned only coordinates, so the range was selected on
+  // whichever sheet was showing.
+  await boot(page);
+  await page.evaluate(() => {
+    const a = window.opencalcEditor.wasmApi();
+    a.session_add_sheet();
+    a.session_define_name("Rates", "Sheet2!$B$3:$C$5");
+  });
+  await go(page, "Rates");
+  const where = await page.evaluate(() => import("/editor.core.js").then((c) => c.state.sheet));
+  expect(where, "the name box stayed on Sheet1").toBe(1);
+  await expect(nameBox(page)).toHaveValue("B3");
+});
