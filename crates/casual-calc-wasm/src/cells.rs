@@ -489,7 +489,7 @@ pub fn session_clear_formats(
 
 /// Copy a range as tab-separated text (for the clipboard).
 ///
-/// Which rows and columns go is [`copied_axes`]'s answer: everything in the
+/// Which rows and columns go is `copied_axes`'s answer: everything in the
 /// range except rows a filter has filtered out — a row or column hidden by
 /// hand is copied, as in Excel (XL-UX-176).
 #[wasm_bindgen]

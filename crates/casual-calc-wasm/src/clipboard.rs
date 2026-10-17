@@ -852,7 +852,7 @@ thread_local! {
 
 /// Capture the cells at `rows × cols` onto clipboard cells, compressed to
 /// contiguous offsets so a paste reproduces them with no gaps. Which rows and
-/// columns a copy takes is decided by the caller — [`copied_axes`] for a
+/// columns a copy takes is decided by the caller — `copied_axes` for a
 /// range, the host for a multi-area grid. Pure so it can be unit-tested
 /// without a session.
 pub(crate) fn clip_capture(
@@ -910,7 +910,7 @@ fn clip_store(s: &WorkbookSession, sheet: usize, rows: &[u32], cols: &[u32], cut
 /// Snapshot a range onto the internal clipboard (value + style + formula AST).
 /// `cut` marks the source to be cleared on the next paste. The OS clipboard TSV
 /// is produced separately by [`session_copy_tsv`]. Which rows and columns go is
-/// [`copied_axes`]'s answer (rows a filter hides are left out, rows and
+/// `copied_axes`'s answer (rows a filter hides are left out, rows and
 /// columns hidden by hand are not — XL-UX-176).
 #[wasm_bindgen]
 pub fn session_clip_copy(sheet: usize, r0: u32, c0: u32, r1: u32, c1: u32, cut: bool) {
