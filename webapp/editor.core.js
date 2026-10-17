@@ -6107,10 +6107,20 @@ export function stopMarch() {
   draw();
 }
 
-export async function clipToOS(s, cut) {
-  wasm.session_clip_copy(state.sheet, s.r0, s.c0, s.r1, s.c1, cut);
+/// Copy `s` — or, given `grid`, exactly the rows and columns of a multiple
+/// selection (`selectionGrid`) — to the app's clipboard and the system's.
+export async function clipToOS(s, cut, grid = null) {
+  const rows = grid && Uint32Array.from(grid.rows);
+  const cols = grid && Uint32Array.from(grid.cols);
+  if (grid) wasm.session_clip_copy_grid(state.sheet, rows, cols);
+  else wasm.session_clip_copy(state.sheet, s.r0, s.c0, s.r1, s.c1, cut);
   startMarch(s, cut);
-  const tsv = wasm.session_copy_tsv(state.sheet, s.r0, s.c0, s.r1, s.c1);
+  const copyHtml = () => (grid
+    ? wasm.session_copy_html_grid(state.sheet, rows, cols)
+    : wasm.session_copy_html(state.sheet, s.r0, s.c0, s.r1, s.c1));
+  const tsv = grid
+    ? wasm.session_copy_tsv_grid(state.sheet, rows, cols)
+    : wasm.session_copy_tsv(state.sheet, s.r0, s.c0, s.r1, s.c1);
   lastClipTsv = tsv;
   // Write a formatted HTML table alongside the plain-text TSV so external apps
   // (Excel, Sheets, mail, docs) receive styling; fall back to text-only when
@@ -6127,13 +6137,13 @@ export async function clipToOS(s, cut) {
   const nativeClip = window.__opencalcNative;
   if (nativeClip && nativeClip.clipboardWrite) {
     try {
-      const html = wasm.session_copy_html(state.sheet, s.r0, s.c0, s.r1, s.c1);
+      const html = copyHtml();
       await nativeClip.clipboardWrite(tsv, html);
       return true;
     } catch { return false; }
   }
   try {
-    const html = wasm.session_copy_html(state.sheet, s.r0, s.c0, s.r1, s.c1);
+    const html = copyHtml();
     if (navigator.clipboard.write && typeof ClipboardItem !== "undefined") {
       const item = new ClipboardItem({
         "text/html": new Blob([html], { type: "text/html" }),

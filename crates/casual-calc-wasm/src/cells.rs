@@ -488,32 +488,85 @@ pub fn session_clear_formats(
 }
 
 /// Copy a range as tab-separated text (for the clipboard).
+///
+/// Which rows and columns go is [`copied_axes`]'s answer: everything in the
+/// range except rows a filter has filtered out — a row or column hidden by
+/// hand is copied, as in Excel (XL-UX-176).
 #[wasm_bindgen]
 pub fn session_copy_tsv(sheet: usize, r0: u32, c0: u32, r1: u32, c1: u32) -> String {
     with_session(|s| {
-        let wb = s.workbook();
-        let Some(sh) = wb.sheets.get(sheet) else {
-            return String::new();
-        };
-        let vis_cols: Vec<u32> = (c0..=c1).filter(|c| !sh.hidden_cols.contains(c)).collect();
-        let mut out = String::new();
-        for r in r0..=r1 {
-            if sh.is_row_hidden(r) {
-                continue; // visible cells only
-            }
-            for (i, &c) in vis_cols.iter().enumerate() {
-                if i > 0 {
-                    out.push('\t');
-                }
-                if let Some(cell) = sh.cells.get(CellRef::new(r, c)) {
-                    out.push_str(&display_text(wb, cell));
-                }
-            }
-            out.push('\n');
-        }
-        out
+        let (rows, cols) = copied_axes(s, sheet, r0, c0, r1, c1);
+        tsv_of(s.workbook(), sheet, &rows, &cols)
     })
     .unwrap_or_default()
+}
+
+/// [`session_copy_tsv`] over exactly the rows and columns given — the copy of
+/// a multi-area selection whose areas form one grid, such as Go To Special ▸
+/// Visible cells only leaves. Nothing is skipped: the caller chose the cells.
+#[wasm_bindgen]
+#[must_use]
+pub fn session_copy_tsv_grid(sheet: usize, rows: Vec<u32>, cols: Vec<u32>) -> String {
+    with_session(|s| tsv_of(s.workbook(), sheet, &sorted(rows), &sorted(cols))).unwrap_or_default()
+}
+
+pub(crate) fn tsv_of(wb: &Workbook, sheet: usize, rows: &[u32], cols: &[u32]) -> String {
+    let Some(sh) = wb.sheets.get(sheet) else {
+        return String::new();
+    };
+    let mut out = String::new();
+    for &r in rows {
+        for (i, &c) in cols.iter().enumerate() {
+            if i > 0 {
+                out.push('\t');
+            }
+            if let Some(cell) = sh.cells.get(CellRef::new(r, c)) {
+                out.push_str(&display_text(wb, cell));
+            }
+        }
+        out.push('\n');
+    }
+    out
+}
+
+/// The rows and columns a copy of `r0..=r1 × c0..=c1` takes, in order.
+///
+/// Excel copies a row or column hidden **by hand** with the rest — "By
+/// default, Excel copies hidden or filtered cells in addition to visible
+/// cells" (Microsoft, "Copy visible cells only") — and leaves out the rows an
+/// AutoFilter has filtered out, which is what Excel for Microsoft 365 does on
+/// a plain Ctrl+C of a filtered list (the "or filtered" in that sentence is
+/// disputed on Microsoft's own Tech Community and does not match the
+/// desktop application). A participant's personal view is a filter too, so
+/// its rows are left out the same way. To copy only what is on screen in any
+/// other case, Go To Special ▸ Visible cells only first.
+///
+/// This used to skip every hidden row and column (`M3-5`), so A1:A4 with row
+/// 2 hidden by hand pasted three rows.
+pub(crate) fn copied_axes(
+    s: &WorkbookSession,
+    sheet: usize,
+    r0: u32,
+    c0: u32,
+    r1: u32,
+    c1: u32,
+) -> (Vec<u32>, Vec<u32>) {
+    let (r0, r1, c0, c1) = (r0.min(r1), r0.max(r1), c0.min(c1), c0.max(c1));
+    let Some(sh) = s.workbook().sheets.get(sheet) else {
+        return (Vec::new(), Vec::new());
+    };
+    let rows = (r0..=r1)
+        .filter(|r| !sh.filter_hidden.contains(r) && !s.views().hides(sheet, *r))
+        .collect();
+    (rows, (c0..=c1).collect())
+}
+
+/// Sorted and without repeats, so a grid handed in from the host is read in
+/// sheet order whatever order the host built it in.
+pub(crate) fn sorted(mut v: Vec<u32>) -> Vec<u32> {
+    v.sort_unstable();
+    v.dedup();
+    v
 }
 
 /// Who last changed a cell, or empty (`HIST-02`).
@@ -566,4 +619,53 @@ pub fn session_set_author(id: &str, name: &str) {
         }
         Ok(())
     });
+}
+
+#[cfg(test)]
+mod copy_hidden_tests {
+    use super::{session_copy_tsv, session_copy_tsv_grid};
+    use crate::{
+        session_clip_copy, session_clip_paste, session_hide_cols, session_hide_rows, session_new,
+        session_set_cell, session_set_filter_range, session_set_filter_values,
+    };
+
+    /// XL-UX-176: a row or column hidden by hand is copied, as in Excel.
+    #[test]
+    fn rows_and_columns_hidden_by_hand_are_copied() {
+        session_new();
+        for (r, v) in ["one", "two", "three"].iter().enumerate() {
+            session_set_cell(0, r as u32, 0, v).unwrap();
+            session_set_cell(0, r as u32, 1, &(r + 1).to_string()).unwrap();
+        }
+        session_hide_rows(0, 1, 1).unwrap();
+        session_hide_cols(0, 0, 0).unwrap();
+        assert_eq!(
+            session_copy_tsv(0, 0, 0, 2, 1),
+            "one\t1\ntwo\t2\nthree\t3\n"
+        );
+        session_clip_copy(0, 0, 0, 2, 0, false);
+        session_clip_paste(0, 0, 3).unwrap();
+        assert_eq!(
+            crate::session_cell_input(0, 1, 3),
+            "two",
+            "the paste has the hidden row"
+        );
+    }
+
+    /// …and a row a filter filtered out is not.
+    #[test]
+    fn rows_a_filter_hides_are_left_out() {
+        session_new();
+        for (r, v) in ["head", "one", "two", "three"].iter().enumerate() {
+            session_set_cell(0, r as u32, 0, v).unwrap();
+        }
+        session_set_filter_range(0, 0, 0, 3, 0).unwrap();
+        session_set_filter_values(0, 0, vec!["one".into(), "three".into()]).unwrap();
+        assert_eq!(session_copy_tsv(0, 0, 0, 3, 0), "head\none\nthree\n");
+        // A grid the host chose is copied as given, in sheet order.
+        assert_eq!(
+            session_copy_tsv_grid(0, vec![3, 0, 3], vec![0]),
+            "head\nthree\n"
+        );
+    }
 }
