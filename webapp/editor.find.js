@@ -640,12 +640,15 @@ export function gotoName(v) {
     ensureVisible();
     return;
   }
-  // An existing defined name → jump to its target range.
+  // An existing defined name → its range, on the sheet it refers to
+  // (XL-UX-190). The same resolver links use: case-insensitive, a sheet-scoped
+  // name before a workbook one, and a hidden sheet refused. `session_name_target`
+  // answered coordinates only, so a name on another sheet was selected on this one.
   try {
-    const t = wasm.session_name_target(s);
+    const t = wasm.session_resolve_location(state.sheet, s);
     if (t !== "null") {
       const r = JSON.parse(t);
-      selectBoxes(state.sheet, [{ r0: r.r0, c0: r.c0, r1: r.r1, c1: r.c1 }]);
+      selectBoxes(r.sheet, [{ r0: r.r0, c0: r.c0, r1: r.r1, c1: r.c1 }]);
       ensureVisible();
       return;
     }
