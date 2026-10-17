@@ -1295,3 +1295,104 @@ fn diamond(formula: &str, band: &Operation) -> (String, String) {
 
     (formulas_of(&left), formulas_of(&right))
 }
+
+/// Insert/Delete Cells (`XL-UX-173`) as candidates.
+///
+/// Blocks on both axes and both directions, placed on the seed's formulas'
+/// cells and either side of the bands the line edits cluster on, so a block
+/// meets line edits before it, after it and across its band.
+fn block_candidates() -> Vec<Operation> {
+    use crate::CellShift;
+    use casual_calc_model::CellRange;
+    let mut ops = Vec::new();
+    for (r0, c0, r1, c1) in [
+        (1u32, 1u32, 1u32, 1u32),
+        (3, 0, 4, 2),
+        (5, 2, 5, 3),
+        (8, 1, 9, 1),
+    ] {
+        for shift in [
+            CellShift::Down,
+            CellShift::Up,
+            CellShift::Right,
+            CellShift::Left,
+        ] {
+            ops.push(Operation::ShiftCells {
+                sheet: 0,
+                range: CellRange::new(CellRef::new(r0, c0), CellRef::new(r1, c1)),
+                shift,
+            });
+        }
+    }
+    ops.push(Operation::ShiftCells {
+        sheet: 1,
+        range: CellRange::new(CellRef::new(0, 0), CellRef::new(1, 0)),
+        shift: CellShift::Down,
+    });
+    ops
+}
+
+/// TP1 for every pair with a block shift on at least one side, against the
+/// whole candidate set. Pairs `transform::block` refuses are counted; every
+/// pair it answers has to converge, with no `COL-50` allowance — a block
+/// never meets a same-axis line edit inside its own span, which is the only
+/// place that shape arises.
+#[test]
+fn tp1_holds_for_insert_and_delete_cells() {
+    let mut base = seed();
+    let mut ops: Vec<Operation> = candidates(&mut base);
+    let blocks = block_candidates();
+    ops.extend(blocks.iter().cloned());
+    let ops: Vec<Operation> = ops.into_iter().map(|op| op.narrowed(&base)).collect();
+    let sheets = sheet_names(&base);
+    let (mut checked, mut skipped) = (0usize, 0usize);
+    let involves = |op: &Operation| matches!(op, Operation::ShiftCells { .. });
+    for a in &ops {
+        for b in &ops {
+            if !involves(a) && !involves(b) {
+                continue;
+            }
+            let mut left = base.clone();
+            if apply(&mut left, a.clone()).is_err() {
+                continue;
+            }
+            let mut right = base.clone();
+            if apply(&mut right, b.clone()).is_err() {
+                continue;
+            }
+            let (Ok(b_after_a), Ok(a_after_b)) = (
+                transform_with_formulas(b, a, Side::Later, &sheets, &mut left),
+                transform_with_formulas(a, b, Side::Earlier, &sheets, &mut right),
+            ) else {
+                skipped += 1;
+                continue;
+            };
+            let l = apply(&mut left, b_after_a.clone());
+            let r = apply(&mut right, a_after_b.clone());
+            // A refusal must be the same refusal on both replicas.
+            assert_eq!(
+                l.is_err(),
+                r.is_err(),
+                "one replica refused and the other did not\n  a = {a:?}\n  b = {b:?}\n  {l:?} / {r:?}"
+            );
+            if l.is_err() {
+                continue;
+            }
+            assert_eq!(
+                observe(&left),
+                observe(&right),
+                "TP1 violated\n  a  = {a:?}\n  b  = {b:?}\n  b' = {b_after_a:?}\n  a' = {a_after_b:?}"
+            );
+            checked += 1;
+        }
+    }
+    assert!(
+        checked > 2_000,
+        "only {checked} block pairs checked ({skipped} refused)"
+    );
+    assert!(
+        skipped * 3 < checked,
+        "{skipped} refused against {checked} answered"
+    );
+    println!("TP1 (blocks): {checked} pairs checked, {skipped} refused");
+}

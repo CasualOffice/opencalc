@@ -835,3 +835,45 @@ mod untouched_save_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod undo_delete_names_tests {
+    use crate::{
+        session_define_name, session_delete_rows, session_names, session_new, session_undo,
+    };
+
+    fn refers(name: &str) -> String {
+        let all: serde_json::Value = serde_json::from_str(&session_names()).unwrap();
+        all.as_array()
+            .unwrap()
+            .iter()
+            .find(|n| n["name"] == name)
+            .map(|n| {
+                n["refersTo"]
+                    .as_str()
+                    .or(n["formula"].as_str())
+                    .unwrap_or("")
+                    .to_owned()
+            })
+            .unwrap_or_default()
+    }
+
+    /// XL-FEAT-157: deleting the row a name refers to makes it `#REF!`, and
+    /// undoing the delete must give the name its reference back — the delete's
+    /// inverse re-inserts the row, but the name lives outside the grid.
+    #[test]
+    fn undoing_a_row_delete_restores_the_names_it_broke() {
+        session_new();
+        session_define_name("Rate", "Sheet1!$A$10").unwrap();
+        let before = refers("Rate");
+        assert!(before.contains("$A$10"), "set up: {before}");
+        session_delete_rows(0, 9, 1).unwrap();
+        assert!(
+            refers("Rate").contains("#REF!"),
+            "the delete broke the name: {}",
+            refers("Rate")
+        );
+        session_undo().unwrap();
+        assert_eq!(refers("Rate"), before, "undo did not restore the name");
+    }
+}

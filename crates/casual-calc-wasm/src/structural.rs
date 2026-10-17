@@ -334,37 +334,6 @@ pub fn session_set_valign(
     apply_style_range(sheet, r0, c0, r1, c1, move |st| st.valign = value)
 }
 
-/// Whether any formula reads a cell that a shift of this block would move — the
-/// question the host has to ask before offering it, since references are not
-/// rewritten.
-#[wasm_bindgen]
-pub fn session_shift_affects_formulas(
-    sheet: usize,
-    r0: u32,
-    c0: u32,
-    r1: u32,
-    c1: u32,
-    vertical: bool,
-) -> bool {
-    with_session(|s| {
-        let wb = s.workbook();
-        let Some(sh) = wb.sheets.get(sheet) else {
-            return false;
-        };
-        let (rr0, cc0, rr1, cc1) = (r0.min(r1), c0.min(c1), r0.max(r1), c0.max(c1));
-        // Any populated cell in the band that something reads.
-        sh.cells.iter().any(|(at, _)| {
-            let in_band = if vertical {
-                at.col >= cc0 && at.col <= cc1 && at.row >= rr0
-            } else {
-                at.row >= rr0 && at.row <= rr1 && at.col >= cc0
-            };
-            in_band && !casual_calc_eval::dependents_of(wb, sheet, at).is_empty()
-        })
-    })
-    .unwrap_or(false)
-}
-
 /// A one-line summary of what the importer could not fully represent, or empty
 /// when the file came through clean.
 ///

@@ -1728,3 +1728,133 @@ fn a_submission_never_exceeds_the_frame_the_transport_will_carry() {
         "every edit is delivered across the frames, not dropped at the boundary"
     );
 }
+
+/// `XL-FEAT-126` through the protocol. Two participants each insert a row
+/// while the sheet has exactly one empty row below its content: either insert
+/// fits alone, the two together would push the last row off the grid.
+///
+/// The refusal is a pure function of the document, so the server refuses the
+/// second chunk it orders — **all of it**, including an edit the chunk made
+/// before the insert — and the participant whose insert lost cannot apply the
+/// winner either, so it latches desynced and re-joins from the server's state
+/// rather than quietly holding a document nobody else has.
+#[test]
+fn concurrent_inserts_that_together_push_content_off_the_grid_refuse_atomically() {
+    use casual_calc_model::GRID_MAX_ROW;
+    let mut base = seed();
+    base.sheets[0].cells.set(
+        CellRef::new(GRID_MAX_ROW - 1, 0),
+        Cell::value(CellValue::Number(42.0)),
+    );
+    let insert = Operation::InsertRows {
+        sheet: 0,
+        at: 0,
+        count: 1,
+    };
+    let mut server = ServerSession::new();
+    let mut doc = base.clone();
+    let mut first = Peer::new(&base, 1);
+    let mut second = Peer::new(&base, 2);
+
+    first
+        .session
+        .edit(&mut first.workbook, insert.clone())
+        .expect("one row fits");
+    second
+        .session
+        .edit(&mut second.workbook, write(3, 2, 7.0))
+        .unwrap();
+    second
+        .session
+        .edit(&mut second.workbook, insert.clone())
+        .expect("one row fits here too");
+
+    let a = first.session.flush(&first.workbook).unwrap();
+    let b = second.session.flush(&second.workbook).unwrap();
+    let Commit::Applied { ops, revision } = server.commit(&mut doc, &a).unwrap() else {
+        panic!("the first insert commits");
+    };
+    let after_first = observe(&doc);
+    let refused = server.commit(&mut doc, &b);
+    assert!(
+        matches!(
+            refused,
+            Err(crate::session::SessionError::Apply(
+                crate::TxnError::OffGrid { .. }
+            ))
+        ),
+        "the second insert was not refused: {refused:?}"
+    );
+    assert_eq!(
+        observe(&doc),
+        after_first,
+        "the refused chunk was half-applied"
+    );
+    assert_eq!(server.revision(), revision, "the refused chunk was logged");
+
+    // The loser cannot take the winner's insert on top of its own either.
+    assert!(
+        second
+            .session
+            .receive(&mut second.workbook, &ops[0], revision)
+            .is_err(),
+        "the losing replica applied an insert that pushes its last row off the grid"
+    );
+    assert!(
+        second.session.is_desynced(),
+        "and must re-join from the server"
+    );
+}
+
+/// `XL-UX-173` through the protocol: one participant inserts cells (shift
+/// down) in column B while another, in the same moment, types `=B5` and
+/// writes into a cell the shift moves. Both land, both follow the shift, and
+/// every replica agrees — the formula reads the cell it was written against.
+#[test]
+fn insert_cells_and_a_concurrent_formula_converge_on_the_moved_cell() {
+    use casual_calc_formula::stored::Origin;
+    let mut world = World::new(2);
+    world.edit(
+        0,
+        Operation::ShiftCells {
+            sheet: 0,
+            range: casual_calc_model::CellRange::new(CellRef::new(1, 1), CellRef::new(2, 1)),
+            shift: crate::CellShift::Down,
+        },
+    );
+    let handle = world.peers[1]
+        .workbook
+        .store_formula_at(casual_calc_formula::parse("B5").unwrap(), Origin::at(0, 2));
+    let mut cell = Cell::value(CellValue::Empty);
+    cell.formula = Some(handle);
+    world.edit(
+        1,
+        Operation::SetCell {
+            sheet: 0,
+            at: CellRef::new(0, 2),
+            cell: Some(cell),
+        },
+    );
+    world.edit(1, write(6, 1, 999.0));
+    world.send(0);
+    world.send(1);
+    world.settle();
+    world.assert_converged("insert cells vs formula");
+    let doc = &world.workbook;
+    let formula = doc.sheets[0]
+        .cells
+        .get(CellRef::new(0, 2))
+        .and_then(|c| c.formula)
+        .and_then(|h| doc.formula(h))
+        .map(|e| casual_calc_formula::print_at(e, Origin::at(0, 2)))
+        .unwrap();
+    assert_eq!(
+        formula, "B7",
+        "the formula did not follow the cell it named"
+    );
+    assert!(
+        observe(doc).contains("8:1=Number(999.0)"),
+        "the write did not follow its cell: {}",
+        observe(doc)
+    );
+}

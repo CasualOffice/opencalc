@@ -72,7 +72,6 @@ import {
   selRect,
   select,
   setNumberFormat,
-  shiftIsRisky,
   sortRange,
   sortTarget,
   state,
@@ -3124,22 +3123,12 @@ export function cellMenu(x, y, fromKeyboard = false) {
     ["Transpose", false, () => doPasteMode("transpose")],
   ]);
   sep();
-  // Insert/delete *cells*, shifting the rest. References are not rewritten, so
-  // the user is told when that matters rather than discovering it later.
+  // Insert/delete *cells*, shifting the rest. The engine adjusts references to
+  // the moved cells, as Excel does, so nothing is asked (XL-UX-173).
   const shiftCells = (insert, vertical, label) => () => {
     const r = effectiveRange();
-    const risky = shiftIsRisky(() =>
-      wasm.session_shift_affects_formulas(state.sheet, r.r0, r.c0, r.r1, r.c1, vertical));
-    const run = () => {
-      tryEdit(() => wasm.session_shift_cells(state.sheet, r.r0, r.c0, r.r1, r.c1, insert, vertical));
-      status.textContent = label.toLowerCase();
-    };
-    if (!risky) { run(); return; }
-    confirmModal(
-      "Formulas reference these cells",
-      "Moving them will not adjust those references — they will keep pointing at the same addresses, which will now hold different cells.",
-      label,
-    ).then((ok) => { if (ok) run(); });
+    tryEdit(() => wasm.session_shift_cells(state.sheet, r.r0, r.c0, r.r1, r.c1, insert, vertical));
+    status.textContent = label.toLowerCase();
   };
   submenu("Insert cells", [
     ["Shift cells down", false, shiftCells(true, true, "Inserted, shifted down")],

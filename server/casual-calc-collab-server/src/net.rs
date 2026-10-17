@@ -2617,6 +2617,11 @@ fn refusal_for(error: &crate::document::ServerError) -> Refusal {
     use casual_calc_transaction::session::SessionError;
     match error {
         crate::document::ServerError::Session(SessionError::Transform(_)) => Refusal::CannotMerge,
+        // An edit the document itself refuses once ordered — today an insert
+        // that, after a concurrent one, would push content off the grid
+        // (`XL-FEAT-126`). The chunk was rolled back whole and the document is
+        // saving; that one edit did not take, which is what `CannotMerge` says.
+        crate::document::ServerError::Session(SessionError::Apply(_)) => Refusal::CannotMerge,
         _ => Refusal::NotSaving,
     }
 }

@@ -365,7 +365,6 @@ import {
   selectRowsSpan,
   cellBoxForTest,
   selectionRectForTest,
-  shiftIsRisky,
   sortRange,
   sortTarget,
   startInline,
@@ -821,7 +820,6 @@ export {
   selectRowsSpan,
   cellBoxForTest,
   selectionRectForTest,
-  shiftIsRisky,
   sortRange,
   sortTarget,
   startInline,
@@ -7289,13 +7287,12 @@ export let lastFill = null;
 function registerShellCommands() {
   const R = registerCommand;
   const span = () => { const r = effectiveRange(); return { r, rows: r.r1 - r.r0 + 1, cols: r.c1 - r.c0 + 1 }; };
+  // Insert/Delete Cells: the engine adjusts references, as Excel does, so
+  // there is nothing to ask (XL-UX-173).
   const shift = (insert, vertical, label) => () => {
     const r = effectiveRange();
-    const go = () => { tryEdit(() => wasm.session_shift_cells(state.sheet, r.r0, r.c0, r.r1, r.c1, insert, vertical)); status.textContent = label.toLowerCase(); };
-    if (!shiftIsRisky(() => wasm.session_shift_affects_formulas(state.sheet, r.r0, r.c0, r.r1, r.c1, vertical))) { go(); return; }
-    confirmModal("Formulas reference these cells",
-      "Moving them will not adjust those references — they will keep pointing at the same addresses, which will now hold different cells.",
-      label).then((ok) => { if (ok) go(); });
+    tryEdit(() => wasm.session_shift_cells(state.sheet, r.r0, r.c0, r.r1, r.c1, insert, vertical));
+    status.textContent = label.toLowerCase();
   };
   R("edit.paste-special", { label: "Paste Special…", run: () => pasteSpecialDialog(), shortcut: "Ctrl+Alt+V" });
   R("edit.paste-values", { label: "Paste Values", run: () => doPasteMode("values") });

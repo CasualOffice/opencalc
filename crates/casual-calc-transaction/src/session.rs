@@ -878,10 +878,15 @@ impl ServerSession {
             rebased.push(current);
         }
 
+        // Applied as one batch, because a batch is all-or-nothing: a member
+        // `apply` refuses (`XL-FEAT-126` — an insert that two participants'
+        // edits together push off the grid) rolls back the members before it.
+        // Applied one at a time, those stayed in the document while the chunk
+        // was refused and never logged, so the server held edits no peer was
+        // ever sent.
+        let effective: Vec<Operation> = rebased.iter().filter(|op| !is_noop(op)).cloned().collect();
+        apply(workbook, Operation::Batch(effective))?;
         for op in &rebased {
-            if !is_noop(op) {
-                apply(workbook, op.clone())?;
-            }
             self.log.push(op.clone());
             self.revision += 1;
         }

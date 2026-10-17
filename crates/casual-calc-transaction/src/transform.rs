@@ -56,6 +56,14 @@
 //! prose, not as an intra-doc link: it is `cfg(test)`, so a link to it is a
 //! broken one under `-D warnings`.)
 //!
+//! **Insert/Delete Cells** ([`Operation::ShiftCells`], `XL-UX-173`) has its own
+//! module, `transform::block`, which answers cell edits, names, cross-axis line
+//! edits and same-axis line edits wholly before the block, and refuses the rest
+//! — a same-axis line edit at or inside the block, two blocks that meet, a
+//! block against a move or a positional metadata bundle. That surface is
+//! asserted by `transform_tests::tp1_holds_for_insert_and_delete_cells`, which
+//! fails on any answered pair that does not converge.
+//!
 //! All three return [`TransformError::Unsupported`] rather than an answer. Returning
 //! the untransformed op would be silently wrong, and silently wrong is the one
 //! outcome this layer must not produce: the two clients would diverge and
@@ -68,6 +76,7 @@ use crate::{
 use casual_calc_formula::{Expr, stored::Origin};
 use casual_calc_model::{Cell, CellRef, CellValue, FormulaHandle};
 
+mod block;
 mod line_move;
 
 /// Where `subject` sits relative to `against` in the order the server settled
@@ -162,6 +171,7 @@ fn sheet_of(op: &Operation) -> Option<usize> {
         | Operation::MoveColumns { sheet, .. }
         | Operation::MoveRows { sheet, .. }
         | Operation::MoveRange { sheet, .. }
+        | Operation::ShiftCells { sheet, .. }
         | Operation::SetTabColor { sheet, .. } => Some(*sheet),
         _ => None,
     }
@@ -403,6 +413,12 @@ fn transform_inner(
     if renumbers_sheets(subject) {
         return Ok(subject.clone());
     }
+    // Insert/Delete Cells (`XL-UX-173`): a band confined to part of the other
+    // axis, which neither `Band` nor a line move describes. Its own module
+    // answers every pair it can and refuses the rest.
+    if block::involves(subject) || block::involves(against) {
+        return block::rebase(subject, against, sheets, formulas);
+    }
     if side == Side::Earlier && same_target(subject, against) && loses_a_formula(subject, against) {
         return Err(unsupported(subject, against));
     }
@@ -602,7 +618,7 @@ fn rebase_across_sheets(
                     // the seed carried a cross-sheet reference; every other
                     // operation really is confined to its own sheet, which is
                     // why the no-op is right for them and only for them.
-                    None if band_of(&rebased).is_some() => {
+                    None if band_of(&rebased).is_some() || block::involves(&rebased) => {
                         return Err(unsupported(subject, against));
                     }
                     None => return Ok(noop()),
@@ -634,6 +650,7 @@ fn sheet_field_mut(op: &mut Operation) -> Option<&mut usize> {
         | Operation::MoveColumns { sheet, .. }
         | Operation::MoveRows { sheet, .. }
         | Operation::MoveRange { sheet, .. }
+        | Operation::ShiftCells { sheet, .. }
         | Operation::SetTabColor { sheet, .. } => Some(sheet),
         _ => None,
     }
@@ -666,6 +683,7 @@ fn variant_name(op: &Operation) -> &'static str {
         Operation::MoveColumns { .. } => "MoveColumns",
         Operation::MoveRows { .. } => "MoveRows",
         Operation::MoveRange { .. } => "MoveRange",
+        Operation::ShiftCells { .. } => "ShiftCells",
         Operation::SetTabColor { .. } => "SetTabColor",
         Operation::SetDefinedNames(_) => "SetDefinedNames",
         Operation::SetMacros(_) => "SetMacros",
@@ -786,6 +804,9 @@ pub(super) struct Shift {
     kind: ShiftKind,
     at: u32,
     count: u32,
+    /// The band of the other axis a block shift is confined to; `None` for
+    /// whole lines.
+    cross: Option<(u32, u32)>,
     /// The operation's name, for the refusal when the context is not enough.
     against: &'static str,
 }
@@ -808,6 +829,7 @@ impl Band {
             },
             at: self.at,
             count: self.count,
+            cross: None,
             against: match (self.axis, self.inserting) {
                 (Axis::Row, true) => "InsertRows",
                 (Axis::Row, false) => "DeleteRows",
@@ -840,6 +862,7 @@ fn carried_shift<'a>(
         kind: shift.kind,
         at: shift.at,
         count: shift.count,
+        cross: shift.cross,
     })
 }
 
