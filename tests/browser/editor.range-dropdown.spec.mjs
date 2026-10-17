@@ -45,6 +45,8 @@ test("the rule is enforced, not merely offered", async ({ page }) => {
   expect(
     await page.evaluate(() => window.opencalcEditor.wasmApi().session_cell_input(0, 10, 0)),
   ).toBe("");
+  // Refused in Excel's Stop alert (XL-UX-174); Cancel answers it.
+  await page.locator("#oc-msgbox-cancel").click();
 
   const accepted = await page.evaluate(() => window.opencalcEditor.commit("South", false));
   expect(accepted, "a value from the range is accepted").toBe(true);
@@ -59,6 +61,7 @@ test("the list is live: editing the source changes what is allowed", async ({ pa
     window.opencalcEditor.selectForTest(10, 0);
   });
   expect(await page.evaluate(() => window.opencalcEditor.commit("Final", false))).toBe(false);
+  await page.locator("#oc-msgbox-cancel").click();   // the Stop alert (XL-UX-174)
 
   // Adding a row to the source adds an option. That liveness is the whole
   // reason to back a list with a range rather than copy the values into it.

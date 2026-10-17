@@ -61,6 +61,9 @@ import {
   conditionDialog,
   confirmModal,
   messageBox,
+  messageBoxUp,
+  PIVOT_CELL_TEXT,
+  PROTECTED_SHEET_TEXT,
   selectBoxes,
   sheetRef,
   customFormatDialog,
@@ -519,6 +522,7 @@ export {
   conditionDialog,
   confirmModal,
   messageBox,
+  messageBoxUp,
   selectBoxes,
   sheetRef,
   customFormatDialog,
@@ -6591,7 +6595,8 @@ export function beginEdit(surface, initial, caretAtEnd = false) {
   // The message is the engine's own sentence, word for word: one rule that
   // refuses in two places must not explain itself in two ways.
   if (activeCellLocked()) {
-    statusError("this sheet is protected — unprotect it to change locked cells");
+    // Excel's message box, in Excel's words (XL-UX-174).
+    messageBox(PROTECTED_SHEET_TEXT);
     return;
   }
   // A pivot's report is written by the engine and rewritten on every refresh.
@@ -6600,7 +6605,7 @@ export function beginEdit(surface, initial, caretAtEnd = false) {
   // until something else erases it is worse than one never accepted.
   const owner = pivotBlocks(state.sel.row, state.sel.col);
   if (owner) {
-    statusError(`this cell is part of the pivot table “${owner}” — change it in the fields panel`);
+    messageBox(PIVOT_CELL_TEXT);
     return;
   }
   editSurface = surface;
@@ -9537,15 +9542,15 @@ function wireEvents() {
         !surface.value.trim().startsWith("=") &&
         ["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"].includes(e.key)
       ) {
-        if (commit(surface.value, false)) {
-          const d = { ArrowUp: [-1, 0], ArrowDown: [1, 0], ArrowLeft: [0, -1], ArrowRight: [0, 1] }[e.key];
-          select(state.sel.row + d[0], state.sel.col + d[1]);
-        }
+        const d = { ArrowUp: [-1, 0], ArrowDown: [1, 0], ArrowLeft: [0, -1], ArrowRight: [0, 1] }[e.key];
+        const move = () => select(state.sel.row + d[0], state.sel.col + d[1]);
+        if (commit(surface.value, false, "user", { after: move })) move();
         e.preventDefault();
       }
       else if (e.key === "Tab") {
         // Shift+Tab while editing moves left, which it previously could not.
-        if (commit(surface.value, false)) tabStep(e.shiftKey);
+        const step = () => tabStep(e.shiftKey);
+        if (commit(surface.value, false, "user", { after: step })) step();
         e.preventDefault();
       }
     });
