@@ -1018,7 +1018,7 @@ fn a_plain_note_does_not_pull_in_the_threaded_parts() {
     let written = write_workbook(&wb).unwrap();
     let mut zip = zip::ZipArchive::new(Cursor::new(&written)).unwrap();
     let names: Vec<String> = (0..zip.len())
-        .map(|i| zip.by_index(i).unwrap().name().to_owned())
+        .map(|i| zip.by_index(i).unwrap().name().unwrap().into_owned())
         .collect();
     assert!(
         !names.iter().any(|n| n.contains("threadedComment")),
@@ -3463,7 +3463,7 @@ fn entry_names(package: &[u8]) -> Vec<String> {
     zip::ZipArchive::new(Cursor::new(package))
         .unwrap()
         .file_names()
-        .map(str::to_owned)
+        .map(|n| n.unwrap().into_owned())
         .collect()
 }
 
@@ -4813,7 +4813,7 @@ fn replace_parts(package: &[u8], replacements: &[(&str, &[u8])]) -> Vec<u8> {
     let opts = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
     for i in 0..zip.len() {
         let mut file = zip.by_index(i).unwrap();
-        let name = file.name().to_owned();
+        let name = file.name().unwrap().into_owned();
         let mut data = Vec::new();
         file.read_to_end(&mut data).unwrap();
         if let Some((_, replacement)) = replacements.iter().find(|(path, _)| *path == name) {

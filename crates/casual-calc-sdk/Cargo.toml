@@ -45,7 +45,7 @@ tiny-skia = "0.11"
 # To look inside a package this crate just wrote. Already in the graph under
 # `casual-calc-export`; a test that asserts what did or did not reach
 # `sharedStrings.xml` has to open the zip and read the part.
-zip = { version = "2", default-features = false, features = ["deflate"] }
+zip = { version = "9", default-features = false, features = ["deflate"] }
 
 [lints]
 workspace = true
