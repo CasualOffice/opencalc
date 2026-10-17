@@ -38,8 +38,8 @@ use casual_calc_formula::restore_at;
 use casual_calc_formula::stored::{ABSOLUTE, Origin, StoredRef};
 use casual_calc_model::{
     AutoFilter, AxisSizing, CellComment, CellRange, CellRef, CellStore, ChartView,
-    ConditionalFormat, DataValidation, DefinedName, Hyperlink, PivotTable, Sheet, Table,
-    TableColumn, Workbook,
+    ConditionalFormat, DataValidation, DefinedName, GRID_MAX_COL, GRID_MAX_ROW, Hyperlink,
+    PivotTable, Sheet, Table, TableColumn, Workbook,
 };
 
 use crate::{Operation, TxnError};
@@ -57,6 +57,15 @@ pub enum Axis {
 }
 
 impl Axis {
+    /// The last addressable line on this axis: row 1,048,576 or column XFD,
+    /// zero-based.
+    pub(crate) const fn limit(self) -> u32 {
+        match self {
+            Axis::Row => GRID_MAX_ROW,
+            Axis::Col => GRID_MAX_COL,
+        }
+    }
+
     /// The along-axis coordinate of a stored cell address.
     fn coord(self, at: CellRef) -> u32 {
         match self {
@@ -115,7 +124,24 @@ pub(crate) enum ShiftKind {
 }
 
 /// Apply an insert of `count` lines at `at` along `axis` on sheet `sheet`.
-/// Returns the inverse (the matching delete).
+/// Returns the inverse — the matching delete, plus restores when the insert
+/// had to clip something at the edge of the grid.
+///
+/// # Refused at the edge of the grid (`XL-FEAT-126`)
+///
+/// An insert pushes the last `count` lines off the grid. If anything there is
+/// *content* — see [`edge_loss`] — the insert is refused with
+/// [`TxnError::OffGrid`] before anything is touched, as Excel refuses it. The
+/// decision reads nothing but the document, so a replica applying the same
+/// operation to the same state reaches the same answer: a collaborative
+/// refusal is deterministic.
+///
+/// What is *not* content is clipped rather than refused: a conditional format
+/// or validation reaching the last line keeps reaching it, a range reference
+/// ending there stays ending there, and a single reference pushed past it reads
+/// `#REF!`. None of that is reversible by the matching delete, so when any of
+/// it happened the inverse also carries the pre-insert state of exactly what
+/// was clipped.
 pub(crate) fn insert(
     workbook: &mut Workbook,
     sheet: usize,
@@ -124,13 +150,163 @@ pub(crate) fn insert(
     count: u32,
 ) -> Result<Operation, TxnError> {
     let target = sheet_name(workbook, sheet)?;
+    if let Some(occupied) = edge_loss(&workbook.sheets[sheet], axis, at, count) {
+        return Err(TxnError::OffGrid {
+            sheet,
+            axis,
+            occupied,
+        });
+    }
+    // Pre-insert state of what the edge can clip, taken before anything moves.
+    // Cheap next to the cell-store rebuild below, and only *kept* when used.
+    let metadata_before = crate::SheetMetadata::capture(&workbook.sheets[sheet]);
+    let names_before = workbook.defined_names.clone();
+    let mut others = sheets_sourcing(workbook, sheet);
+    others.extend(sheets_charting(workbook, &target));
+    others.retain(|other| *other != sheet);
+    others.sort_unstable();
+    others.dedup();
+    let others_before: Vec<Operation> = others
+        .into_iter()
+        .map(|other| snapshot_metadata(workbook, other))
+        .collect();
+
     shift_cells_insert(workbook, sheet, axis, at, count);
     shift_metadata_insert(&mut workbook.sheets[sheet], axis, at, count);
-    rewrite_all_formulas(workbook, &target, axis, ShiftKind::Insert, at, count);
-    rewrite_defined_names(workbook, &target, axis, ShiftKind::Insert, at, count);
-    shift_drawings_and_pivot_sources(workbook, sheet, axis, ShiftKind::Insert, at, count);
-    rewrite_chart_series(workbook, &target, axis, ShiftKind::Insert, at, count);
-    Ok(delete_op(sheet, axis, at, count))
+    let clipped_formulas =
+        rewrite_all_formulas(workbook, &target, axis, ShiftKind::Insert, at, count);
+    let names_clipped =
+        rewrite_defined_names(workbook, &target, axis, ShiftKind::Insert, at, count);
+    let sources_clipped =
+        shift_drawings_and_pivot_sources(workbook, sheet, axis, ShiftKind::Insert, at, count);
+    let series_clipped =
+        rewrite_chart_series(workbook, &target, axis, ShiftKind::Insert, at, count);
+
+    // Would the matching delete put the metadata back? Asked of the metadata
+    // itself rather than predicted, so a field added later cannot be missed.
+    let mut probe = crate::SheetMetadata::capture(&workbook.sheets[sheet]);
+    shift_metadata_delete(&mut probe, axis, at, count);
+    let metadata_clipped = probe != metadata_before;
+
+    let delete = delete_op(sheet, axis, at, count);
+    if !metadata_clipped
+        && !names_clipped
+        && !sources_clipped
+        && !series_clipped
+        && clipped_formulas.is_empty()
+    {
+        // The common case, and still exact: an insert opens an empty band, so
+        // the matching delete has nothing to drop.
+        return Ok(delete);
+    }
+    let mut ops = vec![delete];
+    if metadata_clipped {
+        ops.push(Operation::set_sheet_metadata(sheet, metadata_before));
+    }
+    if sources_clipped || series_clipped {
+        ops.extend(others_before);
+    }
+    if names_clipped {
+        ops.push(Operation::SetDefinedNames(names_before));
+    }
+    for (home, now, original) in clipped_formulas {
+        // Where the cell was before the insert moved it — where the delete
+        // puts it back — and its formula re-measured from there.
+        let was = if home == sheet && axis.coord(now) >= at.saturating_add(count) {
+            axis.with_coord(now, axis.coord(now) - count)
+        } else {
+            now
+        };
+        let Some(mut cell) = workbook.sheets[home].cells.get(now).cloned() else {
+            continue;
+        };
+        let expr = restore_at(
+            &original,
+            Origin::at(now.row, now.col),
+            Origin::at(was.row, was.col),
+        );
+        cell.formula = Some(workbook.store_formula(expr));
+        ops.push(Operation::SetCell {
+            sheet: home,
+            at: was,
+            cell: Some(cell),
+        });
+    }
+    Ok(Operation::Batch(ops))
+}
+
+/// The top-left cell of whatever an insert of `count` lines at `at` would push
+/// off the end of the grid, or `None` when everything that moves still fits.
+///
+/// **What counts as content**, after Excel's own message — "These non-empty
+/// cells might appear empty but have blank values, some formatting, or a
+/// formula": a cell holding a value, a formula or a style; a merge, a table, a
+/// note or comment, a hyperlink, a chart or picture frame, and a pivot. A data
+/// validation, a conditional format or an autofilter counts only when the
+/// whole of its range would leave the grid — one that merely *reaches* the last
+/// line, as a whole-column rule written `A1:A1048576` does, is clipped to it,
+/// which keeps the rule on every cell it can still apply to.
+///
+/// A stored cell with nothing in it is not content and is dropped.
+pub(crate) fn edge_loss(sheet: &Sheet, axis: Axis, at: u32, count: u32) -> Option<CellRef> {
+    let limit = axis.limit();
+    // The first line whose content would land past the last one. Lines before
+    // `at` never move, so it is never earlier than `at`.
+    let first_lost = (limit + 1).saturating_sub(count).max(at);
+    if count == 0 || first_lost > limit {
+        return None;
+    }
+    let mut found: Option<CellRef> = None;
+    let mut note = |cell: CellRef| {
+        if found.is_none_or(|best| (cell.row, cell.col) < (best.row, best.col)) {
+            found = Some(cell);
+        }
+    };
+    let lo = |range: &CellRange| axis.coord(range.start).min(axis.coord(range.end));
+    let hi = |range: &CellRange| axis.coord(range.start).max(axis.coord(range.end));
+    // The first lost cell of `range`, for the message.
+    let lost_corner = |range: &CellRange| axis.with_coord(range.start, lo(range).max(first_lost));
+
+    for (addr, cell) in sheet.cells.iter() {
+        if axis.coord(addr) >= first_lost && !cell.is_blank() {
+            note(addr);
+        }
+    }
+    let solid = sheet
+        .merges
+        .iter()
+        .chain(sheet.tables.iter().map(|t| &t.range))
+        .chain(sheet.hyperlinks.iter().map(|h| &h.range))
+        .chain(sheet.charts.iter().map(|c| &c.anchor))
+        .chain(sheet.images.iter().map(|i| &i.anchor))
+        .chain(sheet.pivots.iter().filter_map(|p| p.output.as_ref()));
+    for range in solid {
+        if hi(range) >= first_lost {
+            note(lost_corner(range));
+        }
+    }
+    for comment in &sheet.comments {
+        if axis.coord(comment.at) >= first_lost {
+            note(comment.at);
+        }
+    }
+    for pivot in &sheet.pivots {
+        if axis.coord(pivot.anchor) >= first_lost {
+            note(pivot.anchor);
+        }
+    }
+    let rules = sheet
+        .validations
+        .iter()
+        .map(|v| &v.range)
+        .chain(sheet.conditional_formats.iter().map(|f| &f.range))
+        .chain(sheet.auto_filter.iter().map(|f| &f.range));
+    for range in rules {
+        if lo(range) >= first_lost {
+            note(lost_corner(range));
+        }
+    }
+    found
 }
 
 /// Apply a delete of `count` lines starting at `at` along `axis` on sheet
@@ -665,11 +841,17 @@ fn shift_cells_insert(workbook: &mut Workbook, sheet: usize, axis: Axis, at: u32
     let old = std::mem::take(store);
     let mut rebuilt = CellStore::new();
     for (addr, cell) in old.iter() {
+        let to = destination(addr);
+        // Only a cell holding nothing can be here: `edge_loss` refused the
+        // insert if anything else was.
+        if axis.coord(to) > axis.limit() {
+            continue;
+        }
         let mut cell = cell.clone();
         if let Some(handle) = restored.get(&addr) {
             cell.formula = Some(*handle);
         }
-        rebuilt.set(destination(addr), cell);
+        rebuilt.set(to, cell);
     }
     *store = rebuilt;
 }
@@ -848,11 +1030,15 @@ macro_rules! impl_positional {
 impl_positional!(Sheet);
 impl_positional!(crate::SheetMetadata);
 
-/// Bump `cell`'s along-axis coordinate by `count` if it sits on or after `at`.
+/// Bump `cell`'s along-axis coordinate by `count` if it sits on or after `at`,
+/// stopping at the last line of the grid.
+///
+/// The stop is what clips a range reaching the edge (`XL-FEAT-126`); anything
+/// that would be *lost* there was refused by [`edge_loss`] before this runs.
 fn insert_coord(axis: Axis, cell: &mut CellRef, at: u32, count: u32) {
     let coord = axis.coord(*cell);
     if coord >= at {
-        *cell = axis.with_coord(*cell, coord.saturating_add(count));
+        *cell = axis.with_coord(*cell, coord.saturating_add(count).min(axis.limit()));
     }
 }
 
@@ -893,7 +1079,8 @@ pub(crate) fn shift_metadata_insert(sheet: &mut impl Positional, axis: Axis, at:
     // the wrong rows collapsed.
     if axis == Axis::Row {
         reindex_set(sheet.filter_hidden_mut(), |k| {
-            Some(if k >= at { k.saturating_add(count) } else { k })
+            let moved = if k >= at { k.saturating_add(count) } else { k };
+            (moved <= GRID_MAX_ROW).then_some(moved)
         });
     }
     // A chart's frame and a pivot's report block are ranges on this sheet and
@@ -953,7 +1140,13 @@ pub(crate) fn shift_metadata_insert(sheet: &mut impl Positional, axis: Axis, at:
         }
     }
     let (sizing, hidden, frozen, outline, collapsed) = sheet.axis_mut(axis);
-    let shift = |k: u32| Some(if k >= at { k.saturating_add(count) } else { k });
+    // A line pushed past the last one takes its height, hidden flag and outline
+    // level with it: they belong to a line that no longer exists.
+    let limit = axis.limit();
+    let shift = |k: u32| {
+        let moved = if k >= at { k.saturating_add(count) } else { k };
+        (moved <= limit).then_some(moved)
+    };
     reindex_map(&mut sizing.sizes, shift);
     reindex_set(hidden, shift);
     // The outline is position-indexed like everything else here, and was being
@@ -965,7 +1158,7 @@ pub(crate) fn shift_metadata_insert(sheet: &mut impl Positional, axis: Axis, at:
     // Inserting inside (or above) the frozen band extends it; inserting exactly
     // at the boundary (`at == *frozen`) or below leaves the freeze alone.
     if at < *frozen {
-        *frozen = frozen.saturating_add(count);
+        *frozen = frozen.saturating_add(count).min(limit);
     }
 }
 
@@ -1223,6 +1416,11 @@ struct RewriteCtx<'a> {
     kind: ShiftKind,
     at: u32,
     count: u32,
+    /// Set when an insert pushed a reference against the edge of the grid
+    /// (`XL-FEAT-126`): a range clamped at the last line, or a single
+    /// reference turned `#REF!`. The matching delete cannot undo either, so
+    /// the caller keeps the original for the inverse.
+    clipped: std::cell::Cell<bool>,
 }
 
 /// Rewrite the references of every formula in the workbook that targets
@@ -1237,7 +1435,8 @@ fn rewrite_all_formulas(
     kind: ShiftKind,
     at: u32,
     count: u32,
-) {
+) -> Vec<(usize, CellRef, Expr)> {
+    let mut clipped = Vec::new();
     let mut jobs: Vec<RewriteJob> = Vec::new();
     for (idx, s) in workbook.sheets.iter().enumerate() {
         for (addr, cell) in s.cells.iter() {
@@ -1262,6 +1461,7 @@ fn rewrite_all_formulas(
             kind,
             at,
             count,
+            clipped: std::cell::Cell::new(false),
         };
         // **In and out of the absolute form.** The rewrite below works in
         // addresses — "is this reference at or past the insertion point" is a
@@ -1281,7 +1481,11 @@ fn rewrite_all_formulas(
                 store.set(job.at, updated);
             }
         }
+        if ctx.clipped.get() {
+            clipped.push((job.sheet, job.at, job.expr));
+        }
     }
+    clipped
 }
 
 /// Rewrite the references inside every defined name.
@@ -1306,7 +1510,8 @@ fn rewrite_defined_names(
     kind: ShiftKind,
     at: u32,
     count: u32,
-) {
+) -> bool {
+    let mut clipped = false;
     let jobs: Vec<(usize, Expr, String)> = workbook
         .defined_names
         .iter()
@@ -1329,6 +1534,7 @@ fn rewrite_defined_names(
             kind,
             at,
             count,
+            clipped: std::cell::Cell::new(false),
         };
         // A defined name has no holding cell, so its tree is already the
         // absolute form and needs no conversion.
@@ -1336,7 +1542,9 @@ fn rewrite_defined_names(
         if rewritten != expr {
             workbook.defined_names[i].formula = rewritten;
         }
+        clipped |= ctx.clipped.get();
     }
+    clipped
 }
 
 /// Shift what `shift_metadata_*` cannot reach from a single sheet.
@@ -1354,7 +1562,8 @@ fn shift_drawings_and_pivot_sources(
     kind: ShiftKind,
     at: u32,
     count: u32,
-) {
+) -> bool {
+    let mut clipped = false;
     let target_id = workbook.sheets[sheet].id;
 
     // Images sit on the sheet the insert ran on, and move exactly like a chart
@@ -1408,6 +1617,15 @@ fn shift_drawings_and_pivot_sources(
             let mut moved = true;
             match kind {
                 ShiftKind::Insert => {
+                    clipped |= axis
+                        .coord(pivot.source.end)
+                        .max(axis.coord(pivot.source.start))
+                        >= at
+                        && axis
+                            .coord(pivot.source.end)
+                            .max(axis.coord(pivot.source.start))
+                            .saturating_add(count)
+                            > axis.limit();
                     insert_coord(axis, &mut pivot.source.start, at, count);
                     insert_coord(axis, &mut pivot.source.end, at, count);
                 }
@@ -1446,6 +1664,7 @@ fn shift_drawings_and_pivot_sources(
             }
         }
     }
+    clipped
 }
 
 /// Follow every `source_column` through a column shift of the pivot's source
@@ -1623,6 +1842,7 @@ pub(crate) fn shift_bundle_references(data: &mut crate::SheetMetadata, shift: &B
         kind,
         at,
         count,
+        clipped: std::cell::Cell::new(false),
     };
     for chart in data.charts.iter_mut() {
         for series in chart.series.iter_mut() {
@@ -1710,6 +1930,7 @@ impl CarriedShift<'_> {
             kind: self.kind,
             at: self.at,
             count: self.count,
+            clipped: std::cell::Cell::new(false),
         }
     }
 
@@ -1757,7 +1978,8 @@ fn rewrite_chart_series(
     kind: ShiftKind,
     at: u32,
     count: u32,
-) {
+) -> bool {
+    let mut clipped = false;
     for sheet in workbook.sheets.iter_mut() {
         let home = sheet.name.clone();
         let ctx = RewriteCtx {
@@ -1767,6 +1989,7 @@ fn rewrite_chart_series(
             kind,
             at,
             count,
+            clipped: std::cell::Cell::new(false),
         };
         for chart in sheet.charts.iter_mut() {
             for series in chart.series.iter_mut() {
@@ -1780,7 +2003,9 @@ fn rewrite_chart_series(
                 }
             }
         }
+        clipped |= ctx.clipped.get();
     }
+    clipped
 }
 
 // ---------------------------------------------------------------------------
@@ -1959,8 +2184,13 @@ fn rewrite_reference(reference: &StoredRef, ctx: &RewriteCtx) -> Expr {
         ShiftKind::Insert => {
             let mut shifted = reference.clone();
             if coord >= ctx.at {
-                ctx.axis
-                    .set_ref_coord(&mut shifted, coord.saturating_add(ctx.count));
+                let moved = coord.saturating_add(ctx.count);
+                if moved > ctx.axis.limit() {
+                    // Pushed off the grid: Excel shows `#REF!`.
+                    ctx.clipped.set(true);
+                    return ref_error();
+                }
+                ctx.axis.set_ref_coord(&mut shifted, moved);
             }
             Expr::Reference(shifted)
         }
@@ -2012,6 +2242,14 @@ fn rewrite_range(a: &StoredRef, b: &StoredRef, ctx: &RewriteCtx) -> Expr {
     }
     match ctx.kind {
         ShiftKind::Insert => {
+            // A range wholly pushed off the grid names nothing; one only
+            // reaching past the edge keeps everything up to it.
+            let limit = ctx.axis.limit();
+            let lo = ctx.axis.ref_coord(a).min(ctx.axis.ref_coord(b));
+            if lo >= ctx.at && lo.saturating_add(ctx.count) > limit {
+                ctx.clipped.set(true);
+                return ref_error();
+            }
             Expr::Range(shift_endpoint_insert(a, ctx), shift_endpoint_insert(b, ctx))
         }
         ShiftKind::Delete => rewrite_range_delete(a, b, ctx),
@@ -2058,8 +2296,12 @@ fn shift_endpoint_insert(endpoint: &StoredRef, ctx: &RewriteCtx) -> StoredRef {
     let mut shifted = endpoint.clone();
     let coord = ctx.axis.ref_coord(endpoint);
     if coord >= ctx.at {
+        let moved = coord.saturating_add(ctx.count);
+        if moved > ctx.axis.limit() {
+            ctx.clipped.set(true);
+        }
         ctx.axis
-            .set_ref_coord(&mut shifted, coord.saturating_add(ctx.count));
+            .set_ref_coord(&mut shifted, moved.min(ctx.axis.limit()));
     }
     shifted
 }

@@ -1938,11 +1938,31 @@ export function syncVolatileClock() {
   catch { /* an engine that has not booted yet has nothing to tell */ }
 }
 
+/// Excel's words for the edits the engine refuses by code (docs/20), raised in
+/// its message box rather than the status bar — Excel stops and says why.
+/// "Microsoft Excel" in Excel's text is our name here, as in the title bar.
+const REFUSALS = {
+  // XL-FEAT-126 — the M365 wording, as quoted on Microsoft's Tech Community
+  // and in university IT guides (support.microsoft.com KB 305568 has the older
+  // "cannot shift nonblank cells off the worksheet").
+  "OC-TXN-0003": "OpenCalc can't insert new cells because it would push non-empty cells off the end of the worksheet. " +
+    "These non-empty cells might appear empty but have blank values, some formatting, or a formula. " +
+    "Delete enough rows or columns to make room for what you want to insert and then try again.",
+};
+
+/// Report a refused edit: Excel's message box for a refusal it has words for,
+/// the status bar for everything else.
+export function refuseEdit(text) {
+  const code = Object.keys(REFUSALS).find((c) => String(text).includes(c));
+  if (code) messageBox(REFUSALS[code]);
+  else statusError(text);
+}
+
 export function tryEdit(fn) {
   // Before the edit, because an edit recalculates: setting the clock afterwards
   // would date every volatile cell one edit behind.
   syncVolatileClock();
-  try { fn(); } catch (e) { statusError(errText(e)); }
+  try { fn(); } catch (e) { refuseEdit(errText(e)); }
   // Any edit can add, remove or re-wrap a grown row, so the growth map — and
   // every offset derived from it — has to be rebuilt.
   invalidateGrowth();

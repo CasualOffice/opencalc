@@ -1728,3 +1728,80 @@ fn a_submission_never_exceeds_the_frame_the_transport_will_carry() {
         "every edit is delivered across the frames, not dropped at the boundary"
     );
 }
+
+/// `XL-FEAT-126` through the protocol. Two participants each insert a row
+/// while the sheet has exactly one empty row below its content: either insert
+/// fits alone, the two together would push the last row off the grid.
+///
+/// The refusal is a pure function of the document, so the server refuses the
+/// second chunk it orders — **all of it**, including an edit the chunk made
+/// before the insert — and the participant whose insert lost cannot apply the
+/// winner either, so it latches desynced and re-joins from the server's state
+/// rather than quietly holding a document nobody else has.
+#[test]
+fn concurrent_inserts_that_together_push_content_off_the_grid_refuse_atomically() {
+    use casual_calc_model::GRID_MAX_ROW;
+    let mut base = seed();
+    base.sheets[0].cells.set(
+        CellRef::new(GRID_MAX_ROW - 1, 0),
+        Cell::value(CellValue::Number(42.0)),
+    );
+    let insert = Operation::InsertRows {
+        sheet: 0,
+        at: 0,
+        count: 1,
+    };
+    let mut server = ServerSession::new();
+    let mut doc = base.clone();
+    let mut first = Peer::new(&base, 1);
+    let mut second = Peer::new(&base, 2);
+
+    first
+        .session
+        .edit(&mut first.workbook, insert.clone())
+        .expect("one row fits");
+    second
+        .session
+        .edit(&mut second.workbook, write(3, 2, 7.0))
+        .unwrap();
+    second
+        .session
+        .edit(&mut second.workbook, insert.clone())
+        .expect("one row fits here too");
+
+    let a = first.session.flush(&first.workbook).unwrap();
+    let b = second.session.flush(&second.workbook).unwrap();
+    let Commit::Applied { ops, revision } = server.commit(&mut doc, &a).unwrap() else {
+        panic!("the first insert commits");
+    };
+    let after_first = observe(&doc);
+    let refused = server.commit(&mut doc, &b);
+    assert!(
+        matches!(
+            refused,
+            Err(crate::session::SessionError::Apply(
+                crate::TxnError::OffGrid { .. }
+            ))
+        ),
+        "the second insert was not refused: {refused:?}"
+    );
+    assert_eq!(
+        observe(&doc),
+        after_first,
+        "the refused chunk was half-applied"
+    );
+    assert_eq!(server.revision(), revision, "the refused chunk was logged");
+
+    // The loser cannot take the winner's insert on top of its own either.
+    assert!(
+        second
+            .session
+            .receive(&mut second.workbook, &ops[0], revision)
+            .is_err(),
+        "the losing replica applied an insert that pushes its last row off the grid"
+    );
+    assert!(
+        second.session.is_desynced(),
+        "and must re-join from the server"
+    );
+}

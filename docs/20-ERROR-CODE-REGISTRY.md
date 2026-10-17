@@ -55,6 +55,7 @@ with a note. A code is part of the public contract once shipped.
 | `OC-MDL-0005` | Snapshot over admission limit | limit |
 | `OC-TXN-0001` | Operation target not found | edit |
 | `OC-TXN-0002` | Operation would violate an invariant | edit |
+| `OC-TXN-0003` | Insert would push non-empty cells off the end of the grid (XL-FEAT-126) | edit |
 | `OC-FML-0001` | Formula parse error | parse |
 | `OC-FML-0002` | Formula length / AST depth over limit | limit |
 | `OC-CAL-0001` | Circular reference (iterative calc disabled) | calc |

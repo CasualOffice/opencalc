@@ -20,6 +20,8 @@ use casual_calc_model::{
     SortState, StyleId, Table, Workbook,
 };
 
+#[cfg(test)]
+mod grid_edge_tests;
 pub mod protocol;
 pub mod restore;
 pub mod session;
@@ -53,6 +55,20 @@ pub enum TxnError {
         /// What was refused.
         reason: String,
     },
+    /// An insert would push content off the end of the grid (`XL-FEAT-126`).
+    ///
+    /// Excel refuses the same insert ("Microsoft Excel can't insert new cells
+    /// because it would push non-empty cells off the end of the worksheet").
+    /// Decided from the document alone, so every replica that applies the same
+    /// operation to the same state refuses it identically.
+    OffGrid {
+        /// The sheet index.
+        sheet: usize,
+        /// Whether rows (pushed down) or columns (pushed right).
+        axis: Axis,
+        /// The top-left cell of the content that would be lost, for the message.
+        occupied: CellRef,
+    },
 }
 
 impl TxnError {
@@ -61,6 +77,7 @@ impl TxnError {
         match self {
             TxnError::SheetNotFound { .. } => "OC-TXN-0001",
             TxnError::Invariant { .. } => "OC-TXN-0002",
+            TxnError::OffGrid { .. } => "OC-TXN-0003",
         }
     }
 }
@@ -72,6 +89,14 @@ impl core::fmt::Display for TxnError {
                 write!(f, "[{}] sheet {index} not found", self.code())
             }
             TxnError::Invariant { reason } => write!(f, "[{}] {reason}", self.code()),
+            TxnError::OffGrid { occupied, .. } => write!(
+                f,
+                "[{}] can't insert new cells because it would push non-empty cells \
+                 off the end of the worksheet (row {}, column {})",
+                self.code(),
+                occupied.row + 1,
+                occupied.col + 1
+            ),
         }
     }
 }

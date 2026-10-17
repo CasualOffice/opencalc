@@ -4227,6 +4227,19 @@ fn a_failing_save_and_an_unmergeable_edit_are_told_apart() {
         Refusal::CannotMerge,
         "the transform refusing a pair is not the document failing to save"
     );
+    // `XL-FEAT-126`: an insert that, after a concurrent one, would push
+    // content off the grid. That one edit did not take; the document is fine.
+    assert_eq!(
+        refusal_for(&ServerError::Session(SessionError::Apply(
+            casual_calc_transaction::TxnError::OffGrid {
+                sheet: 0,
+                axis: casual_calc_transaction::Axis::Row,
+                occupied: casual_calc_model::CellRef::new(1_048_575, 0),
+            }
+        ))),
+        Refusal::CannotMerge,
+        "an edit the document refuses is not the document failing to save"
+    );
     assert_eq!(
         refusal_for(&ServerError::ReadOnly),
         Refusal::NotSaving,
