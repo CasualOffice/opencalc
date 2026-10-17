@@ -76,6 +76,31 @@ test("a long label does not spill through an empty merged block that has scrolle
   expect(differing(inView, merged), "G22 showed text that the merge stops on screen").toBe(0);
 });
 
+test("a centre-across label stays centred over its whole run while it scrolls", async ({ page }) => {
+  // Centre across selection centres a label over the run of `centerContinuous`
+  // cells after it. The text pass found the run's end by walking the window's
+  // columns, so a run wider than the view was centred over its visible part —
+  // the label slid with every scroll step — and once the label's own cell
+  // scrolled out it was not drawn at all.
+  await boot(page);
+  await seed(page, `
+    a.session_set_cell(s, 23, 1, "Centred across B24:L24");
+    a.session_set_align(s, 23, 1, 23, 11, "centerContinuous");
+    a.session_set_cell(s, 25, 1, "Centred across B26:AD26");
+    a.session_set_align(s, 25, 1, 25, 29, "centerContinuous");
+  `);
+  // The whole of B24:L24 on screen, then B and C scrolled out.
+  const whole = await cellAt(page, 23, 6, 0, 0);
+  const anchorOut = await cellAt(page, 23, 6, 203, 0);
+  expect(anchorOut.firstCol, "the label and the cell after it must be out of view").toBe(3);
+  expect(differing(whole, anchorOut), "G24 changed when the label's own cell scrolled out").toBe(0);
+  // B26:AD26 is wider than the view at either offset: its centre is still one
+  // place, so the cell under it must not change.
+  const wide0 = await cellAt(page, 25, 10, 0, 0);
+  const wide1 = await cellAt(page, 25, 10, 64, 0);
+  expect(differing(wide0, wide1), "K26 changed as more of the run came into view").toBe(0);
+});
+
 test("a border on the edge shared with a cell that has scrolled out is still drawn", async ({ page }) => {
   // A border wider than a pixel is centred on its edge, so half of a cell's
   // thick right border lies in the cell to its right. The border pass drew

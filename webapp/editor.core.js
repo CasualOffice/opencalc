@@ -1984,6 +1984,8 @@ export const RESIZE_GRAB = 5; // px proximity to a header boundary that arms a r
 export let geoItems = []; // cells for the visible window, fetched in measure(), reused by draw()
 // Bordered cells just left of / above the window, whose borders reach into it.
 let edgeItems = [];
+// Centre-across runs touching the window, keyed "row,labelCol" → {r, c0, c1}.
+let contRuns = new Map();
 export let sheetMerges = []; // merged ranges of the active sheet, refreshed each draw
 let dragTab = -1; // index of the sheet tab being dragged (reorder)
 
@@ -2320,6 +2322,30 @@ function measure() {
     if (span.left !== null && firstColIdx > 0) gather(span.left, firstColIdx - 1, true);
     if (span.right !== null) gather(lastColIdx + 1, span.right, false);
   } catch { /* nothing outside the window is the common case */ }
+  // **Centre-across runs, whole** (`XL-UX-183`). A label is centred over its
+  // run of `centerContinuous` cells, which is usually wider than the part on
+  // screen; the run is the engine's answer, keyed by its label cell. Asked only
+  // when the window holds a centre-across cell at all (the engine sends even
+  // bare ones), so an ordinary sheet pays nothing. A label whose own cell has
+  // scrolled out to the left is fetched by itself — one per run, at most one a
+  // visible row — exactly as a merge's anchor is.
+  contRuns = new Map();
+  if (geoItems.some((it) => it.a === "cont")) {
+    try {
+      const runs = JSON.parse(
+        wasm.session_center_across_runs(state.sheet, firstRowIdx, lastRowIdx, firstColIdx, lastColIdx),
+      );
+      const have = new Set(geoItems.map((it) => it.r + "," + it.c));
+      for (const run of runs) {
+        const key = run.r + "," + run.c0;
+        contRuns.set(key, run);
+        if (have.has(key)) continue;
+        const label = JSON.parse(wasm.session_cells(state.sheet, run.r, run.c0, run.r, run.c0))
+          .find((t) => t.r === run.r && t.c === run.c0);
+        if (label) { geoItems.push(label); have.add(key); }
+      }
+    } catch { /* an engine without the export draws runs as before */ }
+  }
   // Rows the workbook sized itself are pinned: auto-height must not override an
   // imported height (nor one the user dragged), exactly as Excel stops
   // auto-fitting a row once its height is set. Without this every styled row of
@@ -2915,9 +2941,6 @@ export function draw() {
   // used to run straight through it into the window (`XL-UX-183`), while the
   // same merge on screen stopped it.
   const blocks = (r, c) => occupied.has(r + "," + c) || drawnMergeAt(r, c) !== undefined;
-  // Cells carrying centre-across, so a label can find the extent of its run.
-  const contCols = new Set();
-  for (const it of items) if (it.a === "cont") contCols.add(it.r + "," + it.c);
   for (const it of items) {
     if (!it.t) continue;
     // Merged text belongs to the merge pass below, which lays it out across the
@@ -3059,11 +3082,15 @@ export function draw() {
       // OOXML encodes the group, one `centerContinuous` per cell. Centring over
       // every empty neighbour instead would fling a lone label into the middle
       // of the viewport.
-      let last = it.c;
-      const inFroz = F.fc > 0 && it.c < F.fc;
-      const hi = inFroz ? F.fc : lastCol;
-      while (last + 1 < hi && geo.colOf.has(last + 1) && contCols.has(it.r + "," + (last + 1))) last += 1;
-      const spanR = colXAt(last) + colWAt(last);
+      //
+      // The run's extent comes from the engine (`contRuns`), not from walking
+      // the window's columns: a run wider than the view was centred over the
+      // part on screen, so the label slid as the sheet scrolled (`XL-UX-183`).
+      // A frozen label still stops at the freeze line — the body's columns
+      // scroll out from under it.
+      let last = contRuns.get(it.r + "," + it.c)?.c1 ?? it.c;
+      if (F.fc > 0 && it.c < F.fc) last = Math.min(last, F.fc - 1);
+      const spanR = fscreenXEnd(last);
       ctx.save();
       if (frozen) { const q = quadClip(it.r, it.c, v); ctx.beginPath(); ctx.rect(q.x, q.y, q.w, q.h); ctx.clip(); }
       ctx.beginPath();
