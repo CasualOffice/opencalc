@@ -238,6 +238,23 @@ test("Disable rejects with NetworkBlocked: an unhandled call is #VALUE!, and not
   expect(seen).toEqual([]);
 });
 
+test("Enable Content recomputes a custom function that Disable left at #VALUE! (MACRO-19)", async ({ page }) => {
+  // Excel's Enable Content refreshes what the blocked content feeds; leaving
+  // the cell at #VALUE! until a manual recalculation looked like a broken
+  // function, not like content that is now allowed.
+  await boot(page);
+  const seen = await fakeApi(page);
+  await defineFunctions(page, FXRATE);
+  await typeAt(page, 0, 0, "=FXRATE()");
+  await expect(notice(page)).toBeVisible({ timeout: 10_000 });
+  await page.locator("#oc-net-notice-disable").click();
+  await expect.poll(() => shown(page, 0, 0), { timeout: 10_000 }).toBe("#VALUE!");
+  expect(seen).toEqual([]);
+  await bar(page).getByRole("button", { name: "Enable Content" }).click();
+  await expect.poll(() => shown(page, 0, 0), { timeout: 10_000 }).toBe("1.5");
+  expect(seen.length).toBe(1);
+});
+
 test("a macro's requests to one site are one prompt; Disable fails the run and changes nothing", async ({ page }) => {
   await boot(page);
   const seen = await fakeApi(page);

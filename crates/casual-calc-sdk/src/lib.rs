@@ -1898,6 +1898,20 @@ impl WorkbookSession {
         Ok(())
     }
 
+    /// Forget every custom-function answer and ask for each again — what Excel's
+    /// Enable Content does for the content it unblocks (`MACRO-19`): a call
+    /// the person disabled answered `#VALUE!`, and that answer is cached under
+    /// the same key a fresh call would use, so without this the cell keeps
+    /// `#VALUE!` until something else changes it.
+    ///
+    /// Not an edit, for the reason [`set_custom_functions`](Self::set_custom_functions)
+    /// is not: answers are this client's run-time state.
+    pub fn refresh_custom_functions(&mut self) {
+        self.workbook.custom.clear_results();
+        self.recalc.invalidate();
+        self.recalculate_if_automatic();
+    }
+
     /// Take the custom-function calls recalculation found no answer for, each
     /// with the ticket to answer it by. Each call is handed out once.
     pub fn take_custom_calls(&mut self) -> Vec<casual_calc_model::PendingCustomCall> {
