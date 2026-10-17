@@ -136,7 +136,8 @@ pub fn session_validation_at(sheet: usize, row: u32, col: u32) -> String {
 /// An empty input always passes: clearing a cell is not entering a bad value.
 ///
 /// Returns `""` when the value is allowed, otherwise JSON
-/// `{"style":"stop"|"warning"|"information","title":…,"text":…}`.
+/// `{"style":"stop"|"warning"|"information","title":…,"text":…,"own":bool}`,
+/// where `own` is whether `text` is the rule's own error message.
 ///
 /// The style matters and used to be dropped: only `stop` refuses the entry.
 /// `warning` asks whether to keep it and `information` merely says so — turning
@@ -242,7 +243,7 @@ pub fn session_validation_error(sheet: usize, row: u32, col: u32, input: &str) -
     if out.is_empty() {
         return out;
     }
-    let (style, title) = with_session(|s| {
+    let (style, title, own) = with_session(|s| {
         s.workbook()
             .sheets
             .get(sheet)
@@ -251,13 +252,18 @@ pub fn session_validation_error(sheet: usize, row: u32, col: u32, input: &str) -
                 (
                     r.error_style.clone().unwrap_or_else(|| "stop".to_owned()),
                     r.error_title.clone(),
+                    !r.error_text.is_empty(),
                 )
             })
     })
     .flatten()
-    .unwrap_or_else(|| ("stop".to_owned(), String::new()));
+    .unwrap_or_else(|| ("stop".to_owned(), String::new(), false));
+    // `own` says whether `text` is the rule's own message. Excel's alert shows
+    // the author's message when there is one and its own default sentence
+    // otherwise (XL-UX-174) — not the generated description, which stays here
+    // for hosts that want to say why.
     format!(
-        "{{\"style\":{},\"title\":{},\"text\":{}}}",
+        "{{\"style\":{},\"title\":{},\"text\":{},\"own\":{own}}}",
         json_string(&style),
         json_string(&title),
         json_string(&out)

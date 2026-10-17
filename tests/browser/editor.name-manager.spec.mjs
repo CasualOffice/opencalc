@@ -104,14 +104,16 @@ test("Delete asks first, and only deletes on OK", async ({ page }) => {
   await page.keyboard.press("Control+F3");
   await row(page, "Rate").click();
   await page.locator("#oc-nm-delete").click();
-  await expect(page.locator("#oc-modal-body")).toContainText("Are you sure you want to delete the name Rate?");
-  await page.locator("#oc-modal .oc-confirm-actions .oc-btn", { hasText: "Cancel" }).click();
+  // Asked in Excel's message box over the dialog, which stays open (XL-UX-174).
+  await expect(page.locator("#oc-msgbox-text")).toHaveText("Are you sure you want to delete the name Rate?");
+  await expect(modal(page)).toBeVisible();
+  await page.locator("#oc-msgbox-cancel").click();
   await expect(page.locator("#oc-modal-title"), "Cancel goes back to the Name Manager").toHaveText("Name Manager");
   expect((await names(page)).map((n) => n.name)).toContain("Rate");
 
   await row(page, "Rate").click();
   await page.locator("#oc-nm-delete").click();
-  await page.locator("#oc-modal .oc-confirm-actions .oc-btn.primary").click();
+  await page.locator("#oc-msgbox-ok").click();
   await expect(page.locator("#oc-modal-title")).toHaveText("Name Manager");
   await expect(rows(page).locator('[data-col="name"]')).toHaveText(["Broken", "Pair"]);
   expect((await names(page)).map((n) => n.name)).not.toContain("Rate");

@@ -155,17 +155,18 @@ test("rename in place, and delete only after confirming", async ({ page }) => {
   await expect(modal(page)).toBeVisible();
   expect((await macros(page))[0].name).toBe("Tidy up");
 
-  // Delete asks; Cancel keeps it and returns to the window.
+  // Delete asks in a message box over the window, which stays open
+  // (XL-UX-174); No keeps it.
   await page.locator("#oc-mw-delete").click();
   await expect(page.locator("#oc-modal-title")).toHaveText("Macros");
-  await expect(page.locator(".oc-confirm-text")).toHaveText(/Delete the macro "Tidy up"\?/);
-  await page.locator("#oc-modal .oc-confirm-actions .oc-btn", { hasText: "Cancel" }).click();
+  await expect(page.locator("#oc-msgbox-text")).toHaveText(/Delete the macro "Tidy up"\?/);
+  await page.locator("#oc-msgbox-no").click();
   await expect(rows(page)).toHaveCount(2);
   expect((await macros(page)).length).toBe(2);
-  // Confirming deletes it.
+  // Yes deletes it.
   await rows(page).nth(0).click();
   await page.locator("#oc-mw-delete").click();
-  await page.locator("#oc-modal .oc-confirm-actions .oc-btn", { hasText: "Delete" }).click();
+  await page.locator("#oc-msgbox-yes").click();
   await expect(rows(page)).toHaveCount(1);
   expect((await macros(page)).map((m) => m.name)).toEqual(["Macro 2"]);
 });

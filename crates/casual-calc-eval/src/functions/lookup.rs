@@ -182,10 +182,36 @@ pub(crate) fn eval_index(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) ->
             }
         }
     };
-    if row < 1 || col < 1 || row as usize > grid.rows || col as usize > grid.cols {
+    // 0 is "all of it" on that axis (XL-FEAT-153): Excel's INDEX returns the
+    // whole column for row 0, the whole row for column 0, and the whole range
+    // for both. A single cell left over stays a plain value.
+    if row < 0 || col < 0 || row as usize > grid.rows || col as usize > grid.cols {
         return Value::Error(ErrorValue::Ref);
     }
-    grid.get(row as usize - 1, col as usize - 1).clone()
+    let rows: Vec<usize> = if row == 0 {
+        (0..grid.rows).collect()
+    } else {
+        vec![row as usize - 1]
+    };
+    let cols: Vec<usize> = if col == 0 {
+        (0..grid.cols).collect()
+    } else {
+        vec![col as usize - 1]
+    };
+    if rows.len() == 1 && cols.len() == 1 {
+        return grid.get(rows[0], cols[0]).clone();
+    }
+    let mut cells = Vec::with_capacity(rows.len() * cols.len());
+    for &r in &rows {
+        for &c in &cols {
+            cells.push(grid.get(r, c).clone());
+        }
+    }
+    Value::Array {
+        rows: rows.len(),
+        cols: cols.len(),
+        cells,
+    }
 }
 
 /// `MATCH(lookup, range, [type])`. Type 1 (default) ascending, 0 exact,

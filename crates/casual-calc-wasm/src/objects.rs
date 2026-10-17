@@ -520,20 +520,42 @@ pub fn session_chart_at(sheet: usize, row: u32, col: u32) -> String {
     .unwrap_or_else(|| "null".to_owned())
 }
 
-/// A1-quote a sheet name for a chart reference, as Excel does.
+/// A sheet name as it is written before the `!` of a reference: bare when it
+/// is a plain identifier nothing else can be read as, else in single quotes
+/// with any quote inside doubled — `Sheet1`, `'My Sheet'`, `'A1'`, `'R1C1'`,
+/// `'2024'` (XL-UX-166).
 ///
-/// A name holding a space or an apostrophe has to be quoted or the reference
-/// does not parse — and an unparseable series reference is a chart that draws
-/// nothing, with no message saying why.
+/// **The formula printer's rule, not a copy of it.** The answer is read off
+/// `CellReference`'s own `Display`, so the editor's dialogs, the name box, a
+/// reference picked while typing and a chart's series all quote exactly as a
+/// printed formula does. The webapp had five private copies of this rule and
+/// every one left a sheet named `A1` bare, so Go To wrote `A1!$B$2` — which
+/// reads as a different reference.
+#[wasm_bindgen]
+#[must_use]
+pub fn sheet_name_quoted(name: &str) -> String {
+    quote_sheet(name)
+}
+
+/// See [`sheet_name_quoted`]. Also how a chart's series is written: an
+/// unparseable series reference is a chart that draws nothing, with no
+/// message saying why.
 pub(crate) fn quote_sheet(name: &str) -> String {
-    let plain = name
-        .chars()
-        .all(|c| c.is_alphanumeric() || c == '_' || c == '.')
-        && !name.chars().next().is_some_and(|c| c.is_ascii_digit());
-    if plain {
-        name.to_owned()
-    } else {
-        format!("'{}'", name.replace('\'', "''"))
+    let probe = casual_calc_formula::CellReference {
+        sheet: Some(name.to_owned()),
+        col: 0,
+        row: 0,
+        col_absolute: false,
+        row_absolute: false,
+        row_implicit: false,
+        col_implicit: false,
+    };
+    let printed = probe.to_string();
+    // `<sheet>!A1`: everything before the last `!` is the sheet part, quotes
+    // included. A quoted name may itself hold a `!`, which is why the *last*.
+    match printed.rsplit_once('!') {
+        Some((sheet, _)) => sheet.to_owned(),
+        None => format!("'{}'", name.replace('\'', "''")),
     }
 }
 
@@ -3023,5 +3045,31 @@ mod hyperlink_tests {
             "null",
             "names are case-insensitive"
         );
+    }
+}
+
+#[cfg(test)]
+mod sheet_quoting_tests {
+    use super::sheet_name_quoted;
+
+    /// XL-UX-166: a sheet named like a reference is written quoted, the way
+    /// the formula printer writes it; a plain name stays bare.
+    #[test]
+    fn a_sheet_named_like_a_reference_is_quoted() {
+        for (name, want) in [
+            ("Sheet1", "Sheet1"),
+            ("Data_2", "Data_2"),
+            ("A1", "'A1'"),
+            ("R1C1", "'R1C1'"),
+            ("XFD1048576", "'XFD1048576'"),
+            ("R", "'R'"),
+            ("C", "'C'"),
+            ("2024", "'2024'"),
+            ("My Sheet", "'My Sheet'"),
+            ("Bob's", "'Bob''s'"),
+            ("a!b", "'a!b'"),
+        ] {
+            assert_eq!(sheet_name_quoted(name), want, "{name}");
+        }
     }
 }

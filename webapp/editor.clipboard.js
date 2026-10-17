@@ -11,6 +11,7 @@ import {
   draw,
   effectiveRange,
   lastClipTsv,
+  messageBox,
   state,
   status,
   stopMarch,
@@ -87,13 +88,59 @@ export function download(data, name, type, options) {
 // exactly as it should. Only the half that failed is named.
 const OS_CLIPBOARD_REFUSED = "the system clipboard was refused — other applications will not see it";
 
+/// Excel's answer to a multiple selection it cannot copy, or to any cut of one.
+const MULTIPLE_SELECTIONS = "This action won't work on multiple selections.";
+
+/// The rows and columns of a multiple selection whose areas make one grid —
+/// every selected row covers the same columns — or `null` when they do not.
+///
+/// That is the multiple selection Excel copies, stitched together: Go To
+/// Special ▸ Visible cells only leaves exactly this shape around hidden rows
+/// and columns, which is how "copy only what is shown" works (XL-UX-176). The
+/// test runs over row bands rather than rows, so a whole-column area costs
+/// nothing.
+export function selectionGrid(areas) {
+  const cuts = [...new Set(areas.flatMap((a) => [a.r0, a.r1 + 1]))].sort((p, q) => p - q);
+  const rows = [];
+  let cols = null;
+  for (let i = 0; i + 1 < cuts.length; i++) {
+    const [b0, b1] = [cuts[i], cuts[i + 1] - 1];
+    const here = areas.filter((a) => a.r0 <= b0 && a.r1 >= b1);
+    if (!here.length) continue;
+    const set = new Set();
+    for (const a of here) for (let c = a.c0; c <= a.c1; c++) set.add(c);
+    const band = [...set].sort((p, q) => p - q);
+    // Overlapping areas are not one grid; neither are bands with different columns.
+    if (here.reduce((n, a) => n + a.c1 - a.c0 + 1, 0) !== band.length) return null;
+    if (cols && (cols.length !== band.length || cols.some((c, k) => c !== band[k]))) return null;
+    cols = band;
+    for (let r = b0; r <= b1; r++) rows.push(r);
+  }
+  return cols ? { rows, cols } : null;
+}
+
+function selectedAreas() {
+  return state.ranges.concat([effectiveRange()]);
+}
+
 export async function doCopy() {
-  status.textContent = (await clipToOS(effectiveRange(), false))
+  const areas = selectedAreas();
+  let grid = null;
+  if (areas.length > 1) {
+    grid = selectionGrid(areas);
+    if (!grid) { messageBox(MULTIPLE_SELECTIONS); return; }
+  }
+  // The marquee goes round the whole grid, not just the active area.
+  const outline = grid
+    ? { r0: grid.rows[0], c0: grid.cols[0], r1: grid.rows[grid.rows.length - 1], c1: grid.cols[grid.cols.length - 1] }
+    : effectiveRange();
+  status.textContent = (await clipToOS(outline, false, grid))
     ? "copied"
     : `copied here — ${OS_CLIPBOARD_REFUSED}`;
 }
 
 export async function doCut() {
+  if (state.ranges.length) { messageBox(MULTIPLE_SELECTIONS); return; }
   status.textContent = (await clipToOS(effectiveRange(), true))
     ? "cut"
     : `cut here — ${OS_CLIPBOARD_REFUSED}`;

@@ -21,7 +21,7 @@
 // `canRunMacros` (embedded and WOPI by default), and the choice is remembered
 // for this document for the life of the tab only.
 
-import { modalFrame, confirmModal } from "./editor.dialogs.js";
+import { modalFrame, messageBox } from "./editor.dialogs.js";
 import { runMacro } from "./editor.macros.js";
 import { customFunctionErrors, customFunctionInfo, customFunctionsSettledForTest, trustCustomFunctions } from "./editor.custom-functions.js";
 import {
@@ -405,16 +405,13 @@ export function openMacrosWindow() {
     const m = selected();
     if (!m) return;
     commitSource();
-    // Closed for the question and reopened after it, the Name Manager's
-    // pattern. Excel asks over the dialog; still to convert (XL-UX-169).
-    frame.close();
+    // Asked over the window, which stays open, as Excel asks (XL-UX-174).
     const what = m.kind === "function" ? "custom function source" : "macro";
-    confirmModal("Macros", `Delete the ${what} "${m.name}"? This can be undone with Undo.`, "Delete").then((yes) => {
-      if (yes) {
-        try { wasm.session_delete_macro(m.guid); mwState.selected = null; }
-        catch (e) { statusError(errText(e)); }
-      }
-      openMacrosWindow();
+    messageBox(`Delete the ${what} "${m.name}"? This can be undone with Undo.`, { buttons: "yesNo" }).then((answer) => {
+      if (answer !== "yes") return;
+      try { wasm.session_delete_macro(m.guid); mwState.selected = null; }
+      catch (e) { statusError(errText(e)); }
+      render();
     });
   });
 

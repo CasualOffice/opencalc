@@ -551,7 +551,7 @@ mod tests {
     }
 
     #[test]
-    fn clip_capture_skips_hidden_rows_and_compresses() {
+    fn clip_capture_compresses_the_rows_it_is_given() {
         use casual_calc_model::{Cell, CellRef, CellValue, Id, Sheet, SheetId, Workbook};
         let wb = Workbook::new(Id::from_parts(1, 1));
         let mut sheet = Sheet::new(SheetId(Id::from_parts(2, 1)), "S");
@@ -561,9 +561,9 @@ mod tests {
                 Cell::value(CellValue::Number((r + 1) as f64)),
             );
         }
-        sheet.hidden_rows.insert(1); // hide the second row
 
-        let clip = super::clip_capture(&wb, &sheet, 0, 0, 3, 0);
+        // The rows a filtered-out row 1 leaves (`copied_axes` decides which).
+        let clip = super::clip_capture(&wb, &sheet, &[0, 2, 3], &[0]);
         // Row 1 is skipped; the three survivors compress to dr 0,1,2 while
         // keeping their true source rows for cut/formula math.
         assert_eq!(clip.len(), 3);
