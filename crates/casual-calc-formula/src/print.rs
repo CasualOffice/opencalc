@@ -218,13 +218,23 @@ impl fmt::Display for At<'_> {
             Expr::Function { name, args }
                 if name == crate::parse::ANCHORARRAY && spill_anchor(args) =>
             {
+                // An anchor read off the sheet from here is `#REF!`, and so is
+                // the spill: `#REF!#` is not a formula anything can read back.
+                if let Expr::Reference(r) = &args[0]
+                    && r.at(origin).is_none()
+                {
+                    return f.write_str("#REF!");
+                }
                 write!(f, "{}#", At(&args[0], origin))
             }
             Expr::Function { name, args } if name == crate::parse::SINGLE && args.len() == 1 => {
                 f.write_str("@")?;
                 // The parser reads a primary after `@`; anything that is not
-                // one keeps its brackets.
-                write_child(f, &args[0], origin, bp(&args[0]).0 < ATOM_BP)
+                // one keeps its brackets — another `@` included, since
+                // `@@x` does not parse and `@(@x)` does (found by fuzzing).
+                let nested = matches!(&args[0], Expr::Function { name, args }
+                    if name == crate::parse::SINGLE && args.len() == 1);
+                write_child(f, &args[0], origin, nested || bp(&args[0]).0 < ATOM_BP)
             }
             Expr::Function { name, args } => {
                 f.write_str(name)?;
@@ -274,6 +284,11 @@ fn write_3d(
     r: &crate::ast::Reference3d,
     origin: Origin,
 ) -> fmt::Result {
+    // A corner read off the sheet from here makes the whole span `#REF!`, as a
+    // plain reference's does; `Jan:Mar!#REF!` is not a formula anything reads.
+    if r.start.at(origin).is_none() || r.end.as_ref().is_some_and(|e| e.at(origin).is_none()) {
+        return f.write_str("#REF!");
+    }
     let quote = crate::reference::sheet_name_needs_quoting(&r.first)
         || crate::reference::sheet_name_needs_quoting(&r.last);
     if quote {

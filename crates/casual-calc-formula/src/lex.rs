@@ -320,19 +320,25 @@ fn lex_quoted_sheet(chars: &[char], start: usize) -> Result<(String, usize), For
     Err(FormulaError::UnterminatedSheet)
 }
 
+/// The error literal starting at `start`: the longest known one the text
+/// begins with.
+///
+/// Matched against the list rather than by scanning a run of the characters
+/// errors are made of, because `/` is one of those characters and is also
+/// division: the scan read `#N/A/2` as the single unknown token `#N/A/`, so
+/// a formula dividing an error refused to parse — and the printer writes
+/// exactly that text for `(#N/A)/2` (found by fuzzing the round trip).
 fn lex_error(chars: &[char], start: usize) -> Result<(String, usize), FormulaError> {
-    let mut i = start + 1;
-    while i < chars.len()
-        && (chars[i].is_ascii_alphanumeric() || matches!(chars[i], '/' | '?' | '!' | '_'))
-    {
-        i += 1;
-    }
-    let token: String = chars[start..i].iter().collect();
-    if KNOWN_ERRORS.contains(&token.as_str()) {
-        Ok((token, i))
-    } else {
-        Err(FormulaError::UnexpectedChar('#'))
-    }
+    KNOWN_ERRORS
+        .iter()
+        .filter(|known| {
+            let len = known.chars().count();
+            chars.len() >= start + len
+                && known.chars().eq(chars[start..start + len].iter().copied())
+        })
+        .max_by_key(|known| known.len())
+        .map(|known| ((*known).to_owned(), start + known.chars().count()))
+        .ok_or(FormulaError::UnexpectedChar('#'))
 }
 
 fn lex_number(chars: &[char], start: usize) -> Result<(f64, usize), FormulaError> {
@@ -354,7 +360,12 @@ fn lex_number(chars: &[char], start: usize) -> Result<(f64, usize), FormulaError
         }
     }
     let text: String = chars[start..i].iter().collect();
-    text.parse::<f64>()
-        .map(|n| (n, i))
-        .map_err(|_| FormulaError::UnexpectedToken(text))
+    // A literal past the largest double (`1e400`) is not a number: it would
+    // become infinity and print as `inf` — a name — so the formula would not
+    // read back, and inside an array constant would not read at all. Refused
+    // here, as Excel refuses it (found by fuzzing the round trip).
+    match text.parse::<f64>() {
+        Ok(n) if n.is_finite() => Ok((n, i)),
+        _ => Err(FormulaError::UnexpectedToken(text)),
+    }
 }

@@ -838,3 +838,51 @@ fn three_d_endpoints_follow_renames_and_deletions() {
     assert!(shrink_3d_span(&mut lone, "Feb", &order));
     assert_eq!(lone, Expr::Error("#REF!".into()));
 }
+
+/// Found by fuzzing the print-and-reparse round trip, after the 3-D grammar
+/// gave `Word Colon Word Bang` a meaning: text that used to parse into a
+/// range spanning two sheets, or that printed something unreadable.
+#[test]
+fn the_round_trip_holds_where_fuzzing_found_it_did_not() {
+    use crate::print::print_at;
+    use crate::stored::Origin;
+    // A range whose far end names another sheet is not a reference.
+    for text in ["P:'o'!A", "A1:'Sheet 2'!B2", "A1:Sheet2!B2"] {
+        assert!(parse(text).is_err(), "{text} parsed: {:?}", parse(text));
+    }
+    // The same sheet on both ends still is.
+    assert!(parse("'My Sheet'!A1:'My Sheet'!B2").is_ok());
+    // A spill anchor or 3-D corner read off the sheet prints as `#REF!`, not
+    // as `#REF!#` or `Jan:Mar!#REF!`, which nothing reads back.
+    let held_in_b1 = |text: &str| {
+        crate::restore_at(
+            &parse(text).unwrap(),
+            crate::stored::ABSOLUTE,
+            Origin::at(0, 1),
+        )
+    };
+    // An error literal followed by `/` is the error, then division.
+    assert_eq!(parse("(#N/A)/2").unwrap().to_string(), "#N/A/2");
+    assert_eq!(parse("#N/A/2").unwrap(), parse("(#N/A)/2").unwrap());
+    assert_eq!(parse("#DIV/0!/#N/A").unwrap().to_string(), "#DIV/0!/#N/A");
+    // `@` of `@` keeps the brackets the parser needs.
+    assert_eq!(parse("@(@U)").unwrap().to_string(), "@(@U)");
+    for text in ["A1#", "SUM(Jan:Mar!A1)"] {
+        let printed = print_at(&held_in_b1(text), Origin::at(0, 0));
+        assert!(
+            parse(&printed).is_ok(),
+            "{text} read from A1 printed {printed:?}"
+        );
+        assert!(printed.contains("#REF!"), "{printed}");
+    }
+}
+
+/// A number literal too large for a double is refused rather than read as
+/// infinity, which prints as `inf` and then reads back as a name.
+#[test]
+fn a_number_past_the_largest_double_is_refused() {
+    for text in ["1e400", "{1,1e400}", "-1E999"] {
+        assert!(parse(text).is_err(), "{text} parsed: {:?}", parse(text));
+    }
+    assert!(parse("1e308").is_ok());
+}

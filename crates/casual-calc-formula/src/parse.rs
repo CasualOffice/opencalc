@@ -290,9 +290,13 @@ impl Parser {
     fn parse_word(&mut self, word: String) -> Result<Expr, FormulaError> {
         // `Sheet1:Sheet3!A1`: two sheet names and a bang. Looked for first,
         // because `Sheet1` on its own would otherwise be tried as a reference.
+        // Only a name that may be written bare: Excel quotes a sheet named like
+        // a cell (`A1`, `R1C1`), so `A1:Sheet2!B2` is not a span from a
+        // sheet called A1.
         if self.peek() == Some(&Token::Colon)
             && matches!(self.tokens.get(self.pos + 1), Some(Token::Word(_)))
             && self.tokens.get(self.pos + 2) == Some(&Token::Bang)
+            && !crate::reference::sheet_name_needs_quoting(&word)
         {
             self.advance();
             let Some(Token::Word(last)) = self.advance() else {
@@ -395,6 +399,20 @@ impl Parser {
         if self.peek() == Some(&Token::Colon) {
             self.advance();
             let second = self.parse_ref_operand()?;
+            // A far end that names a sheet must name the near end's:
+            // `Sheet2!A1:Sheet2!B2` is one sheet's range, but `A1:Sheet2!B2`
+            // spans two sheets and is not a reference Excel accepts. It used
+            // to parse — as a range on the near end's sheet, printed back as
+            // `A1:Sheet2!B2` — and since 3-D references that text reads as
+            // something else entirely (found by fuzzing the round trip).
+            if let Some(far) = &second.sheet
+                && !first
+                    .sheet
+                    .as_deref()
+                    .is_some_and(|near| near.eq_ignore_ascii_case(far))
+            {
+                return Err(FormulaError::InvalidReference(format!("{first}:{second}")));
+            }
             // Both ends must be the same shape: two cells, two columns or two
             // rows. Excel refuses `A1:3` and `A:B2`, and a mixed range has no
             // sensible meaning to evaluate (XL-FEAT-016).
