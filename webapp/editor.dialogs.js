@@ -2641,9 +2641,18 @@ export function messageBox(message, {
       window.removeEventListener("keydown", onKey, true);
       document.removeEventListener("focusin", holdFocus, true);
       actions.removeEventListener("click", onClick);
-      if (back && back.isConnected) {
+      if (field && field.isConnected) {
+        field.focus();
+        if (typeof field.select === "function") field.select();
+      } else if (!back || !back.isConnected || back === canvas || back.id === "inline-edit") {
+        // Raised over the grid: give the grid its keyboard back through its
+        // own path. Since the input-method host (XL-FEAT-023), the grid's
+        // focus is the hidden in-cell editor, which may be hidden or moved by
+        // the time the box closes — refocusing that element left focus on the
+        // page body (XL-UX-187).
+        canvas.focus();
+      } else {
         back.focus();
-        if (field && typeof field.select === "function") field.select();
       }
       resolve(answer);
     }
