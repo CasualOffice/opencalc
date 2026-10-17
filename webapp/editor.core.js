@@ -2001,6 +2001,10 @@ export const geo = {
 export const MIN_LINE = 8; // conservative floor used to bound how many lines to fetch
 export const RESIZE_GRAB = 5; // px proximity to a header boundary that arms a resize
 export let geoItems = []; // cells for the visible window, fetched in measure(), reused by draw()
+// Bordered cells just left of / above the window, whose borders reach into it.
+let edgeItems = [];
+// Centre-across runs touching the window, keyed "row,labelCol" → {r, c0, c1}.
+let contRuns = new Map();
 export let sheetMerges = []; // merged ranges of the active sheet, refreshed each draw
 let dragTab = -1; // index of the sheet tab being dragged (reorder)
 
@@ -2275,9 +2279,44 @@ function measure() {
   const lastColIdx = geo.colIdx[geo.colIdx.length - 1] ?? fsc;
   const firstRowIdx = fr > 0 ? 0 : fsr;
   const firstColIdx = fc > 0 ? 0 : fsc;
-  geoItems = JSON.parse(
-    wasm.session_cells(state.sheet, firstRowIdx, firstColIdx, lastRowIdx, lastColIdx),
-  );
+  // **One line more on the leading edges, for borders** (`XL-UX-183`). A
+  // border wider than a pixel is centred on its edge, so half of the right
+  // border of the column just left of the window — and of the bottom border of
+  // the row just above it — lies inside the first drawn column/row. Without
+  // those cells the half went missing exactly when the view stopped on a
+  // boundary. Same call, a slightly larger rectangle; the extra cells are held
+  // apart in `edgeItems` so nothing else mistakes them for window cells.
+  const edgeCol = fc > 0 ? -1 : fsc - 1;
+  const edgeRow = fr > 0 ? -1 : fsr - 1;
+  edgeItems = [];
+  geoItems = [];
+  for (const it of JSON.parse(
+    wasm.session_cells(state.sheet, Math.max(0, edgeRow < 0 ? firstRowIdx : edgeRow), Math.max(0, edgeCol < 0 ? firstColIdx : edgeCol), lastRowIdx, lastColIdx),
+  )) {
+    if (it.c === edgeCol || it.r === edgeRow) { if (it.bd) edgeItems.push(it); }
+    else geoItems.push(it);
+  }
+  // **Centre-across runs, whole** (`XL-UX-183`). A label is centred over its
+  // run of `centerContinuous` cells, which is usually wider than the part on
+  // screen; the run is the engine's answer, keyed by its label cell. Asked only
+  // when the window holds a centre-across cell at all (the engine sends even
+  // bare ones), so an ordinary sheet pays nothing. Asked before the spill
+  // gather below, which then keeps a label that has scrolled out to the left —
+  // it is in the cells that fetch reads anyway.
+  contRuns = new Map();
+  if (geoItems.some((it) => it.a === "cont")) {
+    // Per drawn band: with frozen rows the window's rows are not contiguous,
+    // and asking across the gap would scan every row scrolled past.
+    const bands = fr > 0 ? [[0, fr - 1], [fsr, lastRowIdx]] : [[fsr, lastRowIdx]];
+    try {
+      for (const [b0, b1] of bands) {
+        if (b1 < b0) continue;
+        for (const run of JSON.parse(
+          wasm.session_center_across_runs(state.sheet, b0, b1, firstColIdx, lastColIdx),
+        )) contRuns.set(run.r + "," + run.c0, run);
+      }
+    } catch { /* an engine without the export draws runs as before */ }
+  }
   // Text spills across empty neighbours, so a label whose own cell is outside
   // the window can still be showing inside it — and only the *nearest*
   // populated cell on each side can, since anything beyond is blocked by it.
@@ -2306,9 +2345,9 @@ function measure() {
     // holds; only then is it asked whether it can spill.
     const gather = (a, b, fromLeft) => {
       const nearest = new Map();
-      for (const it of JSON.parse(
-        wasm.session_cells(state.sheet, firstRowIdx, a, lastRowIdx, b),
-      )) {
+      const pushed = new Set();
+      const fetched = JSON.parse(wasm.session_cells(state.sheet, firstRowIdx, a, lastRowIdx, b));
+      for (const it of fetched) {
         const held = nearest.get(it.r);
         if (held === undefined || (fromLeft ? it.c > held.c : it.c < held.c)) {
           nearest.set(it.r, it);
@@ -2317,12 +2356,34 @@ function measure() {
       for (const it of nearest.values()) {
         // Only text can spill: a number too wide for its cell becomes `#`
         // inside it, and a wrapped or clipped cell stays put by definition.
-        if (it.t && !it.n && !it.w && !it.cl && !it.shrink) geoItems.push(it);
+        if (it.t && !it.n && !it.w && !it.cl && !it.shrink) { geoItems.push(it); pushed.add(it); }
+      }
+      // A centre-across label off the left edge is in this same fetch — it
+      // holds a value, so the span reaches it — and is kept whatever is nearer.
+      if (fromLeft && contRuns.size) {
+        for (const it of fetched) {
+          if (contRuns.has(it.r + "," + it.c) && !pushed.has(it)) geoItems.push(it);
+        }
       }
     };
     if (span.left !== null && firstColIdx > 0) gather(span.left, firstColIdx - 1, true);
     if (span.right !== null) gather(lastColIdx + 1, span.right, false);
   } catch { /* nothing outside the window is the common case */ }
+  // A label the left gather already picked up needs nothing more; one it did
+  // not (the gather keeps it, but cannot when no spill span was found) is
+  // fetched by itself. Every `session_cells` call pays for the sheet's
+  // conditional-format statistics, so this is the rare path, not the usual one.
+  if (contRuns.size) {
+    const have = new Set(geoItems.map((it) => it.r + "," + it.c));
+    for (const [key, run] of contRuns) {
+      if (have.has(key)) continue;
+      try {
+        const label = JSON.parse(wasm.session_cells(state.sheet, run.r, run.c0, run.r, run.c0))
+          .find((t) => t.r === run.r && t.c === run.c0);
+        if (label) { geoItems.push(label); have.add(key); }
+      } catch { /* drawn without its label, as before */ }
+    }
+  }
   // Rows the workbook sized itself are pinned: auto-height must not override an
   // imported height (nor one the user dragged), exactly as Excel stops
   // auto-fitting a row once its height is set. Without this every styled row of
@@ -2912,9 +2973,12 @@ export function draw() {
       if (list.some((m) => c >= m.c0 && c <= m.c1)) occupied.add(r + "," + c);
     }
   }
-  // Cells carrying centre-across, so a label can find the extent of its run.
-  const contCols = new Set();
-  for (const it of items) if (it.a === "cont") contCols.add(it.r + "," + it.c);
+  // What stops a spill: text, or any merged block — asked of the merge list
+  // itself, not only of `occupied`, whose merge entries cover the *window's*
+  // columns. A label whose path crosses an empty merge that has scrolled out
+  // used to run straight through it into the window (`XL-UX-183`), while the
+  // same merge on screen stopped it.
+  const blocks = (r, c) => occupied.has(r + "," + c) || drawnMergeAt(r, c) !== undefined;
   for (const it of items) {
     if (!it.t) continue;
     // Merged text belongs to the merge pass below, which lays it out across the
@@ -3056,11 +3120,15 @@ export function draw() {
       // OOXML encodes the group, one `centerContinuous` per cell. Centring over
       // every empty neighbour instead would fling a lone label into the middle
       // of the viewport.
-      let last = it.c;
-      const inFroz = F.fc > 0 && it.c < F.fc;
-      const hi = inFroz ? F.fc : lastCol;
-      while (last + 1 < hi && geo.colOf.has(last + 1) && contCols.has(it.r + "," + (last + 1))) last += 1;
-      const spanR = colXAt(last) + colWAt(last);
+      //
+      // The run's extent comes from the engine (`contRuns`), not from walking
+      // the window's columns: a run wider than the view was centred over the
+      // part on screen, so the label slid as the sheet scrolled (`XL-UX-183`).
+      // A frozen label still stops at the freeze line — the body's columns
+      // scroll out from under it.
+      let last = contRuns.get(it.r + "," + it.c)?.c1 ?? it.c;
+      if (F.fc > 0 && it.c < F.fc) last = Math.min(last, F.fc - 1);
+      const spanR = fscreenXEnd(last);
       ctx.save();
       if (frozen) { const q = quadClip(it.r, it.c, v); ctx.beginPath(); ctx.rect(q.x, q.y, q.w, q.h); ctx.clip(); }
       ctx.beginPath();
@@ -3148,7 +3216,7 @@ export function draw() {
         // first undrawn column would stop at the very first step. `fscreen*`
         // has a position for any column, drawn or not. The pane bounds still
         // apply, so a frozen cell cannot borrow the body's columns.
-        while (clipR - x < tw + 8 && c + 1 < spillHi && !occupied.has(it.r + "," + (c + 1))) {
+        while (clipR - x < tw + 8 && c + 1 < spillHi && !blocks(it.r, c + 1)) {
           c += 1;
           clipR = fscreenXEnd(c);
         }
@@ -3158,7 +3226,7 @@ export function draw() {
         // Same reasoning as the rightward scan: a right-aligned label whose
         // cell is off the *right* edge spills back into the window, and the
         // columns it crosses on the way are not drawn either.
-        while (x + w - clipL < tw + 8 && c - 1 >= spillLo && !occupied.has(it.r + "," + (c - 1))) {
+        while (x + w - clipL < tw + 8 && c - 1 >= spillLo && !blocks(it.r, c - 1)) {
           c -= 1;
           clipL = fscreenX(c);
         }
@@ -3234,13 +3302,43 @@ export function draw() {
   if (tablesInView.length) drawTableOutlines(withQuad, tablesInView, geo);
 
   // Cell borders (from the engine), drawn over fills/text.
+  //
+  // Including the cells just outside the leading edges: a wide border is
+  // centred on its edge, so the left neighbour's right border and the upper
+  // neighbour's bottom border are partly inside the window (`XL-UX-183`). With
+  // frozen panes the main fetch already starts at 0 and holds those cells;
+  // without, `edgeItems` does.
+  const edgeC = firstBodyCol() - 1 >= F.fc ? firstBodyCol() - 1 : -1;
+  const edgeR = firstBodyRow() - 1 >= F.fr ? firstBodyRow() - 1 : -1;
+  const borderX = (c) => colXAt(c) ?? (c === edgeC ? fscreenX(c) : undefined);
+  const borderY = (r) => rowYAt(r) ?? (r === edgeR ? fscreenY(r) : undefined);
+  // In sheet order, whichever list a cell came from: where two borders meet,
+  // the later one is drawn over the earlier, so the order is part of the
+  // picture and must not depend on which cells are the window's. Both lists
+  // come out of one row-major fetch, so this is a merge, not a sort — `items`
+  // can be every cell above a frozen row. An edge cell is taken from `items`
+  // only on a frozen axis (where the fetch starts at 0); otherwise it is
+  // `edgeItems`' — a spill owner gathered into `items` at the same address
+  // would be drawn twice.
+  const bordered = [];
+  let e = 0;
   for (const it of items) {
     if (!it.bd) continue;
-    const x = colXAt(it.c);
-    const yTop = rowYAt(it.r);
+    const inX = geo.colOf.has(it.c) || (F.fc > 0 && it.c === edgeC);
+    const inY = geo.rowOf.has(it.r) || (F.fr > 0 && it.r === edgeR);
+    if (!inX || !inY) continue;
+    while (e < edgeItems.length && (edgeItems[e].r < it.r || (edgeItems[e].r === it.r && edgeItems[e].c < it.c))) {
+      bordered.push(edgeItems[e++]);
+    }
+    bordered.push(it);
+  }
+  while (e < edgeItems.length) bordered.push(edgeItems[e++]);
+  for (const it of bordered) {
+    const x = borderX(it.c);
+    const yTop = borderY(it.r);
     if (x === undefined || yTop === undefined) continue;
-    const w = colWAt(it.c);
-    const h = rowHAt(it.r);
+    const w = colXAt(it.c) !== undefined ? colWAt(it.c) : fscreenXEnd(it.c) - x;
+    const h = rowYAt(it.r) !== undefined ? rowHAt(it.r) : fscreenYEnd(it.r) - yTop;
     withQuad(it.r, it.c, () => {
       drawEdge(it.bd.l, x, yTop, x, yTop + h);
       drawEdge(it.bd.r, x + w, yTop, x + w, yTop + h);

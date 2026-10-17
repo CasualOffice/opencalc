@@ -76,6 +76,16 @@ pub fn session_set_custom_functions(json: &str) -> Result<(), JsError> {
     with_session_mut(|s| s.set_custom_functions(specs).map_err(js))
 }
 
+/// Forget every custom-function answer and ask again (`MACRO-19`): Excel's
+/// Enable Content recomputes what the unblocked content feeds.
+#[wasm_bindgen]
+pub fn session_refresh_custom_functions() {
+    let _ = with_session_mut(|s| {
+        s.refresh_custom_functions();
+        Ok(())
+    });
+}
+
 /// The registered functions, for Insert Function, the argument hint and
 /// autocomplete: `[{name, description, params:[{name,type,optional,description}],
 /// returns, volatile, minArgs, maxArgs}]`, by name.

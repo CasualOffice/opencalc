@@ -1018,7 +1018,7 @@ fn a_plain_note_does_not_pull_in_the_threaded_parts() {
     let written = write_workbook(&wb).unwrap();
     let mut zip = zip::ZipArchive::new(Cursor::new(&written)).unwrap();
     let names: Vec<String> = (0..zip.len())
-        .map(|i| zip.by_index(i).unwrap().name().to_owned())
+        .map(|i| zip.by_index(i).unwrap().name().unwrap().into_owned())
         .collect();
     assert!(
         !names.iter().any(|n| n.contains("threadedComment")),
@@ -3463,7 +3463,7 @@ fn entry_names(package: &[u8]) -> Vec<String> {
     zip::ZipArchive::new(Cursor::new(package))
         .unwrap()
         .file_names()
-        .map(str::to_owned)
+        .map(|n| n.unwrap().into_owned())
         .collect()
 }
 
@@ -4813,7 +4813,7 @@ fn replace_parts(package: &[u8], replacements: &[(&str, &[u8])]) -> Vec<u8> {
     let opts = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
     for i in 0..zip.len() {
         let mut file = zip.by_index(i).unwrap();
-        let name = file.name().to_owned();
+        let name = file.name().unwrap().into_owned();
         let mut data = Vec::new();
         file.read_to_end(&mut data).unwrap();
         if let Some((_, replacement)) = replacements.iter().find(|(path, _)| *path == name) {
@@ -5688,4 +5688,139 @@ fn an_unreadable_macros_part_is_retained_verbatim() {
     assert_eq!(ct.matches("/xl/jsaProject.bin").count(), 1, "{ct}");
     let back = import_package(written).unwrap().workbook;
     assert_eq!(back.macros, edited.macros);
+}
+
+// ---------------------------------------------------------------------------
+// The formula grammar rows (XL-FEAT-014..017): what Excel writes into `<f>`
+// must import as a real expression — not `Expr::Raw` — and must be written
+// back in the spelling Excel reads.
+// ---------------------------------------------------------------------------
+
+/// A three-sheet package whose `Sheet1!A1` holds `<f>{formula}</f>`. The other
+/// sheets are there for sheet-qualified and 3-D references.
+fn formula_package(formula: &str) -> Vec<u8> {
+    let escaped = formula
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;");
+    let sheet1 = format!(
+        r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1"><f>{escaped}</f><v>0</v></c></row></sheetData></worksheet>"#
+    );
+    let empty = br#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData/></worksheet>"#;
+    let workbook = br#"<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Sheet1" sheetId="1" r:id="rId1"/><sheet name="Sheet2" sheetId="2" r:id="rId2"/><sheet name="Sheet 3" sheetId="3" r:id="rId3"/></sheets></workbook>"#;
+    let rels = br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet2.xml"/><Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet3.xml"/></Relationships>"#;
+    zip_parts(&[
+        ("[Content_Types].xml", CONTENT_TYPES),
+        ("_rels/.rels", ROOT_RELS),
+        ("xl/workbook.xml", workbook),
+        ("xl/_rels/workbook.xml.rels", rels),
+        ("xl/worksheets/sheet1.xml", sheet1.as_bytes()),
+        ("xl/worksheets/sheet2.xml", empty),
+        ("xl/worksheets/sheet3.xml", empty),
+    ])
+}
+
+/// The `<f>` text of `Sheet1!A1` in a written package, unescaped.
+fn written_formula(package: &[u8]) -> String {
+    let xml = xml_of(package, "xl/worksheets/sheet1.xml");
+    let start = xml.find("<f>").expect("an <f> was written") + 3;
+    let end = start + xml[start..].find("</f>").unwrap();
+    xml[start..end]
+        .replace("&quot;", "\"")
+        .replace("&apos;", "'")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&amp;", "&")
+        // This writer spells the prefix in capitals (`future.rs`, as it always
+        // has); the comparison is about the formula, not that spelling.
+        .replace("_XLFN.", "_xlfn.")
+}
+
+/// Import Excel's `<f>` text, check it became an expression that prints as the
+/// formula bar shows it, write it, and check the file text is Excel's again.
+fn assert_formula_round_trips(file_text: &str, shown: &str) {
+    let workbook = import_package(formula_package(file_text)).unwrap().workbook;
+    let cell = workbook.sheets[0]
+        .cells
+        .get(casual_calc_model::CellRef::new(0, 0))
+        .unwrap();
+    let expr = workbook.formula(cell.formula.unwrap()).unwrap();
+    assert!(
+        !matches!(expr, casual_calc_formula::Expr::Raw(_)),
+        "{file_text}: kept only as raw text"
+    );
+    assert_eq!(
+        casual_calc_formula::print_at(expr, casual_calc_formula::stored::Origin::at(0, 0)),
+        shown,
+        "{file_text}: what the formula bar shows"
+    );
+    let written = write_workbook(&workbook).unwrap();
+    assert_eq!(written_formula(&written), file_text, "written back");
+    let again = import_package(written).unwrap().workbook;
+    let cell = again.sheets[0]
+        .cells
+        .get(casual_calc_model::CellRef::new(0, 0))
+        .unwrap();
+    assert_eq!(
+        again.formula(cell.formula.unwrap()),
+        Some(expr),
+        "fixed point"
+    );
+}
+
+#[test]
+fn whole_row_references_round_trip_through_xlsx() {
+    for text in [
+        "SUM(1:1)",
+        "SUM($2:$4)",
+        "SUM(Sheet2!3:3)",
+        "SUM('Sheet 3'!$1:5)",
+    ] {
+        assert_formula_round_trips(text, text);
+    }
+}
+
+/// Excel writes an array constant into `<f>` exactly as it is typed (en-US
+/// separators), and reads it back the same way (XL-FEAT-014).
+#[test]
+fn array_constants_round_trip_through_xlsx() {
+    for text in [
+        "SUM({1,2;3,4})",
+        "SUM(COUNTIF(Sheet2!A1:A5,{\"a\",\"b\"}))",
+        "{1;-2;0.5}",
+        "INDEX({TRUE,#N/A,\"x\"},1,2)",
+    ] {
+        assert_formula_round_trips(text, text);
+    }
+}
+
+/// A 3-D reference is written as Excel writes it: one quoted pair when either
+/// sheet name needs quoting (XL-FEAT-017).
+#[test]
+fn three_d_references_round_trip_through_xlsx() {
+    for text in [
+        "SUM(Sheet1:Sheet2!B2)",
+        "SUM('Sheet2:Sheet 3'!B2:C3)",
+        "AVERAGE(Sheet1:Sheet2!$A$1:$A$9,Sheet2!A1)",
+    ] {
+        assert_formula_round_trips(text, text);
+    }
+}
+
+/// Excel stores `A1#` as `_xlfn.ANCHORARRAY(A1)` and `@x` as `_xlfn.SINGLE(x)`
+/// (XL-FEAT-015). Both read as the operators and are written back as the calls.
+#[test]
+fn spill_and_intersection_operators_round_trip_through_xlsx() {
+    for (file, shown) in [
+        ("SUM(_xlfn.ANCHORARRAY(B1))", "SUM(B1#)"),
+        ("_xlfn.ANCHORARRAY(Sheet2!$C$3)", "Sheet2!$C$3#"),
+        ("_xlfn.SINGLE(B1:B5)*2", "@B1:B5*2"),
+        ("_xlfn.SINGLE(_xlfn.ANCHORARRAY(B1))", "@B1#"),
+        (
+            "IF(ISNA(#N/A),\"#REF!\",#SPILL!)",
+            "IF(ISNA(#N/A),\"#REF!\",#SPILL!)",
+        ),
+    ] {
+        assert_formula_round_trips(file, shown);
+    }
 }

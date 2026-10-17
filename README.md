@@ -4,10 +4,11 @@
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![Status: Alpha](https://img.shields.io/badge/status-alpha-yellow.svg)](#status)
 
-**An embeddable spreadsheet engine in Rust.** Reads and writes `.xlsx`, calculates
-it, renders a live grid, and runs the whole engine client-side in WebAssembly —
-so co-editing scales without sticky sessions and the editor keeps working when
-the network hiccups.
+**An Excel-compatible spreadsheet you can run anywhere.** A deterministic Rust
+engine that reads, calculates and writes `.xlsx`, `.xlsm` and `.ods`, with an
+editor that looks and works like Excel — ribbon, dialogs, shortcuts, the formula
+bar — running entirely client-side in WebAssembly. Embed it in a web page, run it
+as a desktop app, put it behind your file store, or let an AI agent drive it.
 
 [**Live demo**](https://calc.casualoffice.org/editor.html) ·
 [Site](https://calc.casualoffice.org) · [Docs](docs/00-README.md) ·
@@ -89,31 +90,54 @@ ours. [docs/74](docs/74-WOPI-INTEGRATION.md).
 
 ## What it does
 
-**Formats** — `.xlsx` round-trips as a semantic fixed point (gated). CSV/TSV/PSV
-with RFC 4180 quoting. Reads what other writers actually emit: OOXML booleans in
-either spelling, theme + tint and legacy indexed colours, shared formulas, and
-multi-area `sqref`.
+**Excel's editor** — Excel's ribbon, File page, dialogs and keyboard (Go To,
+Find & Replace, Format Cells, Insert Function with argument help, Name Manager,
+Insert Hyperlink, Paste Special, Goal Seek…), with Excel's message boxes and
+wording. Merged cells, wrapping, rotated text, frozen panes, row and column
+autofit, and an expandable formula bar you can resize. Open and save run off the
+page's thread, so a large file never freezes the grid.
 
-**Calc** — 347 of the spec's 356 functions. Dynamic arrays that spill and refuse
-(`#SPILL!`) rather than overwrite. `LET` and `LAMBDA` with first-class function
-values, plus `MAP`/`REDUCE`/`SCAN`/`BYROW`/`BYCOL`. Automatic or manual mode taken
-from the file's own `<calcPr>`.
+**Formats** — `.xlsx` round-trips as a semantic fixed point (gated), and an
+opened file saved without edits comes back byte for byte. `.xlsm` keeps its VBA
+project byte for byte. `.ods` reads and writes. CSV/TSV/PSV with RFC 4180
+quoting. PDF export embeds subsets of only the glyphs it draws.
+
+**Calc** — 494 built-in functions, each with an implementation behind it.
+Dynamic arrays that spill and refuse (`#SPILL!`) rather than overwrite. `LET`
+and `LAMBDA` with first-class function values, plus `MAP`/`REDUCE`/`SCAN`/
+`BYROW`/`BYCOL`. Automatic or manual mode taken from the file's own
+`<calcPr>`.
 
 **Features** — pivot tables with eleven aggregates and `GETPIVOTDATA`; charts
 written as real chart parts, not pictures; conditional formatting; data
-validation; tables and autofilter; comments; number formats including sections
-and `[Red]`.
+validation; tables and autofilter; notes and comments; hyperlinks to places,
+defined names and the web; number formats including sections and `[Red]`.
 
-**Editor** — a WASM canvas grid: shared inline/formula-bar editing, autocomplete
-and argument hints, reference picking, F4 anchor cycling, a range finder,
-find & replace, multi-sheet tabs, undo/redo.
+**Macros** — JavaScript macros against an ONLYOFFICE-compatible `Api`, stored in
+the workbook, run in a sandboxed worker as one undo step. Custom worksheet
+functions through `Api.AddCustomFunction`, with Excel's `#BUSY!` while they
+compute. A macro reaches the network only after the user allows the site in
+Excel's Security Notice. VBA is shown read-only (Developer ▸ Visual Basic,
+Alt+F11) and never run.
+
+**Every script** — Japanese, Chinese and Korean render, measure and export with
+fonts that ship with it and load only when a sheet needs them, with Excel's East
+Asian font names mapped. Input methods compose straight into a cell.
 
 **Collaboration** — server-mediated OT with presence, resume and pipelining. Any
 node relays to the document's leader, so no sticky sessions and a plain load
 balancer works.
 
+**Agents** — an MCP server (`server/casual-calc-mcp`) lets Claude or any MCP
+client read and edit workbooks through the same operations the editor uses.
+[docs/97](docs/97-AGENT-ACCESS.md).
+
+**Desktop** — a native app for macOS, Windows and Linux (`desktop/`, Tauri)
+around the same editor.
+
 For what is supported and *how each claim was verified*, see the
-[execution tracker](docs/14-EXECUTION-TRACKER.md).
+[execution tracker](docs/14-EXECUTION-TRACKER.md); for where OpenCalc still
+differs from Excel, and why, see [docs/96](docs/96-EXCEL-FIT-GAP.md).
 
 ## Why it is built this way
 
@@ -133,9 +157,10 @@ golden files.
 ## Workspace
 
 ```
-crates/     15 crates: model, formula, eval, layout, import, export, render, sdk, wasm
-server/     collaboration server, and a worked-example host
+crates/     16 crates: model, formula, eval, layout, text, import, export, ods, render, sdk, wasm
+server/     collaboration, WOPI and MCP servers, and a worked-example host
 webapp/     the browser editor
+desktop/    the desktop app (Tauri)
 sdk/        npm packages
 docs/       design records and the execution tracker
 ```
@@ -144,11 +169,12 @@ Contributor guide: [AGENTS.md](AGENTS.md).
 
 ## Status
 
-**Alpha.** The engine, editor and embeddable SDK are live and the co-editing
-stack runs, but interfaces still move and the SDK is published at `0.0.0`.
+**Alpha.** The engine, editor, desktop app, embeddable SDK and co-editing stack
+all run, but interfaces still move and the SDK is published at `0.0.0`.
 
-Known gaps are tracked in [docs/14](docs/14-EXECUTION-TRACKER.md) — notably no
-PDF export and no ODS yet.
+Known gaps are tracked in [docs/14](docs/14-EXECUTION-TRACKER.md), and every
+remaining difference from Excel is listed with its reason in
+[docs/96](docs/96-EXCEL-FIT-GAP.md).
 
 ## License
 

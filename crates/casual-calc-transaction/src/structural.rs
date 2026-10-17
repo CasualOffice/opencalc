@@ -1890,7 +1890,12 @@ fn rewrite_expr(expr: &Expr, ctx: &RewriteCtx) -> Expr {
         Expr::StructuredRef { .. } => expr.clone(),
         // Unparsed text cannot be rewritten without understanding it, and
         // guessing at its references would corrupt what was preserved.
-        Expr::Raw(_) | Expr::Empty => expr.clone(),
+        // An array constant holds constants only: nothing in it to shift.
+        Expr::Raw(_) | Expr::Empty | Expr::Array(_) => expr.clone(),
+        // A 3-D reference names the same cells on several sheets, so a row or
+        // column edit on one of them does not move it: shifting it for that
+        // sheet would move it for all the others too.
+        Expr::Reference3d(_) => expr.clone(),
         Expr::Reference(reference) => rewrite_reference(reference, ctx),
         Expr::Range(a, b) => rewrite_range(a, b, ctx),
         Expr::Unary { op, operand } => Expr::Unary {
@@ -1902,10 +1907,21 @@ fn rewrite_expr(expr: &Expr, ctx: &RewriteCtx) -> Expr {
             left: Box::new(rewrite_expr(left, ctx)),
             right: Box::new(rewrite_expr(right, ctx)),
         },
-        Expr::Function { name, args } => Expr::Function {
-            name: name.clone(),
-            args: args.iter().map(|arg| rewrite_expr(arg, ctx)).collect(),
-        },
+        Expr::Function { name, args } => {
+            let rewritten: Vec<Expr> = args.iter().map(|arg| rewrite_expr(arg, ctx)).collect();
+            // `B1#` whose anchor was deleted is `#REF!` outright, as Excel
+            // shows it — not `ANCHORARRAY(#REF!)`, a call nobody wrote.
+            if name == casual_calc_formula::parse::ANCHORARRAY
+                && matches!(args[..], [Expr::Reference(_)])
+                && matches!(rewritten[..], [Expr::Error(_)])
+            {
+                return ref_error();
+            }
+            Expr::Function {
+                name: name.clone(),
+                args: rewritten,
+            }
+        }
         // Both halves hold references that move with an insert or delete: the
         // callee may be a LAMBDA body full of them.
         Expr::Call { callee, args } => Expr::Call {
@@ -2174,7 +2190,7 @@ fn move_expr(
         // Same reasoning as the insert/delete rewrite: a structured reference
         // names columns rather than addresses, and unparsed text cannot be
         // rewritten without understanding it.
-        Expr::StructuredRef { .. } | Expr::Raw(_) | Expr::Empty => expr.clone(),
+        Expr::StructuredRef { .. } | Expr::Raw(_) | Expr::Empty | Expr::Array(_) => expr.clone(),
         Expr::Reference(reference) => {
             match moved_reference(reference, moved_sheet, home, block, delta) {
                 Some(moved) => Expr::Reference(moved),

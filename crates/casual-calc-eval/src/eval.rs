@@ -358,6 +358,10 @@ impl<'a> Evaluator<'a> {
             Expr::Error(token) => Value::Error(error_from_token(token)),
             Expr::Reference(reference) => self.eval_reference(sheet_index, reference),
             Expr::Range(..) => Value::Error(ErrorValue::Value),
+            // A 3-D reference means something only to the functions Excel lets
+            // take one, which expand it before they are called (see
+            // `expand_3d`). Anywhere else it is `#VALUE!`.
+            Expr::Reference3d(_) => Value::Error(ErrorValue::Value),
             // Preserved text this parser cannot read. `#NAME?` is the honest
             // answer: the reference exists in the file but means nothing here,
             // and inventing a value would be worse than saying so.
@@ -384,11 +388,27 @@ impl<'a> Evaluator<'a> {
             Expr::Unary { op, operand } => self.eval_unary(sheet_index, *op, operand),
             Expr::Binary { op, left, right } => self.eval_binary(sheet_index, *op, left, right),
             Expr::Function { name, args } if name == "LET" => self.eval_let(sheet_index, args),
+            // `A1#` and `@x` (XL-FEAT-015), stored as these two calls because
+            // that is how the file stores them.
+            Expr::Function { name, args } if name == casual_calc_formula::parse::ANCHORARRAY => {
+                self.eval_anchor_array(sheet_index, args)
+            }
+            Expr::Function { name, args } if name == casual_calc_formula::parse::SINGLE => {
+                self.eval_single(sheet_index, args)
+            }
             // A LAMBDA evaluates to a function *value*, capturing whatever is
             // in scope where it was written. Put in a cell it shows #CALC!,
             // which happens at the point the value is written rather than here
             // — a lambda passed to MAP must survive being a value first.
             Expr::Function { name, args } if name == "LAMBDA" => self.make_lambda(args),
+            // A 3-D reference as an argument: spread across its sheets for the
+            // functions Excel lets take one, and `#VALUE!` for every other —
+            // `COUNTIF(Jan:Mar!B5,">0")` must not quietly count an error.
+            Expr::Function { name, args }
+                if args.iter().any(|a| matches!(a, Expr::Reference3d(_))) =>
+            {
+                self.call_3d(sheet_index, name, args)
+            }
             Expr::Function { name, args } => {
                 // A defined name bound to a LAMBDA is called like a builtin,
                 // which is the whole point of naming one.
@@ -406,7 +426,232 @@ impl<'a> Evaluator<'a> {
                 call_function(self, sheet_index, name, args)
             }
             Expr::Call { callee, args } => self.eval_call(sheet_index, callee, args),
+            Expr::Array(rows) => self.array_constant(sheet_index, rows),
         }
+    }
+
+    /// An array constant (`{1,2;3,4}`) as an array value.
+    ///
+    /// The parser has already refused a ragged or oversized constant, but a
+    /// tree also arrives over the collaboration wire and from a snapshot,
+    /// where no parser has seen it — so the shape and the size are checked
+    /// again here rather than trusted. A malformed one is `#VALUE!`, an
+    /// oversized one `#NUM!`, the evaluator's answer for any array too big.
+    #[inline(never)]
+    fn array_constant(&mut self, sheet_index: usize, rows: &[Vec<Expr>]) -> Value {
+        let cols = rows.first().map_or(0, Vec::len);
+        if cols == 0 || rows.iter().any(|row| row.len() != cols) {
+            return Value::Error(ErrorValue::Value);
+        }
+        if let Err(e) = crate::functions::checked_array_size(rows.len(), cols) {
+            return Value::Error(e);
+        }
+        let mut cells = Vec::with_capacity(rows.len() * cols);
+        for item in rows.iter().flatten() {
+            cells.push(match item {
+                // Constants only. Anything else could only have come from a
+                // tree no parser produced, and evaluating it would let a
+                // constant hide a reference from the dependency graph.
+                Expr::Number(_) | Expr::Text(_) | Expr::Bool(_) | Expr::Error(_) => {
+                    self.eval_expr_inner(sheet_index, item)
+                }
+                _ => Value::Error(ErrorValue::Value),
+            });
+        }
+        Value::Array {
+            rows: rows.len(),
+            cols,
+            cells,
+        }
+    }
+
+    /// The arguments with each 3-D reference spread into one reference per
+    /// sheet of its span, in tab order: `SUM(Jan:Mar!B5)` is called as
+    /// `SUM(Jan!B5,Feb!B5,Mar!B5)`.
+    ///
+    /// Spreading rather than teaching every aggregate a new argument shape is
+    /// what keeps them identical: a 3-D `SUM` *is* the `SUM` of the per-sheet
+    /// references, with the same skipping of text and the same error rules.
+    /// The span is resolved by position here, at evaluation, so a sheet
+    /// inserted or moved between the endpoints is in it and one moved out is
+    /// not. An endpoint that names no sheet is `#REF!`.
+    /// A call with a 3-D reference among its arguments. Out of line, like the
+    /// other new arms of `eval_expr_inner`, which is the evaluator's recursive
+    /// frame.
+    #[inline(never)]
+    fn call_3d(&mut self, sheet_index: usize, name: &str, args: &[Expr]) -> Value {
+        if !accepts_3d(name) {
+            return Value::Error(ErrorValue::Value);
+        }
+        let expanded = self.expand_3d(args);
+        call_function(self, sheet_index, name, &expanded)
+    }
+
+    #[inline(never)]
+    fn expand_3d(&self, args: &[Expr]) -> Vec<Expr> {
+        let mut out = Vec::with_capacity(args.len());
+        for arg in args {
+            let Expr::Reference3d(r) = arg else {
+                out.push(arg.clone());
+                continue;
+            };
+            let (Some(a), Some(b)) = (
+                self.sheet_index_by_name(&r.first),
+                self.sheet_index_by_name(&r.last),
+            ) else {
+                out.push(Expr::Error("#REF!".to_owned()));
+                continue;
+            };
+            for sheet in &self.workbook.sheets[a.min(b)..=a.max(b)] {
+                let on = |corner: &StoredRef| StoredRef {
+                    sheet: Some(sheet.name.clone()),
+                    ..corner.clone()
+                };
+                // The sheet on the first corner, as the parser puts it.
+                out.push(match &r.end {
+                    Some(end) => Expr::Range(on(&r.start), end.clone()),
+                    None => Expr::Reference(on(&r.start)),
+                });
+            }
+        }
+        out
+    }
+
+    /// The cell a spill operator's operand names: `A1` in `A1#`, or the cell a
+    /// defined name refers to in `Name#`. `None` for anything that cannot
+    /// anchor a spill.
+    fn spill_anchor(&self, sheet_index: usize, arg: &Expr) -> Option<(usize, CellRef)> {
+        match arg {
+            Expr::Reference(r) => {
+                let target = self.resolve_sheet(&r.sheet, sheet_index)?;
+                let at = r.resolve(self.origin())?;
+                Some((target, CellRef::new(at.row, at.col)))
+            }
+            Expr::Name(name) => {
+                let defined = defined_name_in_scope(self.workbook, sheet_index, name)?;
+                let scope = defined
+                    .sheet
+                    .and_then(|id| self.workbook.sheets.iter().position(|s| s.id == id))
+                    .unwrap_or(sheet_index);
+                let Expr::Reference(r) = &defined.formula else {
+                    return None;
+                };
+                let target = self.resolve_sheet(&r.sheet, scope)?;
+                // A name has no holding cell: its tree is the absolute form.
+                let at = r.resolve(ABSOLUTE)?;
+                Some((target, CellRef::new(at.row, at.col)))
+            }
+            _ => None,
+        }
+    }
+
+    /// `A1#` — the whole array the anchor spills.
+    ///
+    /// Read from the anchor's own result rather than from the cells it spilled
+    /// into: those are written *after* evaluation, so reading them would see
+    /// the previous pass's spill whenever the anchor has just changed. A cell
+    /// that does not spill has no spill range, and Excel answers `#REF!`.
+    #[inline(never)]
+    fn eval_anchor_array(&mut self, sheet_index: usize, args: &[Expr]) -> Value {
+        let [arg] = args else {
+            return Value::Error(ErrorValue::Value);
+        };
+        let Some((target, at)) = self.spill_anchor(sheet_index, arg) else {
+            return Value::Error(ErrorValue::Ref);
+        };
+        match self.eval_cell_array(target, at) {
+            spill @ Value::Array { .. } => spill,
+            _ => Value::Error(ErrorValue::Ref),
+        }
+    }
+
+    /// `@x` — implicit intersection, Microsoft's three rules: a single item is
+    /// itself; a range gives the cell in line with the formula — its row for a
+    /// one-column range, its column for a one-row range, both for a block —
+    /// and `#VALUE!` when there is none; an array gives its top-left value.
+    #[inline(never)]
+    fn eval_single(&mut self, sheet_index: usize, args: &[Expr]) -> Value {
+        let [arg] = args else {
+            return Value::Error(ErrorValue::Value);
+        };
+        // The range an argument names, as (sheet, r0, c0, r1, c1).
+        let range = match arg {
+            Expr::Range(a, b) => {
+                let (Some(target), Some(a), Some(b)) = (
+                    self.resolve_sheet(&a.sheet, sheet_index),
+                    a.resolve(self.origin()),
+                    b.resolve(self.origin()),
+                ) else {
+                    return Value::Error(ErrorValue::Ref);
+                };
+                Some((
+                    target,
+                    a.row.min(b.row),
+                    a.col.min(b.col),
+                    a.row.max(b.row),
+                    a.col.max(b.col),
+                ))
+            }
+            Expr::StructuredRef { table, spec } => {
+                match self.resolve_structured(sheet_index, table.as_deref(), spec) {
+                    Ok((target, r)) => {
+                        Some((target, r.start.row, r.start.col, r.end.row, r.end.col))
+                    }
+                    Err(e) => return Value::Error(e),
+                }
+            }
+            // `@A1#`: the spill's own block, intersected like any range, and
+            // read from the anchor's result for the reason `A1#` is.
+            Expr::Function { name, args } if name == casual_calc_formula::parse::ANCHORARRAY => {
+                let spill = self.eval_anchor_array(sheet_index, args);
+                let Value::Array { rows, cols, cells } = &spill else {
+                    return spill;
+                };
+                let Some((_, anchor)) =
+                    args.first().and_then(|a| self.spill_anchor(sheet_index, a))
+                else {
+                    return Value::Error(ErrorValue::Ref);
+                };
+                let bounds = (
+                    anchor.row,
+                    anchor.col,
+                    anchor.row + (*rows as u32).saturating_sub(1),
+                    anchor.col + (*cols as u32).saturating_sub(1),
+                );
+                return match self.in_line(bounds) {
+                    Some((r, c)) => cells
+                        .get((r - anchor.row) as usize * cols + (c - anchor.col) as usize)
+                        .cloned()
+                        .unwrap_or(Value::Error(ErrorValue::Value)),
+                    None => Value::Error(ErrorValue::Value),
+                };
+            }
+            _ => None,
+        };
+        match range {
+            Some((target, r0, c0, r1, c1)) => match self.in_line((r0, c0, r1, c1)) {
+                Some((r, c)) => self.eval_cell(target, CellRef::new(r, c)),
+                None => Value::Error(ErrorValue::Value),
+            },
+            // A single item is itself and an array its top-left value — which
+            // is what a scalar context already does to an array.
+            None => self.eval_expr_array(sheet_index, arg).scalar(),
+        }
+    }
+
+    /// The cell of `(r0, c0, r1, c1)` in line with the formula being evaluated,
+    /// by implicit intersection: an axis one cell deep is taken as it is, and
+    /// a longer one must contain the formula's own row or column.
+    fn in_line(&self, (r0, c0, r1, c1): (u32, u32, u32, u32)) -> Option<(u32, u32)> {
+        let (_, here) = self.current?;
+        let pick = |lo: u32, hi: u32, at: u32| {
+            if lo == hi {
+                Some(lo)
+            } else {
+                (lo..=hi).contains(&at).then_some(at)
+            }
+        };
+        Some((pick(r0, r1, here.row)?, pick(c0, c1, here.col)?))
     }
 
     /// Take the custom-function calls this evaluation wanted and found no
@@ -856,6 +1101,23 @@ pub(crate) fn defined_name_in_scope<'w>(
         .filter(named)
         .find(|d| d.sheet.is_some() && d.sheet == here)
         .or_else(|| names.iter().filter(named).find(|d| d.sheet.is_none()))
+}
+
+/// The functions Excel accepts a 3-D reference in.
+///
+/// Microsoft's list ("Create a 3-D reference to the same cell range on
+/// multiple worksheets"): SUM, AVERAGE, AVERAGEA, COUNT, COUNTA, HSTACK, MAX,
+/// MAXA, MIN, MINA, PRODUCT, STDEV, STDEVA, STDEVP, STDEVPA, VAR, VARA, VARP,
+/// VARPA, VSTACK. The `.S`/`.P` forms of STDEV and VAR are the same functions
+/// under their 2010 names and are included with them.
+const THREE_D_FUNCTIONS: &[&str] = &[
+    "AVERAGE", "AVERAGEA", "COUNT", "COUNTA", "HSTACK", "MAX", "MAXA", "MIN", "MINA", "PRODUCT",
+    "STDEV", "STDEV.P", "STDEV.S", "STDEVA", "STDEVP", "STDEVPA", "SUM", "VAR", "VAR.P", "VAR.S",
+    "VARA", "VARP", "VARPA", "VSTACK",
+];
+
+fn accepts_3d(name: &str) -> bool {
+    THREE_D_FUNCTIONS.binary_search(&name).is_ok()
 }
 
 fn arithmetic(op: BinaryOp, lv: &Value, rv: &Value) -> Value {

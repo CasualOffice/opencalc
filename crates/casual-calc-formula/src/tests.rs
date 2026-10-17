@@ -545,3 +545,369 @@ fn power_is_left_associative_as_in_excel() {
     assert_eq!(crate::parse("(2^3)^2").unwrap().to_string(), "2^3^2");
     assert_eq!(crate::parse("2^(3^2)").unwrap().to_string(), "2^(3^2)");
 }
+
+/// Whole-row references read and print exactly as whole columns do
+/// (XL-FEAT-016). Excel: "all cells in row 5" is `5:5`, rows 5 through 10 is
+/// `5:10`. A bare digit run lexes as a number, which is why `1:1` failed while
+/// `$1:$1` — a word, because of the `$` — already worked.
+#[test]
+fn whole_row_references_parse_and_print_like_whole_columns() {
+    for text in [
+        "1:1",
+        "5:10",
+        "$1:$3",
+        "1:$3",
+        "Sheet1!1:1",
+        "Sheet1!$1:$1",
+        "'My Sheet'!2:5",
+        "SUM(1:1)",
+        "SUM(3:3,A:A)",
+        "1048576:1048576",
+    ] {
+        let expr = parse(text).unwrap_or_else(|e| panic!("{text}: {e}"));
+        let Expr::Range(a, b) = first_arg(&expr) else {
+            panic!("{text}: not a range: {expr:?}");
+        };
+        assert!(
+            a.col_implicit && b.col_implicit,
+            "{text}: rows name no column"
+        );
+        assert_eq!(expr.to_string(), text, "round trip");
+    }
+    let Expr::Range(a, b) = parse("5:10").unwrap() else {
+        unreachable!()
+    };
+    assert_eq!((a.row, b.row), (4, 9));
+    assert_eq!((a.col, b.col), (0, i64::from(crate::MAX_COL)));
+    // Row 0 and past the last row are not rows.
+    assert!(parse("0:1").is_err());
+    assert!(parse("1048577:1048577").is_err());
+    // A number is still a number.
+    assert_eq!(parse("1").unwrap(), num(1.0));
+    assert!(matches!(parse("1.5").unwrap(), Expr::Number(_)));
+    assert!(parse("1.5:2").is_err());
+}
+
+/// Excel does not mix the shapes: `A1:3` and `1:A1` are not ranges.
+#[test]
+fn a_range_does_not_mix_a_cell_with_a_whole_row_or_column() {
+    for text in ["A1:3", "3:A1", "A:3", "3:A", "A1:B", "B:A1"] {
+        assert!(parse(text).is_err(), "{text} parsed: {:?}", parse(text));
+    }
+}
+
+fn first_arg(expr: &Expr) -> &Expr {
+    match expr {
+        Expr::Function { args, .. } => first_arg(&args[0]),
+        other => other,
+    }
+}
+
+/// Array constants (XL-FEAT-014): `,` between columns, `;` between rows, and
+/// only constants inside — numbers (a leading `-` allowed), text, logicals and
+/// error values. Excel: "Use array constants in array formulas".
+#[test]
+fn array_constants_parse_and_print_as_typed() {
+    for text in [
+        "{1,2,3}",
+        "{1;2}",
+        "{1,2;3,4}",
+        "{\"a\",TRUE,#N/A,-1.5}",
+        "{-1,0.25;1E+20,FALSE}",
+        "SUM(COUNTIF(E1:E5,{\"a\",\"b\"}))",
+        "CHOOSE({1,2},A1,B1)",
+        "{1,2}+{10;20}",
+        "{\"say \"\"hi\"\"\"}",
+    ] {
+        let expr = parse(text).unwrap_or_else(|e| panic!("{text}: {e}"));
+        let again = parse(&expr.to_string()).unwrap_or_else(|e| panic!("reparse {text}: {e}"));
+        assert_eq!(expr, again, "{text}: round trip");
+    }
+    // What the formula bar shows is what was typed (numbers print as Rust
+    // prints them, so `1E+20` is the only spelling not kept).
+    for text in ["{1,2,3}", "{1;2}", "{1,2;3,4}", "{\"a\",TRUE,#N/A,-1.5}"] {
+        assert_eq!(parse(text).unwrap().to_string(), text);
+    }
+    assert_eq!(parse("{ 1 , 2 ; 3 , 4 }").unwrap().to_string(), "{1,2;3,4}");
+    assert_eq!(parse("{true,false}").unwrap().to_string(), "{TRUE,FALSE}");
+}
+
+/// Excel refuses anything in a constant that is not itself a constant, a
+/// ragged constant, and a nested one.
+#[test]
+fn array_constants_refuse_what_excel_refuses() {
+    for text in [
+        "{}", "{A1}", "{A1:B2}", "{1+2}", "{SUM(1)}", "{(1)}", "{10%}", "{1,,2}", "{1,}",
+        "{1,2;3}", "{{1}}", "{1", "{--1}", "{-\"a\"}", "{Name}", "1;2", "}",
+    ] {
+        assert!(parse(text).is_err(), "{text} parsed: {:?}", parse(text));
+    }
+}
+
+/// A constant is untrusted input: its size is capped at parse time, and
+/// parsing one is linear — no quadratic re-scan per element.
+#[test]
+fn an_array_constant_is_bounded() {
+    let at_cap = format!(
+        "{{{}}}",
+        vec!["1"; crate::parse::MAX_ARRAY_CONSTANT].join(",")
+    );
+    assert!(parse(&at_cap).is_ok());
+    let over = format!(
+        "{{{}}}",
+        vec!["1"; crate::parse::MAX_ARRAY_CONSTANT + 1].join(",")
+    );
+    assert!(parse(&over).is_err(), "one past the cap was accepted");
+    let rows = format!(
+        "{{{}}}",
+        vec!["1"; crate::parse::MAX_ARRAY_CONSTANT + 1].join(";")
+    );
+    assert!(
+        parse(&rows).is_err(),
+        "one past the cap, as rows, was accepted"
+    );
+}
+
+/// The spill operator (XL-FEAT-015): `A1#` is the whole range A1 spilled.
+/// Excel stores it as `_xlfn.ANCHORARRAY(A1)`, so that is the tree; the
+/// printer shows the operator, as the formula bar does.
+#[test]
+fn the_spill_operator_parses_and_prints() {
+    for text in [
+        "A1#",
+        "$B$2#",
+        "SUM(A1#)",
+        "Sheet2!B3#",
+        "'My Sheet'!B3#",
+        "Spill#",
+        "COUNTIF(A1#,\">2\")+ROWS(A1#)",
+        "@A1#",
+    ] {
+        let expr = parse(text).unwrap_or_else(|e| panic!("{text}: {e}"));
+        assert_eq!(expr.to_string(), text, "round trip");
+    }
+    assert!(matches!(
+        parse("A1#").unwrap(),
+        Expr::Function { ref name, ref args } if name == "ANCHORARRAY" && matches!(args[..], [Expr::Reference(_)])
+    ));
+    // The file spelling reads as the same tree.
+    assert_eq!(parse("ANCHORARRAY(A1)").unwrap(), parse("A1#").unwrap());
+    // Only after a cell or a name: not after a range, a number or a call.
+    for text in ["A1:B2#", "1#", "SUM(A1)#", "A1 #", "#", "A1##"] {
+        assert!(parse(text).is_err(), "{text} parsed: {:?}", parse(text));
+    }
+}
+
+/// `#` still starts an error literal everywhere it does not follow a word.
+#[test]
+fn error_literals_are_untouched_by_the_spill_operator() {
+    for (text, error) in [
+        ("#N/A", "#N/A"),
+        ("IF(A1,#REF!)", "#REF!"),
+        ("A1#+#SPILL!", "#SPILL!"),
+        ("{#N/A,#DIV/0!}", "#N/A"),
+    ] {
+        let printed = parse(text)
+            .unwrap_or_else(|e| panic!("{text}: {e}"))
+            .to_string();
+        assert_eq!(printed, text);
+        assert!(printed.contains(error));
+    }
+}
+
+/// Implicit intersection (XL-FEAT-015): `@` before a reference, a range or a
+/// call. Stored by Excel as `_xlfn.SINGLE(...)`, which is the tree.
+#[test]
+fn the_implicit_intersection_operator_parses_and_prints() {
+    for text in [
+        "@A1:A5",
+        "@A1",
+        "@A:A",
+        "@SUM(A1:A5)",
+        "@A1:A5+1",
+        "-@A1:A5",
+        "@Sheet2!A1:A5*2",
+        "@(A1:A5+1)",
+        "@Table1[Amount]",
+        "IF(@A1:A5>0,1,0)",
+    ] {
+        let expr = parse(text).unwrap_or_else(|e| panic!("{text}: {e}"));
+        assert_eq!(expr.to_string(), text, "round trip");
+    }
+    let Expr::Binary { left, .. } = parse("@A1:A5+1").unwrap() else {
+        panic!("@ binds tighter than +")
+    };
+    assert!(matches!(*left, Expr::Function { ref name, .. } if name == "SINGLE"));
+    assert_eq!(parse("SINGLE(A1:A5)").unwrap(), parse("@A1:A5").unwrap());
+    // A structured reference's own `@` is inside its brackets, untouched.
+    assert_eq!(
+        parse("Sales[@Amount]").unwrap().to_string(),
+        "Sales[@Amount]"
+    );
+    for text in ["@", "@@A1", "A1@", "@+A1"] {
+        assert!(parse(text).is_err(), "{text} parsed: {:?}", parse(text));
+    }
+}
+
+/// 3-D references (XL-FEAT-017): the same cell or range on every sheet from
+/// one tab to another. Excel quotes the pair once when either name needs it.
+#[test]
+fn three_d_references_parse_and_print() {
+    for text in [
+        "Sheet1:Sheet3!A1",
+        "SUM(Sheet1:Sheet3!A1)",
+        "SUM(Jan:Dec!B5:B9)",
+        "SUM('Jan 2026:Dec 2026'!B5:B9)",
+        "AVERAGE(Sheet1:Sheet3!$A$1:$B$2,1)",
+        "SUM('Bob''s:Zed'!A1)",
+        "SUM(Sheet1:Sheet3!A:A)",
+        "SUM(Sheet1:Sheet3!2:2)",
+    ] {
+        let expr = parse(text).unwrap_or_else(|e| panic!("{text}: {e}"));
+        assert_eq!(expr.to_string(), text, "round trip");
+    }
+    // One quoted name for the pair, whichever end needed it.
+    assert_eq!(
+        parse("SUM('Jan:Dec 2026'!A1)").unwrap().to_string(),
+        "SUM('Jan:Dec 2026'!A1)"
+    );
+    assert!(format!("{:?}", parse("Sheet1:Sheet3!A1").unwrap()).starts_with("Reference3d"));
+    // A 3-D reference is not a spill anchor, and its far end names no sheet.
+    for text in [
+        "Sheet1:Sheet3!A1#",
+        "Sheet1:Sheet3!A1:Sheet2!B2",
+        "Sheet1:!A1",
+        ":Sheet3!A1",
+    ] {
+        assert!(parse(text).is_err(), "{text} parsed: {:?}", parse(text));
+    }
+}
+
+/// Renaming an endpoint follows it; deleting one moves it one sheet inward,
+/// whichever way round the span was written; deleting the only sheet of a
+/// span leaves `#REF!`. Deleting a sheet *between* the ends changes nothing
+/// in the text — the span is resolved by position.
+#[test]
+fn three_d_endpoints_follow_renames_and_deletions() {
+    use crate::{rename_sheet_references, shrink_3d_span};
+    let mut e = parse("SUM(Jan:Mar!B5)+Jan!A1").unwrap();
+    assert!(rename_sheet_references(&mut e, "jan", "January"));
+    assert_eq!(e.to_string(), "SUM(January:Mar!B5)+January!A1");
+
+    let order = ["Jan", "Feb", "Mar", "Apr"];
+    let shrunk = |text: &str, gone: &str| {
+        let mut e = parse(text).unwrap();
+        let changed = shrink_3d_span(&mut e, gone, &order);
+        (changed, e.to_string())
+    };
+    assert_eq!(
+        shrunk("SUM(Jan:Mar!B5)", "Jan"),
+        (true, "SUM(Feb:Mar!B5)".into())
+    );
+    assert_eq!(
+        shrunk("SUM(Jan:Mar!B5)", "Mar"),
+        (true, "SUM(Jan:Feb!B5)".into())
+    );
+    assert_eq!(
+        shrunk("SUM(Mar:Jan!B5)", "Mar"),
+        (true, "SUM(Feb:Jan!B5)".into())
+    );
+    assert_eq!(
+        shrunk("SUM(Jan:Mar!B5)", "Feb"),
+        (false, "SUM(Jan:Mar!B5)".into())
+    );
+    assert_eq!(
+        shrunk("SUM(Jan:Mar!B5)", "Apr"),
+        (false, "SUM(Jan:Mar!B5)".into())
+    );
+    // Narrowed to one sheet, it is that sheet's plain reference — the form
+    // `Feb:Feb!B5` itself parses to.
+    assert_eq!(
+        shrunk("SUM(Jan:Feb!B5)", "Jan"),
+        (true, "SUM(Feb!B5)".into())
+    );
+    assert_eq!(parse("Feb:FEB!B5:C6").unwrap(), parse("Feb!B5:C6").unwrap());
+    // A one-sheet span can still arrive as a tree (from the wire); deleting
+    // its sheet leaves nothing to refer to.
+    let mut lone = Expr::Reference3d(Box::new(crate::Reference3d {
+        first: "Feb".into(),
+        last: "Feb".into(),
+        start: crate::stored::StoredRef::absolute(&crate::parse_a1("B5").unwrap()),
+        end: None,
+    }));
+    assert!(shrink_3d_span(&mut lone, "Feb", &order));
+    assert_eq!(lone, Expr::Error("#REF!".into()));
+}
+
+/// Found by fuzzing the print-and-reparse round trip, after the 3-D grammar
+/// gave `Word Colon Word Bang` a meaning: text that used to parse into a
+/// range spanning two sheets, or that printed something unreadable.
+#[test]
+fn the_round_trip_holds_where_fuzzing_found_it_did_not() {
+    use crate::print::print_at;
+    use crate::stored::Origin;
+    // A range whose far end names another sheet is not a reference.
+    for text in ["P:'o'!A", "A1:'Sheet 2'!B2", "A1:Sheet2!B2"] {
+        assert!(parse(text).is_err(), "{text} parsed: {:?}", parse(text));
+    }
+    // The same sheet on both ends still is.
+    assert!(parse("'My Sheet'!A1:'My Sheet'!B2").is_ok());
+    // A spill anchor or 3-D corner read off the sheet prints as `#REF!`, not
+    // as `#REF!#` or `Jan:Mar!#REF!`, which nothing reads back.
+    let held_in_b1 = |text: &str| {
+        crate::restore_at(
+            &parse(text).unwrap(),
+            crate::stored::ABSOLUTE,
+            Origin::at(0, 1),
+        )
+    };
+    // An error literal followed by `/` is the error, then division.
+    assert_eq!(parse("(#N/A)/2").unwrap().to_string(), "#N/A/2");
+    assert_eq!(parse("#N/A/2").unwrap(), parse("(#N/A)/2").unwrap());
+    assert_eq!(parse("#DIV/0!/#N/A").unwrap().to_string(), "#DIV/0!/#N/A");
+    // `@` of `@` keeps the brackets the parser needs.
+    assert_eq!(parse("@(@U)").unwrap().to_string(), "@(@U)");
+    for text in ["A1#", "SUM(Jan:Mar!A1)"] {
+        let printed = print_at(&held_in_b1(text), Origin::at(0, 0));
+        assert!(
+            parse(&printed).is_ok(),
+            "{text} read from A1 printed {printed:?}"
+        );
+        assert!(printed.contains("#REF!"), "{printed}");
+    }
+}
+
+/// A number literal too large for a double is refused rather than read as
+/// infinity, which prints as `inf` and then reads back as a name.
+#[test]
+fn a_number_past_the_largest_double_is_refused() {
+    for text in ["1e400", "{1,1e400}", "-1E999"] {
+        assert!(parse(text).is_err(), "{text} parsed: {:?}", parse(text));
+    }
+    assert!(parse("1e308").is_ok());
+}
+
+/// Found by the `formula_parse` fuzz target on main: an implicit intersection
+/// used as a callee, inside another one. It printed `@@F0C.(C.)(.)`, which does
+/// not parse; then `@(@F0C.)(C.)(.)`, which leaves `(C.)(.)` over. A callee
+/// intersection is written `SINGLE(x)`, and a call chain after `@` keeps its
+/// brackets, so every one of these prints and reads back to the same tree.
+#[test]
+fn an_intersection_as_a_callee_round_trips() {
+    for text in [
+        "+@SINGLE(F0C.)(C.)(.)",
+        "SINGLE(A1)(2)",
+        "@SINGLE(A1)(2)",
+        "@(@A1)",
+        "@LAMBDA(x,x)(1)",
+    ] {
+        let expr = crate::parse(text).unwrap_or_else(|e| panic!("{text:?}: {e}"));
+        let printed = expr.to_string();
+        let again = crate::parse(&printed)
+            .unwrap_or_else(|e| panic!("{text:?} printed {printed:?}, which does not parse: {e}"));
+        assert_eq!(
+            again, expr,
+            "{text:?} printed {printed:?}, which reads back differently"
+        );
+    }
+}

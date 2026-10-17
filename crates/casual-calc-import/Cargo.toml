@@ -16,7 +16,7 @@ quick-xml = "0.41"
 [dev-dependencies]
 casual-calc-eval = { path = "../casual-calc-eval" }
 casual-calc-layout = { path = "../casual-calc-layout" }
-zip = { version = "2", default-features = false, features = ["deflate"] }
+zip = { version = "9", default-features = false, features = ["deflate"] }
 
 [lints]
 workspace = true

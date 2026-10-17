@@ -192,7 +192,7 @@ pub fn parse_a1_axis(text: &str, at_end: bool) -> Option<CellReference> {
 ///
 /// Quoting more often than strictly required is free: a quoted name is always
 /// valid. Quoting less often is silent data loss, so this errs toward quoting.
-fn sheet_name_needs_quoting(sheet: &str) -> bool {
+pub(crate) fn sheet_name_needs_quoting(sheet: &str) -> bool {
     let mut chars = sheet.chars();
     let Some(first) = chars.next() else {
         return true; // Empty. Not a name, and certainly not a bare one.

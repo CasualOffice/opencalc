@@ -47,8 +47,14 @@ const FORMULA_COL: u32 = 0;
 /// the last of those matters: it is what LibreOffice displays, which is the
 /// only view of a document a CSV can carry. Both oracle modes use this one
 /// string so a change to how the oracle is read cannot apply to half of them.
+///
+/// Token 12 is **1, the first sheet**, which is the sheet the comparison reads
+/// on our side. It was `-1` (every sheet, one file each), and the reader takes
+/// whichever `.csv` the directory lists first — harmless while every corpus
+/// document had one sheet, and wrong the moment one had four (`three-d.ods`,
+/// XL-FEAT-017): ours was compared with the last sheet's text.
 const CSV_FILTER: &str =
-    "csv:Text - txt - csv (StarCalc):44,34,76,1,,0,false,true,true,false,false,-1,false,true";
+    "csv:Text - txt - csv (StarCalc):44,34,76,1,,0,false,true,true,false,false,1,false,true";
 
 /// The formula oracle's export: the same, but **raw values**, not as shown
 /// (token 9 `false`). With recalculation forced (XL-FEAT-134) LibreOffice
@@ -1382,6 +1388,45 @@ fn csv_grid(text: &str) -> Vec<Vec<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 3-D references (XL-FEAT-017), **computed by us** against the answers
+    /// LibreOffice computed for the same document. The `--ods` oracle compares
+    /// the values a document carries, which proves where cells land and that
+    /// our written formula is LibreOffice's; it does not run our evaluator.
+    /// This does: the cached answers are cleared first, so every number below
+    /// is ours. LibreOffice's, from `three-d.ods`: 7, 11.4, 5, 40, 9.
+    #[test]
+    fn three_d_references_compute_what_libreoffice_computed() {
+        let bytes =
+            std::fs::read(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("corpus/ods/three-d.ods"))
+                .expect("the corpus document");
+        let (mut workbook, _) = casual_calc_ods::import_ods(&bytes).expect("opens");
+        let summary = &mut workbook.sheets[0];
+        assert_eq!(summary.name, "Summary");
+        for row in 0..5 {
+            let mut cell = summary
+                .cells
+                .get(CellRef::new(row, 1))
+                .cloned()
+                .expect("a formula");
+            assert!(cell.formula.is_some(), "B{} lost its formula", row + 1);
+            cell.value = CellValue::Empty;
+            summary.cells.set(CellRef::new(row, 1), cell);
+        }
+        let mut session = WorkbookSession::from_workbook(workbook);
+        session.recalculate();
+        let got: Vec<CellValue> = (0..5)
+            .map(|row| {
+                session.workbook().sheets[0]
+                    .cells
+                    .get(CellRef::new(row, 1))
+                    .map(|c| c.value.clone())
+                    .unwrap_or(CellValue::Empty)
+            })
+            .collect();
+        let n = CellValue::Number;
+        assert_eq!(got, [n(7.0), n(11.4), n(5.0), n(40.0), n(9.0)]);
+    }
 
     #[test]
     fn libreoffices_printed_values_read_back_as_numbers() {

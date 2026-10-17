@@ -63,8 +63,27 @@ printf '%s\n' \
   'second line",4' \
   > "$tmp/text-edges.csv"
 
-for source in values-and-formulas gaps-and-repeats text-edges; do
+# 4. Inline arrays (XL-FEAT-014). OpenFormula writes them `{1;2|3;4}` — `;`
+#    between columns, `|` between rows — where Excel writes `{1,2;3,4}`, so the
+#    reader has to map both separators, and a string holding either is data.
+cat > "$tmp/arrays.csv" <<'CSV'
+label,value
+sum,"=SUM({1,2;3,4})"
+index,"=INDEX({1,2;3,4},2,1)"
+count,"=SUM(COUNTIF(A2:A5,{""sum"",""count""}))"
+text,"=INDEX({""a;b"",""c|d""},1,2)"
+CSV
+
+for source in values-and-formulas gaps-and-repeats text-edges arrays; do
   "$soffice" --headless --convert-to ods --outdir "$tmp" "$tmp/$source.csv" >/dev/null
   mv "$tmp/$source.ods" "$out/$source.ods"
   echo "wrote $out/$source.ods"
 done
+
+# 5. 3-D references (XL-FEAT-017). CSV has one sheet, so this one starts from a
+#    hand-written flat ODF document, `three-d.fods`, committed beside it: four
+#    sheets, the formulas on the first, `[$Jan.B2:$Mar.B2]` spanning the rest
+#    (one of them, `Feb Q1`, needing quotes). LibreOffice computes the answers
+#    on conversion, which is what the oracle compares against.
+"$soffice" --headless --convert-to ods --outdir "$out" "$out/three-d.fods" >/dev/null
+echo "wrote $out/three-d.ods"

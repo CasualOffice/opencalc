@@ -83,7 +83,13 @@ impl Package {
         for i in 0..count {
             // Reading metadata does not decompress the entry.
             let entry = archive.by_index(i).map_err(|_| PackageError::NotAPackage)?;
-            let name = entry.name().to_owned();
+            // A name that does not decode is a damaged directory, refused the
+            // way an unreadable entry is. Checking every name here is what lets
+            // the listings below treat names as always decodable.
+            let name = entry
+                .name()
+                .map_err(|_| PackageError::NotAPackage)?
+                .into_owned();
 
             if name.len() > limits.max_path_bytes {
                 return Err(PackageError::PathTooLong {
@@ -134,7 +140,13 @@ impl Package {
 
     /// The paths of all entries, in archive order.
     pub fn entry_names(&self) -> Vec<String> {
-        self.archive.file_names().map(str::to_owned).collect()
+        // Every name decoded when the package was opened (`open`), so none is
+        // dropped here.
+        self.archive
+            .file_names()
+            .filter_map(Result::ok)
+            .map(std::borrow::Cow::into_owned)
+            .collect()
     }
 
     /// Metadata for every entry, in archive order.
@@ -147,7 +159,10 @@ impl Package {
                 .by_index(i)
                 .map_err(|_| PackageError::NotAPackage)?;
             out.push(EntryInfo {
-                name: entry.name().to_owned(),
+                name: entry
+                    .name()
+                    .map_err(|_| PackageError::NotAPackage)?
+                    .into_owned(),
                 uncompressed: entry.size(),
                 compressed: entry.compressed_size(),
             });
@@ -157,7 +172,9 @@ impl Package {
 
     /// Whether a part with the given path exists.
     pub fn contains(&self, name: &str) -> bool {
-        self.archive.file_names().any(|n| n == name)
+        self.archive
+            .file_names()
+            .any(|n| n.is_ok_and(|n| n == name))
     }
 
     /// Read a part's decompressed bytes, bounded by what it declared and by
@@ -200,7 +217,27 @@ impl Package {
             .by_ref()
             .take(cap.saturating_add(1))
             .read_to_end(&mut buf)
-            .map_err(|_| PackageError::NotAPackage)?;
+            .map_err(|e| {
+                // zip 9 enforces the declared size itself and stops the read
+                // with this error, before our own `take` would see the byte
+                // past it. It is the same defect as `produced > cap` below — a
+                // part producing more than it declared — so it is reported as
+                // that, not as a damaged package. Matched on zip's message:
+                // if a release rewords it,
+                // `a_part_that_produces_more_than_it_declared_is_refused` turns
+                // red rather than the code quietly changing.
+                if e.kind() == std::io::ErrorKind::InvalidData
+                    && e.to_string()
+                        .contains("larger than its declared uncompressed size")
+                {
+                    PackageError::ExpansionTooLarge {
+                        total: self.consumed.saturating_add(cap.saturating_add(1)),
+                        limit: total_cap,
+                    }
+                } else {
+                    PackageError::NotAPackage
+                }
+            })?;
 
         let produced = buf.len() as u64;
         if produced > cap {

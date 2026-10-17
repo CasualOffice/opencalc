@@ -1883,7 +1883,13 @@ pub(crate) fn flatten_values(ev: &mut Evaluator<'_>, sheet: usize, arg: &Expr) -
         }
         out
     } else {
-        vec![ev.eval_expr(sheet, arg)]
+        // An array argument is every one of its elements: `COUNTA({1,"a"})`
+        // is 2 and `CONCAT({"a","b"})` is "ab" (XL-FEAT-014). Collapsing it
+        // to the corner answered for one element, a plausible wrong number.
+        match ev.eval_expr_array(sheet, arg) {
+            Value::Array { cells, .. } => cells,
+            other => vec![other],
+        }
     }
 }
 

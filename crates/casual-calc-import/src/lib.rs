@@ -223,6 +223,7 @@ fn expr_within_grid(expr: &Expr, origin: Origin) -> bool {
     match expr {
         Expr::Reference(r) => within(r),
         Expr::Range(a, b) => within(a) && within(b),
+        Expr::Reference3d(r) => within(&r.start) && r.end.as_ref().is_none_or(within),
         Expr::Unary { operand, .. } => expr_within_grid(operand, origin),
         Expr::Binary { left, right, .. } => {
             expr_within_grid(left, origin) && expr_within_grid(right, origin)

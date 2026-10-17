@@ -60,6 +60,19 @@ pub enum Token {
     Colon,
     /// `!`
     Bang,
+    /// `{`, opening an array constant.
+    LBrace,
+    /// `}`
+    RBrace,
+    /// `;`, the row separator inside an array constant. Excel's file grammar
+    /// is the en-US one, so `;` means nothing else.
+    Semicolon,
+    /// `#` written straight after a reference or a name: the spilled-range
+    /// operator, `A1#`. Anywhere else `#` starts an error literal.
+    Hash,
+    /// `@`, the implicit-intersection operator. A structured reference's own
+    /// `[@Col]` is inside its brackets and never lexes as this.
+    At,
 }
 
 const KNOWN_ERRORS: &[&str] = &[
@@ -131,6 +144,18 @@ pub fn tokenize(input: &str) -> Result<Vec<Token>, FormulaError> {
                 tokens.push(Token::Bang);
                 i += 1;
             }
+            '{' => {
+                tokens.push(Token::LBrace);
+                i += 1;
+            }
+            '}' => {
+                tokens.push(Token::RBrace);
+                i += 1;
+            }
+            ';' => {
+                tokens.push(Token::Semicolon);
+                i += 1;
+            }
             '+' => {
                 tokens.push(Token::Plus);
                 i += 1;
@@ -194,10 +219,32 @@ pub fn tokenize(input: &str) -> Result<Vec<Token>, FormulaError> {
                 tokens.push(Token::QuotedSheet(name));
                 i = next;
             }
+            // Straight after a word character — `A1#`, `Sheet2!B3#`, `Name#` —
+            // `#` is the spill operator. An error literal never follows a word
+            // without an operator or a bracket between them, so `#N/A`,
+            // `IF(A1,#REF!)` and `A1#+#SPILL!` all lex as they always did.
+            '#' if i > 0 && is_word_char(chars[i - 1]) => {
+                tokens.push(Token::Hash);
+                i += 1;
+            }
+            '@' => {
+                tokens.push(Token::At);
+                i += 1;
+            }
             '#' => {
                 let (error, next) = lex_error(&chars, i)?;
                 tokens.push(Token::Error(error));
                 i = next;
+            }
+            // A row number beside a colon is one side of a whole-row reference
+            // (`1:1`, `5:10`, `Sheet1!3:3`), not a number (XL-FEAT-016). Lexed
+            // as a word, as `$1` already is, so the parser treats the two
+            // spellings alike. Only a pure digit run qualifies: `1.5:2` is still
+            // a number and then a syntax error, as in Excel.
+            c if c.is_ascii_digit() && row_beside_colon(&chars, i).is_some() => {
+                let end = row_beside_colon(&chars, i).unwrap_or(i);
+                tokens.push(Token::Word(chars[i..end].iter().collect()));
+                i = end;
             }
             c if c.is_ascii_digit() || (c == '.' && next_is_digit(&chars, i)) => {
                 let (number, next) = lex_number(&chars, i)?;
@@ -216,6 +263,19 @@ pub fn tokenize(input: &str) -> Result<Vec<Token>, FormulaError> {
     }
 
     Ok(tokens)
+}
+
+/// The end of a digit run starting at `start`, when the run is a whole word of
+/// digits touching a colon on either side — a row number in `1:1`.
+fn row_beside_colon(chars: &[char], start: usize) -> Option<usize> {
+    let mut end = start;
+    while end < chars.len() && is_word_char(chars[end]) {
+        end += 1;
+    }
+    let digits = chars[start..end].iter().all(char::is_ascii_digit);
+    let after = chars.get(end) == Some(&':');
+    let before = start > 0 && chars[start - 1] == ':';
+    (digits && (after || before)).then_some(end)
 }
 
 fn next_is_digit(chars: &[char], i: usize) -> bool {
@@ -260,19 +320,25 @@ fn lex_quoted_sheet(chars: &[char], start: usize) -> Result<(String, usize), For
     Err(FormulaError::UnterminatedSheet)
 }
 
+/// The error literal starting at `start`: the longest known one the text
+/// begins with.
+///
+/// Matched against the list rather than by scanning a run of the characters
+/// errors are made of, because `/` is one of those characters and is also
+/// division: the scan read `#N/A/2` as the single unknown token `#N/A/`, so
+/// a formula dividing an error refused to parse — and the printer writes
+/// exactly that text for `(#N/A)/2` (found by fuzzing the round trip).
 fn lex_error(chars: &[char], start: usize) -> Result<(String, usize), FormulaError> {
-    let mut i = start + 1;
-    while i < chars.len()
-        && (chars[i].is_ascii_alphanumeric() || matches!(chars[i], '/' | '?' | '!' | '_'))
-    {
-        i += 1;
-    }
-    let token: String = chars[start..i].iter().collect();
-    if KNOWN_ERRORS.contains(&token.as_str()) {
-        Ok((token, i))
-    } else {
-        Err(FormulaError::UnexpectedChar('#'))
-    }
+    KNOWN_ERRORS
+        .iter()
+        .filter(|known| {
+            let len = known.chars().count();
+            chars.len() >= start + len
+                && known.chars().eq(chars[start..start + len].iter().copied())
+        })
+        .max_by_key(|known| known.len())
+        .map(|known| ((*known).to_owned(), start + known.chars().count()))
+        .ok_or(FormulaError::UnexpectedChar('#'))
 }
 
 fn lex_number(chars: &[char], start: usize) -> Result<(f64, usize), FormulaError> {
@@ -294,7 +360,12 @@ fn lex_number(chars: &[char], start: usize) -> Result<(f64, usize), FormulaError
         }
     }
     let text: String = chars[start..i].iter().collect();
-    text.parse::<f64>()
-        .map(|n| (n, i))
-        .map_err(|_| FormulaError::UnexpectedToken(text))
+    // A literal past the largest double (`1e400`) is not a number: it would
+    // become infinity and print as `inf` — a name — so the formula would not
+    // read back, and inside an array constant would not read at all. Refused
+    // here, as Excel refuses it (found by fuzzing the round trip).
+    match text.parse::<f64>() {
+        Ok(n) if n.is_finite() => Ok((n, i)),
+        _ => Err(FormulaError::UnexpectedToken(text)),
+    }
 }

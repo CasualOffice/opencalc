@@ -18,7 +18,7 @@ import { MacroError } from "./macro.api.js";
 /// anyway, so touching one is a named refusal rather than a ReferenceError.
 const BLOCKED = [
   "fetch", "XMLHttpRequest", "WebSocket", "EventSource", "importScripts", "WebTransport",
-  "Worker", "SharedWorker", "BroadcastChannel", "indexedDB", "caches", "navigator",
+  "Worker", "SharedWorker", "BroadcastChannel", "indexedDB", "caches",
   "document", "window", "parent", "top", "opener", "location", "RTCPeerConnection",
   "postMessage", "onmessage", "close", "eval", "Function", "FileReaderSync", "Request",
   "Response",
@@ -30,9 +30,37 @@ function violation(name) {
   };
 }
 
+/// What a script may read of `navigator` (`SEC-026`): the language a locale-aware
+/// macro formats by, and the user agent. Copied and frozen before the lockdown,
+/// so nothing on it is live — no `sendBeacon`, no `clipboard`, `locks`,
+/// `storage` or `serviceWorker`, nothing that reaches the network or a device.
+function safeNavigator() {
+  let n = {};
+  try { n = self.navigator || {}; } catch { n = {}; }
+  const text = (v) => (typeof v === "string" ? v.slice(0, 256) : "");
+  const languages = Array.isArray(n.languages) ? n.languages.slice(0, 16).map(text) : [];
+  return Object.freeze({
+    language: text(n.language),
+    languages: Object.freeze(languages),
+    userAgent: text(n.userAgent),
+  });
+}
+
 export function lockdown() {
+  const nav = safeNavigator();
   const chain = [];
   for (let o = self; o && o !== Object.prototype; o = Object.getPrototypeOf(o)) chain.push(o);
+  // `navigator` is replaced, not removed: every place it lives on the chain
+  // answers the frozen copy, so no prototype route reaches the live one.
+  const navGet = () => nav;
+  const navSet = violation("navigator");
+  for (const o of chain) {
+    if (!Object.prototype.hasOwnProperty.call(o, "navigator")) continue;
+    Object.defineProperty(o, "navigator", { get: navGet, set: navSet, configurable: false });
+  }
+  if (!Object.prototype.hasOwnProperty.call(self, "navigator")) {
+    Object.defineProperty(self, "navigator", { get: navGet, set: navSet, configurable: false });
+  }
   for (const name of BLOCKED) {
     const get = violation(name);
     for (const o of chain) {

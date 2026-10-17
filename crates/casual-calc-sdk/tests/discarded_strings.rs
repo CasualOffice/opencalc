@@ -32,7 +32,7 @@ fn parts(package: &[u8]) -> Vec<(String, String)> {
     let mut out = Vec::new();
     for i in 0..zip.len() {
         let mut f = zip.by_index(i).unwrap();
-        let name = f.name().to_owned();
+        let name = f.name().unwrap().into_owned();
         let mut buf = Vec::new();
         f.read_to_end(&mut buf).unwrap();
         out.push((name, String::from_utf8_lossy(&buf).into_owned()));
