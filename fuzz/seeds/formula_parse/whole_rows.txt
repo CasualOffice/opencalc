@@ -1,0 +1,1 @@
+SUM(1:1)+SUM($2:$4)*COUNT(Sheet1!5:10)-ROWS('My Sheet'!$1:3)

@@ -1,0 +1,1 @@
+SUM(COUNTIF(A1:A9,{"a","b;c"}))+INDEX({1,-2.5;TRUE,#N/A},2,1)*SUM({1;2;3})

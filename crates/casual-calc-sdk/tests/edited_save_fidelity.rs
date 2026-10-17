@@ -251,7 +251,10 @@ fn a_worksheet_ext_lst_survives_an_edited_save() {
 fn a_follower_of_an_unreadable_shared_master_is_named_in_the_save_loss() {
     let sheet = concat!(
         r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>"#,
-        r#"<row r="1"><c r="A1"><f t="shared" ref="A1:A2" si="0">SUM({1,2})+B1</f><v>3</v></c></row>"#,
+        // The intersection operator (a space), which this parser does not read.
+        // The example was an array constant until XL-FEAT-014 made that one
+        // readable — and the follower then expanded, as it should.
+        r#"<row r="1"><c r="A1"><f t="shared" ref="A1:A2" si="0">SUM(B1:C2 C1:D2)+B1</f><v>3</v></c></row>"#,
         r#"<row r="2"><c r="A2"><f t="shared" si="0"/><v>3</v></c></row>"#,
         "</sheetData></worksheet>"
     );
@@ -266,7 +269,7 @@ fn a_follower_of_an_unreadable_shared_master_is_named_in_the_save_loss() {
     assert_eq!(entry.count, 1, "one follower, counted once");
     // The master itself is not lost.
     let xml = part(&saved, "xl/worksheets/sheet1.xml").unwrap();
-    assert!(xml.contains("<f>SUM({1,2})+B1</f>"), "{xml}");
+    assert!(xml.contains("<f>SUM(B1:C2 C1:D2)+B1</f>"), "{xml}");
 }
 
 /// The other side of 005: a formula a *person* types with an unknown function

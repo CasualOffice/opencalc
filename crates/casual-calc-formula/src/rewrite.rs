@@ -37,6 +37,13 @@ pub fn restore_at(expr: &Expr, from: Origin, to: Origin) -> Expr {
     match expr {
         Expr::Reference(r) => Expr::Reference(moved(r)),
         Expr::Range(a, b) => Expr::Range(moved(a), moved(b)),
+        // The same cells on every sheet of the span, so they move the same way.
+        Expr::Reference3d(r) => {
+            let mut r = r.clone();
+            r.start = moved(&r.start);
+            r.end = r.end.as_ref().map(moved);
+            Expr::Reference3d(r)
+        }
         Expr::Unary { op, operand } => Expr::Unary {
             op: *op,
             operand: Box::new(restore_at(operand, from, to)),
@@ -70,6 +77,18 @@ pub fn rename_sheet_references(expr: &mut Expr, old: &str, new: &str) -> bool {
             let left = rename_ref(a, old, new);
             let right = rename_ref(b, old, new);
             left || right
+        }
+        // An endpoint of a 3-D span is a sheet name like any other: Excel
+        // rewrites `Jan:Dec!B5` to `January:Dec!B5` when `Jan` is renamed.
+        Expr::Reference3d(r) => {
+            let mut changed = false;
+            for end in [&mut r.first, &mut r.last] {
+                if end.eq_ignore_ascii_case(old) {
+                    new.clone_into(end);
+                    changed = true;
+                }
+            }
+            changed
         }
         Expr::Unary { operand, .. } => rename_sheet_references(operand, old, new),
         Expr::Binary { left, right, .. } => {
@@ -132,6 +151,72 @@ pub fn rename_name_references(expr: &mut Expr, old: &str, new: &str) -> bool {
             let mut changed = rename_name_references(callee, old, new);
             for arg in args {
                 changed |= rename_name_references(arg, old, new);
+            }
+            changed
+        }
+        _ => false,
+    }
+}
+
+/// Follow the deletion of sheet `gone` in every 3-D reference that ends on it.
+///
+/// `order` is the workbook's sheet names **before** the deletion, in tab
+/// order. A span between two other sheets needs nothing — it is resolved by
+/// position, so the deleted sheet simply stops being in it. An endpoint is
+/// different: its name is the span's boundary, and once the sheet is gone the
+/// name resolves to nothing. Excel moves the endpoint one sheet inward, so
+/// `Jan:Dec!B5` with `Jan` deleted becomes `Feb:Dec!B5`; a span that was only
+/// that one sheet has nothing left and becomes `#REF!`.
+///
+/// Returns whether anything changed.
+pub fn shrink_3d_span(expr: &mut Expr, gone: &str, order: &[&str]) -> bool {
+    let position = |name: &str| order.iter().position(|s| s.eq_ignore_ascii_case(name));
+    match expr {
+        Expr::Reference3d(r) => {
+            let (Some(first), Some(last)) = (position(&r.first), position(&r.last)) else {
+                return false;
+            };
+            let Some(at) = position(gone) else {
+                return false;
+            };
+            if at != first && at != last {
+                return false;
+            }
+            if first == last {
+                *expr = Expr::Error("#REF!".to_owned());
+                return true;
+            }
+            // One step toward the other endpoint, whichever way round the two
+            // were written.
+            let inward = |from: usize, toward: usize| {
+                if from < toward { from + 1 } else { from - 1 }
+            };
+            if at == first {
+                order[inward(first, last)].clone_into(&mut r.first);
+            } else {
+                order[inward(last, first)].clone_into(&mut r.last);
+            }
+            // Narrowed to one sheet, it is that sheet's ordinary reference.
+            *expr = (**r).clone().into_expr();
+            true
+        }
+        Expr::Unary { operand, .. } => shrink_3d_span(operand, gone, order),
+        Expr::Binary { left, right, .. } => {
+            let l = shrink_3d_span(left, gone, order);
+            let r = shrink_3d_span(right, gone, order);
+            l || r
+        }
+        Expr::Function { args, .. } => {
+            let mut changed = false;
+            for arg in args {
+                changed |= shrink_3d_span(arg, gone, order);
+            }
+            changed
+        }
+        Expr::Call { callee, args } => {
+            let mut changed = shrink_3d_span(callee, gone, order);
+            for arg in args {
+                changed |= shrink_3d_span(arg, gone, order);
             }
             changed
         }

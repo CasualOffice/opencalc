@@ -66,6 +66,15 @@ pub const MAX_DEPTH: u32 = 65;
 /// hundred cells with `+` wants `SUM` anyway.
 pub const MAX_CHAIN: u32 = 512;
 
+/// How many elements an array constant (`{1,2;3,4}`) may hold.
+///
+/// A constant is untrusted input — typed, imported, or arriving on the wire —
+/// and it is materialised whole the moment it is evaluated. Excel bounds a
+/// formula at 8,192 characters, which cannot hold more than about 4,096
+/// one-digit elements; this is four times that, so no formula Excel can write
+/// is refused, and it is far below the evaluator's own array ceiling.
+pub const MAX_ARRAY_CONSTANT: usize = 16_384;
+
 /// Parse a formula body (the text after a leading `=`) into an [`Expr`].
 pub fn parse(input: &str) -> Result<Expr, FormulaError> {
     let tokens = tokenize(input)?;
@@ -90,6 +99,12 @@ struct Parser {
 }
 
 const PREFIX_BP: u8 = 50;
+
+/// The function `A1#` is stored as: `_xlfn.ANCHORARRAY(A1)` in the file.
+pub const ANCHORARRAY: &str = "ANCHORARRAY";
+
+/// The function `@x` is stored as: `_xlfn.SINGLE(x)` in the file.
+pub const SINGLE: &str = "SINGLE";
 
 fn binary_op(token: &Token) -> Option<(BinaryOp, u8, u8)> {
     // (op, left binding power, recurse power). Every operator is left-associative,
@@ -189,12 +204,16 @@ impl Parser {
                     operand: Box::new(operand),
                 })
             }
+            Some(Token::At) => self.parse_intersection(),
             _ => self.parse_postfix(),
         }
     }
 
     fn parse_postfix(&mut self) -> Result<Expr, FormulaError> {
         let mut expr = self.parse_primary()?;
+        if self.peek() == Some(&Token::Hash) {
+            expr = self.spill_of(expr)?;
+        }
         while self.peek() == Some(&Token::Percent) {
             self.advance();
             expr = Expr::Unary {
@@ -210,17 +229,13 @@ impl Parser {
             Some(Token::Number(n)) => Ok(Expr::Number(n)),
             Some(Token::Text(s)) => Ok(Expr::Text(s)),
             Some(Token::Error(s)) => Ok(Expr::Error(s)),
+            Some(Token::LBrace) => self.parse_array(),
             Some(Token::LParen) => {
                 let expr = self.parse_expr(0)?;
                 self.expect(&Token::RParen)?;
                 Ok(expr)
             }
-            Some(Token::QuotedSheet(name)) => {
-                self.expect(&Token::Bang)?;
-                let word = self.expect_word()?;
-                let reference = self.reference_or_axis(&word, Some(name))?;
-                self.maybe_range(reference)
-            }
+            Some(Token::QuotedSheet(name)) => self.parse_quoted_sheet(name),
             // A bare `[Amount]`, which is how a formula inside the table
             // refers to its own columns.
             Some(Token::Brackets(spec)) => Ok(Expr::StructuredRef { table: None, spec }),
@@ -231,6 +246,18 @@ impl Parser {
     }
 
     fn parse_word(&mut self, word: String) -> Result<Expr, FormulaError> {
+        // `Sheet1:Sheet3!A1`: two sheet names and a bang. Looked for first,
+        // because `Sheet1` on its own would otherwise be tried as a reference.
+        // Only a name that may be written bare: Excel quotes a sheet named like
+        // a cell (`A1`, `R1C1`), so `A1:Sheet2!B2` is not a span from a
+        // sheet called A1.
+        if self.peek() == Some(&Token::Colon)
+            && matches!(self.tokens.get(self.pos + 1), Some(Token::Word(_)))
+            && self.tokens.get(self.pos + 2) == Some(&Token::Bang)
+            && !crate::reference::sheet_name_needs_quoting(&word)
+        {
+            return self.parse_3d_after(word);
+        }
         match self.peek() {
             Some(Token::LParen) => {
                 self.advance();
@@ -275,6 +302,103 @@ impl Parser {
         }
     }
 
+    // The constructs below are parsed **out of line** on purpose. The parser
+    // recurses through `parse_expr` → `parse_prefix` → `parse_postfix` →
+    // `parse_primary` → `parse_word`, so every local those functions hold is
+    // paid once per level of `SUM(SUM(…))`, and `MAX_DEPTH` is measured against
+    // a one-megabyte stack. Inlined into them, these grew the frames enough to
+    // overflow that stack under Rust 1.88's codegen (CI's MSRV job) while 1.96
+    // passed: a frame budget is a property of the compiler too. A call costs a
+    // frame only when the construct is actually there.
+
+    /// `@x`: implicit intersection of the operand that follows, stored — as
+    /// Excel stores it — as `SINGLE(x)`. It takes a primary (with its `%` and
+    /// `#`), never a prefixed expression, so `@@A1` and `@-A1` are refused and
+    /// the recursion is bounded.
+    #[inline(never)]
+    fn parse_intersection(&mut self) -> Result<Expr, FormulaError> {
+        self.advance();
+        let operand = self.parse_postfix()?;
+        Ok(Expr::Function {
+            name: SINGLE.to_owned(),
+            args: vec![operand],
+        })
+    }
+
+    /// `A1#`: the range the anchor spills into, stored — as Excel stores it —
+    /// as `ANCHORARRAY(A1)`. Only a single cell or a name can anchor a spill;
+    /// `A1:B2#` and `SUM(A1)#` are not references Excel accepts.
+    #[inline(never)]
+    fn spill_of(&mut self, expr: Expr) -> Result<Expr, FormulaError> {
+        let anchors = match &expr {
+            Expr::Reference(r) => !r.row_implicit && !r.col_implicit,
+            Expr::Name(_) => true,
+            _ => false,
+        };
+        if !anchors {
+            return Err(FormulaError::UnexpectedToken(
+                "# after something that is not a cell or a name".to_owned(),
+            ));
+        }
+        self.advance();
+        Ok(Expr::Function {
+            name: ANCHORARRAY.to_owned(),
+            args: vec![expr],
+        })
+    }
+
+    /// After `'Name'`: a sheet-qualified reference — or, when the quotes hold a
+    /// colon, a 3-D span written as one quoted pair (`'Jan 2026:Dec 2026'!B5`).
+    /// A colon cannot be part of a sheet name; Excel forbids it.
+    #[inline(never)]
+    fn parse_quoted_sheet(&mut self, name: String) -> Result<Expr, FormulaError> {
+        self.expect(&Token::Bang)?;
+        if let Some((first, last)) = name.split_once(':') {
+            if first.is_empty() || last.is_empty() {
+                return Err(FormulaError::InvalidReference(name));
+            }
+            return self.parse_3d(first.to_owned(), last.to_owned());
+        }
+        let word = self.expect_word()?;
+        let reference = self.reference_or_axis(&word, Some(name))?;
+        self.maybe_range(reference)
+    }
+
+    /// After a bare first sheet name, with `:Last!` still to consume.
+    #[inline(never)]
+    fn parse_3d_after(&mut self, first: String) -> Result<Expr, FormulaError> {
+        self.advance();
+        let Some(Token::Word(last)) = self.advance() else {
+            unreachable!("peeked a word")
+        };
+        self.advance();
+        self.parse_3d(first, last)
+    }
+
+    /// The area of a 3-D reference, after `first:last!`: a cell or a range on
+    /// each sheet of the span. The far corner names no sheet of its own.
+    #[inline(never)]
+    fn parse_3d(&mut self, first: String, last: String) -> Result<Expr, FormulaError> {
+        let word = self.expect_word()?;
+        let corner = self.reference_or_axis(&word, None)?;
+        let (start, end) = match self.maybe_range(corner)? {
+            Expr::Reference(start) => (start, None),
+            Expr::Range(start, end) if end.sheet.is_none() => (start, Some(end)),
+            other => {
+                return Err(FormulaError::InvalidReference(format!(
+                    "{first}:{last}!{other}"
+                )));
+            }
+        };
+        Ok(crate::ast::Reference3d {
+            first,
+            last,
+            start,
+            end,
+        }
+        .into_expr())
+    }
+
     /// Wrap `callee` in as many invocations as follow it.
     ///
     /// A loop rather than a single check, because `LAMBDA(x, LAMBDA(y, x+y))(1)(2)`
@@ -299,13 +423,35 @@ impl Parser {
     /// text and cannot know which cell will hold it.
     /// [`Workbook::store_formula_at`] re-stores it against the cell that does.
     fn maybe_range(&mut self, first: CellReference) -> Result<Expr, FormulaError> {
-        let first = StoredRef::absolute(&first);
         if self.peek() == Some(&Token::Colon) {
             self.advance();
-            let second = StoredRef::absolute(&self.parse_ref_operand()?);
+            let second = self.parse_ref_operand()?;
+            // A far end that names a sheet must name the near end's:
+            // `Sheet2!A1:Sheet2!B2` is one sheet's range, but `A1:Sheet2!B2`
+            // spans two sheets and is not a reference Excel accepts. It used
+            // to parse — as a range on the near end's sheet, printed back as
+            // `A1:Sheet2!B2` — and since 3-D references that text reads as
+            // something else entirely (found by fuzzing the round trip).
+            if let Some(far) = &second.sheet
+                && !first
+                    .sheet
+                    .as_deref()
+                    .is_some_and(|near| near.eq_ignore_ascii_case(far))
+            {
+                return Err(FormulaError::InvalidReference(format!("{first}:{second}")));
+            }
+            // Both ends must be the same shape: two cells, two columns or two
+            // rows. Excel refuses `A1:3` and `A:B2`, and a mixed range has no
+            // sensible meaning to evaluate (XL-FEAT-016).
+            if (first.row_implicit, first.col_implicit)
+                != (second.row_implicit, second.col_implicit)
+            {
+                return Err(FormulaError::InvalidReference(format!("{first}:{second}")));
+            }
+            let (first, second) = (StoredRef::absolute(&first), StoredRef::absolute(&second));
             Ok(Expr::Range(first, second))
         } else {
-            Ok(Expr::Reference(first))
+            Ok(Expr::Reference(StoredRef::absolute(&first)))
         }
     }
 
@@ -339,6 +485,73 @@ impl Parser {
             }
             Some(other) => Err(FormulaError::UnexpectedToken(format!("{other:?}"))),
             None => Err(FormulaError::UnexpectedToken("end of input".to_owned())),
+        }
+    }
+
+    /// The rest of an array constant, after its `{`.
+    ///
+    /// One pass, element by element: the cost is linear in the constant and the
+    /// count is checked as each element is read, so an oversized constant is
+    /// refused before it is built rather than after.
+    #[inline(never)]
+    fn parse_array(&mut self) -> Result<Expr, FormulaError> {
+        let mut rows: Vec<Vec<Expr>> = Vec::new();
+        let mut row: Vec<Expr> = Vec::new();
+        let mut count = 0usize;
+        loop {
+            row.push(self.array_element()?);
+            count += 1;
+            if count > MAX_ARRAY_CONSTANT {
+                return Err(FormulaError::TooLarge {
+                    limit: MAX_ARRAY_CONSTANT,
+                });
+            }
+            let end = match self.advance() {
+                Some(Token::Comma) => continue,
+                Some(Token::Semicolon) => false,
+                Some(Token::RBrace) => true,
+                Some(other) => {
+                    return Err(FormulaError::UnexpectedToken(format!(
+                        "{other:?} in an array constant"
+                    )));
+                }
+                None => {
+                    return Err(FormulaError::UnexpectedToken(
+                        "end of input in an array constant".to_owned(),
+                    ));
+                }
+            };
+            // Every row as wide as the first: Excel has no ragged constant.
+            if rows.first().is_some_and(|first| first.len() != row.len()) {
+                return Err(FormulaError::UnexpectedToken(
+                    "array constant rows of different lengths".to_owned(),
+                ));
+            }
+            rows.push(std::mem::take(&mut row));
+            if end {
+                return Ok(Expr::Array(rows));
+            }
+        }
+    }
+
+    /// One element of an array constant: a number (optionally negated), text,
+    /// a logical or an error value — and nothing else, as in Excel.
+    fn array_element(&mut self) -> Result<Expr, FormulaError> {
+        match self.advance() {
+            Some(Token::Number(n)) => Ok(Expr::Number(n)),
+            Some(Token::Minus) => match self.advance() {
+                Some(Token::Number(n)) => Ok(Expr::Number(-n)),
+                other => Err(FormulaError::UnexpectedToken(format!(
+                    "-{other:?} in an array constant"
+                ))),
+            },
+            Some(Token::Text(s)) => Ok(Expr::Text(s)),
+            Some(Token::Error(s)) => Ok(Expr::Error(s)),
+            Some(Token::Word(w)) if w.eq_ignore_ascii_case("TRUE") => Ok(Expr::Bool(true)),
+            Some(Token::Word(w)) if w.eq_ignore_ascii_case("FALSE") => Ok(Expr::Bool(false)),
+            other => Err(FormulaError::UnexpectedToken(format!(
+                "{other:?} in an array constant"
+            ))),
         }
     }
 
