@@ -22,6 +22,7 @@ import {
   chartFrames,
   chartHandlePoints,
   chartSel,
+  clearHeightMemo,
   colWAt,
   colXAt,
   collabRoster,
@@ -47,6 +48,7 @@ import {
   qsa,
   readColors,
   rebuildGrowth,
+  syncGrowth,
   refMirrors,
   refSpans,
   rowHAt,
@@ -191,12 +193,13 @@ export function measureRowHeight(it, colWidth) {
       .flatMap((seg) => wrapLines({ ...it, t: seg }, colWidth - 8));
     return lines.length * cellLineH(it) + 6;
   }
-  // Newlines make a cell tall even without wrap, which this did not account
-  // for: `autofitRow` had its own copy of this arithmetic that did, so the two
-  // disagreed about the same cell — and the copy was the one missing rotation.
-  // Both cases live here now.
-  const hard = String(it.t).split("\n").length;
-  if (hard > 1) return hard * cellLineH(it) + 6;
+  // A line break without Wrap Text does not make a row taller: Excel shows such
+  // a cell on one line (the break draws as nothing) and keeps the row's height.
+  // A break shows as a break only when Wrap Text is on — which is why Alt+Enter
+  // turns it on — and that case is the `it.w` branch above. Counting it here
+  // grew rows the sheet-wide growth map never counted, so a row's height
+  // depended on whether this cell was on screen (the owner's recording,
+  // 2026-10-17).
   // A tall font grows its row by the font's own box plus Excel's leading; at the
   // 11 pt default this comes to exactly the default row height, so an ordinary
   // styled row is left alone instead of being inflated by 25%.
@@ -205,7 +208,7 @@ export function measureRowHeight(it, colWidth) {
 }
 
 export function growthBefore(row) {
-  if (growthDirty) rebuildGrowth();
+  syncGrowth();
   if (!growthRows.length) return 0;
   // How many grown rows sit strictly above `row`.
   let lo = 0, hi = growthRows.length;
@@ -216,11 +219,16 @@ export function growthBefore(row) {
   return growthPrefix[lo];
 }
 
-export function fontStack(fn) {
-  const key = fn || "";
+/// The CSS font stack for a family, with the CJK faces for `region` (`jp`,
+/// `sc`, `tc`, `kr`) leading the East Asian fallback, or the default region's
+/// when `region` is empty (`XL-FEAT-140`).
+export function fontStack(fn, region = "") {
+  const key = (fn || "") + "\u0000" + region;
   let s = _fontStackCache.get(key);
   if (s === undefined) {
-    try { s = wasm.font_css_stack(key); } catch { s = "system-ui, sans-serif"; }
+    try {
+      s = region ? wasm.font_css_stack_for(fn || "", region) : wasm.font_css_stack(fn || "");
+    } catch { s = "system-ui, sans-serif"; }
     _fontStackCache.set(key, s);
   }
   return s;
@@ -229,7 +237,215 @@ export function fontStack(fn) {
 export function cellFont(it) {
   const weight = it.b ? "600 " : "";
   const slant = it.i ? "italic " : "";
-  return `${slant}${weight}${cellPx(it)}px ${fontStack(it.fn)}`;
+  const text = it.t == null ? "" : String(it.t);
+  // East Asian text picks the region its Han characters are drawn in — the
+  // font's own, or kana/hangul in the text, or the default — so the stack
+  // puts that region's face first (`XL-FEAT-140`).
+  const region = hasCjk(text) ? cjkRegion(it.fn, text) : "";
+  const font = `${slant}${weight}${cellPx(it)}px ${fontStack(it.fn, region)}`;
+  if (region) requestCjkLoad(font, text);
+  return font;
+}
+
+// ---------------------------------------------------------------------------
+// Japanese, Chinese and Korean faces (`XL-FEAT-140`)
+//
+// The faces are WOFF2 slices under `fonts/cjk/`, a few hundred characters
+// each, never in the WebAssembly binary. The manifest says which characters
+// each slice holds; every slice is registered as a `FontFace` with that
+// `unicode-range`, which downloads nothing — the browser fetches a slice only
+// when text in its range is drawn or measured. The same files are handed to
+// the engine before a PDF export (`ensureExportFonts`).
+// ---------------------------------------------------------------------------
+
+const CJK_RE = /[ᄀ-ᇿ⺀-⿟⿰-〿぀-鿿ꥠ-꥿가-퟿豈-﫿︐-︟︰-﹏＀-￯]|[\u{1f200}-\u{1f2ff}\u{20000}-\u{3134f}]/u;
+const CJK_BASE = new URL("./fonts/cjk/", import.meta.url);
+let cjkManifest = null;
+let cjkReady = null;
+let cjkFacesAdded = false;
+const cjkRegions = new Map();
+const cjkAsked = new Set();
+const cjkSlicesRegistered = new Set();
+const cjkRangeIndex = new Map();
+
+/// Whether `text` has a character the CJK faces draw.
+export function hasCjk(text) {
+  return CJK_RE.test(text);
+}
+
+function cjkRegion(fn, text) {
+  const key = (fn || "") + "\u0000" + text;
+  let r = cjkRegions.get(key);
+  if (r === undefined) {
+    try { r = wasm.cjk_region_for(fn || "", text); } catch { r = ""; }
+    if (cjkRegions.size >= 20_000) cjkRegions.clear();
+    cjkRegions.set(key, r);
+  }
+  return r;
+}
+
+/// The slice manifest, fetched once. `null` when the deployment does not ship
+/// the slices — the editor then draws CJK with the viewer's own fonts, as it
+/// did before, and an export names what it could not draw.
+export function loadCjkManifest() {
+  cjkManifest ??= fetch(new URL("manifest.json", CJK_BASE))
+    .then((r) => (r.ok ? r.json() : null))
+    .catch(() => null);
+  return cjkManifest;
+}
+
+function sliceUrl(manifest, key, index) {
+  const sha = manifest.variants[key]?.sha256_16?.[index] ?? "";
+  return new URL(`${key}/${String(index).padStart(3, "0")}.woff2${sha ? `?h=${sha}` : ""}`, CJK_BASE);
+}
+
+/// Register every slice as a `FontFace` (no downloads), once. Resolves when
+/// they are registered, so a caller can then ask the browser to load the ones
+/// some text needs.
+export function ensureCjkFaces() {
+  cjkReady ??= loadCjkManifest().then((m) => {
+    if (!m || typeof FontFace === "undefined") return false;
+    for (const [key, v] of Object.entries(m.variants)) {
+      (m.regions[v.region] || []).forEach((ranges, i) => {
+        if (!ranges) return;
+        const face = new FontFace(v.family, `url("${sliceUrl(m, key, i)}") format("woff2")`, {
+          weight: String(v.weight),
+          style: "normal",
+          display: "swap",
+          unicodeRange: ranges.split(",").map((p) => "U+" + p).join(","),
+        });
+        document.fonts.add(face);
+      });
+    }
+    cjkFacesAdded = true;
+    return true;
+  });
+  return cjkReady;
+}
+
+/// `font` narrowed to the one CJK family its stack leads the East Asian
+/// fallback with — the face that draws this text.
+///
+/// `document.fonts.load()` and `.check()` consider **every** family in a font
+/// string whose ranges meet the text, so asking with the whole stack fetched
+/// the slice of all four regions for each character: 85 slices for the
+/// fixture's twelve cells, where one region's are needed. Measured, not
+/// assumed — the browser gate counts the requests.
+function cjkLoadFont(font) {
+  const at = font.indexOf('"OpenCalc CJK ');
+  if (at < 0) return font;
+  const end = font.indexOf('"', at + 1);
+  const head = font.slice(0, font.search(/\d[\d.]*px/));
+  const size = font.match(/\d[\d.]*px/)?.[0] ?? "";
+  return `${head}${size} ${font.slice(at, end + 1)}`;
+}
+
+/// Ask the browser to load the slices `text` needs in `font`. Deduplicated; the
+/// redraw happens on `loadingdone`, below.
+function requestCjkLoad(font, text) {
+  const key = font + "\u0000" + text;
+  if (cjkAsked.has(key)) return;
+  if (cjkAsked.size >= 20_000) cjkAsked.clear();
+  cjkAsked.add(key);
+  void ensureCjkFaces().then((ok) => ok && document.fonts.load(cjkLoadFont(font), text)).catch(() => {});
+}
+
+/// Wait until the faces `text` needs in `font` are loaded. For autofit, which
+/// must measure with the face that will draw the text, not its stand-in.
+export async function cjkFontsLoaded(font, text) {
+  if (!(await ensureCjkFaces())) return;
+  try { await document.fonts.load(cjkLoadFont(font), text); } catch {}
+}
+
+/// Whether `font` can measure `text` with its real faces right now. False
+/// until the slices are registered at all: before that the browser has no
+/// face to wait for and would answer "ready" about a stand-in.
+export function cjkFontsReady(font, text) {
+  if (!hasCjk(text)) return true;
+  if (!cjkFacesAdded) return false;
+  try { return document.fonts.check(cjkLoadFont(font), text); } catch { return true; }
+}
+
+// A slice arriving changes how wide text is: every cached width and height is
+// stale, and the grid is redrawn with the real glyphs.
+if (typeof document !== "undefined" && document.fonts?.addEventListener) {
+  document.fonts.addEventListener("loadingdone", () => {
+    textWidthCache.clear();
+    try { clearHeightMemo(); invalidateGrowth(); } catch {}
+    try { draw(); } catch {}
+  });
+}
+
+function sliceFor(manifest, region, cp) {
+  let spans = cjkRangeIndex.get(region);
+  if (!spans) {
+    spans = [];
+    (manifest.regions[region] || []).forEach((line, i) => {
+      for (const part of line.split(",")) {
+        if (!part) continue;
+        const [a, b] = part.split("-");
+        spans.push([parseInt(a, 16), parseInt(b ?? a, 16), i]);
+      }
+    });
+    spans.sort((x, y) => x[0] - y[0]);
+    cjkRangeIndex.set(region, spans);
+  }
+  let lo = 0, hi = spans.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (spans[mid][0] <= cp) lo = mid + 1; else hi = mid;
+  }
+  const hit = spans[lo - 1];
+  return hit && cp <= hit[1] ? hit[2] : -1;
+}
+
+/// Hand the engine the slices a PDF of `sheet` needs (`XL-FEAT-140`).
+///
+/// The engine names what it wants — per character, the variant meant for it
+/// and where to look next — this fetches the slice of the first variant whose
+/// ranges hold it, registers it, and asks again until nothing new is wanted.
+/// A slice that fails to arrive is not fatal: the export names the
+/// characters it could not draw in its report. Returns how many were fetched.
+export async function ensureExportFonts(sheet) {
+  const m = await loadCjkManifest();
+  if (!m) return 0;
+  let fetched = 0;
+  const tried = new Set();
+  for (let round = 0; round < 3; round += 1) {
+    let needs;
+    try { needs = JSON.parse(wasm.session_export_pdf_font_needs(sheet)); } catch { return fetched; }
+    const files = new Map();
+    for (const { chain, chars } of needs) {
+      for (const ch of chars) {
+        for (const key of chain) {
+          const v = m.variants[key];
+          if (!v) continue;
+          const index = sliceFor(m, v.region, ch.codePointAt(0));
+          if (index < 0) continue;
+          const name = `${key}/${index}`;
+          if (!cjkSlicesRegistered.has(name) && !tried.has(name)) files.set(name, [key, index]);
+          break;
+        }
+      }
+    }
+    if (!files.size) return fetched;
+    const queue = [...files.entries()];
+    const worker = async () => {
+      while (queue.length) {
+        const [name, [key, index]] = queue.shift();
+        tried.add(name);
+        try {
+          const r = await fetch(sliceUrl(m, key, index));
+          if (!r.ok) continue;
+          wasm.register_font_slice(key, new Uint8Array(await r.arrayBuffer()));
+          cjkSlicesRegistered.add(name);
+          fetched += 1;
+        } catch {}
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(8, queue.length) }, worker));
+  }
+  return fetched;
 }
 
 export function runFont(it, run) {
@@ -244,7 +460,11 @@ export function runFont(it, run) {
   const px = run.va ? Math.max(7, cellPx(merged) * 0.72) : cellPx(merged);
   const weight = merged.b ? "600 " : "";
   const slant = merged.i ? "italic " : "";
-  return `${slant}${weight}${px}px ${fontStack(merged.fn)}`;
+  const text = run.t == null ? "" : String(run.t);
+  const region = hasCjk(text) ? cjkRegion(merged.fn, text) : "";
+  const font = `${slant}${weight}${px}px ${fontStack(merged.fn, region)}`;
+  if (region) requestCjkLoad(font, text);
+  return font;
 }
 
 export function runsWidth(it) {

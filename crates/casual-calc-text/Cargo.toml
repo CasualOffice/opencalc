@@ -13,6 +13,11 @@ workspace = true
 # Outlines and metrics from the bundled face bytes. The crate ttf-parser's own
 # advisory recommends (see DEP-14).
 skrifa = "0.46"
+# The CJK slices are WOFF2, served to browsers and handed to the exporters as
+# the same files (`XL-FEAT-140`). Written with the null glyf transform, so
+# reading one is brotli plus table reassembly — this crate is the brotli.
+# Pure Rust, no `unsafe` with default features, BSD-3-Clause/MIT.
+brotli-decompressor = "5"
 
 [features]
 # Off by default, and that default matters. `casual-calc-layout` depends on this

@@ -95,8 +95,19 @@ pub fn substitute(family: &str) -> Option<Substitute> {
     if key.is_empty() {
         return None;
     }
-    Some(known_family(&key).unwrap_or(Substitute {
-        family: classify_generic(&key),
+    Some(known_family(&key).unwrap_or_else(|| Substitute {
+        // An East Asian font's Latin stand-in: its own slice draws the Latin
+        // too once loaded (`XL-FEAT-140`), and until then — and for the
+        // ascent and descent a cell is centred by — a sans or serif Latin
+        // face in the same style, rather than a guess from the name's letters
+        // ("ＭＳ 明朝" contains no "serif").
+        family: crate::cjk::east_asian(family).map_or_else(
+            || classify_generic(&key),
+            |(_, style)| match style {
+                crate::cjk::Style::Sans => &LIBERATION_SANS,
+                crate::cjk::Style::Serif => &LIBERATION_SERIF,
+            },
+        ),
         kind: SubstituteKind::Generic,
     }))
 }
@@ -176,18 +187,63 @@ fn classify_generic(key: &str) -> &'static BundledFamily {
 /// the bundled fonts), then the originally-requested name (honoring a real
 /// installed face as a last-resort visual match), then the generic. A blank
 /// request yields the default family.
+///
+/// # East Asian text (`XL-FEAT-140`)
+///
+/// An East Asian font (`游ゴシック`, `SimSun`, …) leads with the CJK face mapped
+/// for it, which draws its Latin too, as Excel's does. Every stack then lists
+/// the four regional CJK faces — the region the text belongs to first
+/// ([`crate::cjk::region_for`]), then the rest in [`crate::cjk::Region::ALL`]
+/// order — so a character the Latin face lacks falls back to a face this
+/// project ships rather than to whatever the viewer has installed, and the
+/// browser walks the same chain the exporters do.
+///
+/// The CJK faces are registered with `unicode-range`, so listing them costs
+/// nothing for a cell with no CJK text in it: the browser downloads a slice
+/// only when a character in its range is drawn.
 #[must_use]
 pub fn css_stack(requested: &str) -> String {
+    css_stack_for(requested, crate::cjk::default_region())
+}
+
+/// [`css_stack`] with the region the cell's text belongs to.
+#[must_use]
+pub fn css_stack_for(requested: &str, region: crate::cjk::Region) -> String {
+    use crate::cjk::{Style, Variant, css_family, east_asian};
     let req = requested.trim();
+    let own = east_asian(req);
+    let (region, style) = own.unwrap_or_else(|| {
+        let serif = substitute(req).is_some_and(|s| s.family.generic == "serif");
+        (region, if serif { Style::Serif } else { Style::Sans })
+    });
+    let cjk: Vec<String> = Variant::new(region, style, false)
+        .chain()
+        .iter()
+        .map(|v| format!("\"{}\"", css_family(v.region, v.style)))
+        .collect();
+    let cjk = cjk.join(", ");
     let Some(sub) = substitute(req) else {
-        return format!("\"{}\", {}", ROBOTO.name, ROBOTO.generic);
+        return format!("\"{}\", {cjk}, {}", ROBOTO.name, ROBOTO.generic);
     };
-    if sub.family.name.eq_ignore_ascii_case(req) {
-        format!("\"{}\", {}", sub.family.name, sub.family.generic)
+    // CSS strings: a name with a quote or backslash in it is escaped rather
+    // than allowed to end the string early.
+    let quoted = req.replace('\\', "\\\\").replace('"', "\\\"");
+    if own.is_some() {
+        // The mapped face first, then the name itself (a machine that has the
+        // real font still shows it for anything the slice lacks), then the
+        // Latin stand-in and the other regions.
+        let first = css_family(region, style);
+        let rest = cjk.replacen(&format!("\"{first}\", "), "", 1);
+        format!(
+            "\"{first}\", \"{quoted}\", \"{}\", {rest}, {}",
+            sub.family.name, sub.family.generic
+        )
+    } else if sub.family.name.eq_ignore_ascii_case(req) {
+        format!("\"{}\", {cjk}, {}", sub.family.name, sub.family.generic)
     } else {
         format!(
-            "\"{}\", \"{}\", {}",
-            sub.family.name, req, sub.family.generic
+            "\"{}\", \"{quoted}\", {cjk}, {}",
+            sub.family.name, sub.family.generic
         )
     }
 }
@@ -332,14 +388,45 @@ mod tests {
 
     #[test]
     fn css_stack_shape() {
-        assert_eq!(css_stack("Calibri"), "\"Carlito\", \"Calibri\", sans-serif");
+        use crate::cjk::Region;
+        const JP: &str = "\"OpenCalc CJK JP Sans\", \"OpenCalc CJK SC Sans\", \
+                          \"OpenCalc CJK TC Sans\", \"OpenCalc CJK KR Sans\"";
         assert_eq!(
-            css_stack("Arial"),
-            "\"Liberation Sans\", \"Arial\", sans-serif"
+            css_stack_for("Calibri", Region::Jp),
+            format!("\"Carlito\", \"Calibri\", {JP}, sans-serif")
+        );
+        assert_eq!(
+            css_stack_for("Arial", Region::Jp),
+            format!("\"Liberation Sans\", \"Arial\", {JP}, sans-serif")
         );
         // A bundled family requested by its own name isn't duplicated.
-        assert_eq!(css_stack("Carlito"), "\"Carlito\", sans-serif");
+        assert_eq!(
+            css_stack_for("Carlito", Region::Jp),
+            format!("\"Carlito\", {JP}, sans-serif")
+        );
         // Blank → default family.
-        assert_eq!(css_stack(""), "\"Roboto\", sans-serif");
+        assert_eq!(
+            css_stack_for("", Region::Jp),
+            format!("\"Roboto\", {JP}, sans-serif")
+        );
+        // The text's region leads; a serif Latin font falls back to serif CJK.
+        assert!(
+            css_stack_for("Calibri", Region::Kr)
+                .contains("\"Calibri\", \"OpenCalc CJK KR Sans\", \"OpenCalc CJK JP Sans\"")
+        );
+        assert!(
+            css_stack_for("Times New Roman", Region::Jp)
+                .contains("\"Times New Roman\", \"OpenCalc CJK JP Serif\"")
+        );
+        // An East Asian font leads with its own face, keeps its name, and
+        // puts the Latin stand-in before the other regions.
+        assert_eq!(
+            css_stack_for("ＭＳ 明朝", Region::Kr),
+            "\"OpenCalc CJK JP Serif\", \"ＭＳ 明朝\", \"Liberation Serif\", \
+             \"OpenCalc CJK SC Serif\", \"OpenCalc CJK TC Serif\", \
+             \"OpenCalc CJK KR Serif\", serif"
+        );
+        // A quote in a font name cannot end the CSS string.
+        assert!(css_stack_for("Evil\" Font", Region::Jp).contains("\"Evil\\\" Font\""));
     }
 }

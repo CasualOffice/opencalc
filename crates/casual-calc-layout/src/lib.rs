@@ -32,7 +32,8 @@ pub use display::{Align, BorderLine, DisplayList, PaintItem, Point, Rect};
 // did — and is still the one substitution table, now somewhere the faces
 // themselves can see it.
 pub use casual_calc_text::substitution::{
-    BundledFamily, PICKER_FAMILIES, Substitute, SubstituteKind, css_stack, substitute,
+    BundledFamily, PICKER_FAMILIES, Substitute, SubstituteKind, css_stack, css_stack_for,
+    substitute,
 };
 pub use geometry::{DEFAULT_COL_WIDTH, DEFAULT_ROW_HEIGHT, GridGeometry};
 pub use numfmt::{

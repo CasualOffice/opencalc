@@ -50,7 +50,7 @@ Consequences the design accounts for from the start:
 > into the AST and stores it in the model's arena. Since added: whole columns and
 > rows (`A:A`, `1:1`), structured (table) references, array constants, `A1#`
 > and `@`, and 3-D references — the last four in
-> [101](101-FORMULA-GRAMMAR-EXTENSIONS.md). Deferred: R1C1 and the
+> [102](102-FORMULA-GRAMMAR-EXTENSIONS.md). Deferred: R1C1 and the
 > union/intersection operators.
 
 ### Tokenizer & parser

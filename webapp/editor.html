@@ -552,7 +552,8 @@
            `<textarea>`, for exactly this reason, with the comment saying so.
 
            `rows="1"` keeps it one line tall when collapsed; the expanded height
-           comes from CSS. `Enter` still commits, because the key handler calls
+           is whole lines, set by `editor.formula-bar.js` (three by default, or
+           what the bar's bottom edge was dragged to this session). `Enter` still commits, because the key handler calls
            `preventDefault()` before the textarea's own newline — and there is a
            test for that, since it is the regression this change most easily
            causes. -->

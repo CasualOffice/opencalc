@@ -15,7 +15,7 @@
 //! references, defined names, function calls and `LAMBDA` invocation, unary
 //! `+`/`-`/`%`, and the binary arithmetic/comparison/concat operators with
 //! correct precedence. Deferred: R1C1 and the union/intersection operators.
-//! The grammar extensions are designed in `docs/101-FORMULA-GRAMMAR-EXTENSIONS.md`.
+//! The grammar extensions are designed in `docs/102-FORMULA-GRAMMAR-EXTENSIONS.md`.
 //!
 //! See `docs/40-FORMULA-AND-CALC-ENGINE-ARCHITECTURE.md`.
 

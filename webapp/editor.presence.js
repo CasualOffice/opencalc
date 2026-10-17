@@ -97,6 +97,12 @@ export function mirrorFor(surface) {
   // Inserted as a sibling so it shares the surface's containing block.
   surface.parentNode.insertBefore(m, surface);
   refMirrors.set(surface, m);
+  // A multi-line surface scrolls by wheel and scrollbar too, not only when its
+  // text changes; the tint has to move with it or it slides off its tokens.
+  surface.addEventListener("scroll", () => {
+    m.scrollTop = surface.scrollTop;
+    m.scrollLeft = surface.scrollLeft;
+  }, { passive: true });
   return m;
 }
 
@@ -106,8 +112,13 @@ export function syncMirrorBox(surface, m) {
     "fontFamily", "fontSize", "fontWeight", "fontStyle", "letterSpacing",
     "lineHeight", "textIndent", "paddingTop", "paddingRight", "paddingBottom",
     "paddingLeft", "borderTopWidth", "borderRightWidth", "borderBottomWidth",
-    "borderLeftWidth", "boxSizing", "whiteSpace", "textAlign",
+    "borderLeftWidth", "boxSizing", "whiteSpace", "textAlign", "overflowWrap", "wordBreak",
   ]) m.style[prop] = cs[prop];
+  // A vertical scrollbar narrows the surface's text box; the mirror has none,
+  // so it is given the same width back as padding or the two wrap differently.
+  const bar = surface.offsetWidth - surface.clientWidth
+    - (parseFloat(cs.borderLeftWidth) || 0) - (parseFloat(cs.borderRightWidth) || 0);
+  if (bar > 0) m.style.paddingRight = (parseFloat(cs.paddingRight) || 0) + bar + "px";
   m.style.left = surface.offsetLeft + "px";
   m.style.top = surface.offsetTop + "px";
   m.style.width = surface.offsetWidth + "px";

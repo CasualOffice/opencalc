@@ -62,7 +62,7 @@ test("OK defines the name with its scope and comment", async ({ page }) => {
   expect(await names(page)).toEqual([
     { name: "TaxRate", refersTo: `${q[0]}!$B$2`, sheet: 1, scope: sheets[1], comment: "Standard VAT", hidden: false },
   ]);
-  expect(await page.evaluate(() => document.activeElement?.id)).toBe("grid");
+  expect(await page.evaluate(() => window.opencalcEditor.gridHasKeyboard())).toBe(true);
 });
 
 for (const bad of ["my name", "A1", "R1C1", "1st", "C", "Sales-Tax"]) {
@@ -71,7 +71,10 @@ for (const bad of ["my name", "A1", "R1C1", "1st", "C", "Sales-Tax"]) {
     await page.evaluate(() => window.opencalcEditor.runCommand("formulas.define-name"));
     await field(page, "name").fill(bad);
     await page.keyboard.press("Enter");
-    await expect(page.locator("#oc-name-error")).toContainText(INVALID);
+    // Excel's message box over the dialog (XL-UX-168).
+    await expect(page.locator("#oc-msgbox-text")).toContainText(INVALID);
+    await page.keyboard.press("Enter");
+    await expect(field(page, "name")).toBeFocused();
     await expect(modal(page)).toBeVisible();
     await expect(field(page, "name")).toHaveValue(bad);
     expect(await names(page)).toEqual([]);
@@ -84,7 +87,8 @@ test("a name is unique within its scope, not across scopes", async ({ page }) =>
   await page.evaluate(() => window.opencalcEditor.runCommand("formulas.define-name"));
   await field(page, "name").fill("rate");
   await ok(page).click();
-  await expect(page.locator("#oc-name-error")).toHaveText(DUPLICATE);
+  await expect(page.locator("#oc-msgbox-text")).toHaveText(DUPLICATE);
+  await page.keyboard.press("Enter");
   await expect(modal(page)).toBeVisible();
   await field(page, "scope").selectOption({ index: 1 });
   await ok(page).click();

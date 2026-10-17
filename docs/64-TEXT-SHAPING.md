@@ -89,6 +89,14 @@ twenty without this crate changing.
 What stays embedded is Latin, because something has to work with no
 configuration at all.
 
+**CJK is now shipped, on the same terms** (`XL-FEAT-140`,
+[101](101-CJK-FONTS.md)): the faces are files the host serves and supplies —
+unicode-range slices under `webapp/fonts/cjk/`, registered with
+`register_font_slice` — never bytes in the WebAssembly binary. The decision
+above stands; what changed is that this project now provides the files for the
+four CJK regions, because Excel's own East Asian fonts are part of what an
+`.xlsx` asks for. Arabic, Devanagari and Thai remain host-supplied.
+
 `register_face` returns whether the bytes were a readable face. The realistic
 failure is a host fetching a font URL and getting an error page; storing that
 would produce a renderer searching an HTML document for glyphs, and a thumbnail
@@ -151,8 +159,9 @@ per-character mapping **reversed** — visual order rather than memory order,
 which is the thing the old path cannot produce. Asserted as a relationship
 rather than as fixed ids, because the ids belong to whichever face is bundled.
 
-**Coverage itself** is a test: Latin and Hebrew covered, Arabic, Devanagari,
-Thai and CJK not. It fails if that changes, so adding a font is a deliberate act
+**Coverage itself** is a test: Latin and Hebrew covered, Arabic, Devanagari
+and Thai not. (CJK left this list with `XL-FEAT-140`: whether it is covered now
+depends on which slices a host has registered.) It fails if that changes, so adding a font is a deliberate act
 with a size cost rather than something noticed in a screenshot.
 
 **The existing PNG fidelity tests**, unchanged and now running with shaping on.

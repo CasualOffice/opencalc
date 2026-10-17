@@ -52,7 +52,10 @@ This overrides three earlier decisions:
    Excel raises one, inline only where Excel is inline. Owner, 2026-10-17:
    *"assume it as clone of excel .. in terms of UI as well as UX and user
    flows"*. This replaces the 2026-10-14 inline decision (XL-UX-147); the
-   inline messages already shipped are converted under XL-UX-168.
+   inline messages already shipped are converted under XL-UX-168. Every such
+   box is the one `messageBox` component. It is titled "OpenCalc" where
+   Excel's says "Microsoft Excel", with OK focused. Dismissing it returns the
+   focus to the field the message is about, with that field's text selected.
 9. **Excel is the specification.** UI, UX and user flows follow Excel; a
    difference is allowed only where a browser cannot do what Excel does (local
    files, the file system, OS dialogs) or for our own assets (name, logo,

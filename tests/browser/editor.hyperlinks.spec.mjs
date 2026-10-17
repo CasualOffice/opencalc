@@ -88,7 +88,10 @@ test.describe("following a link (XL-FEAT-139)", () => {
     await boot(page);
     await link(page, 1, 1, "", "Nowhere!C7");
     await clickCell(page, 1, 1);
-    await expect(page.locator("#tb-status")).toContainText("Reference isn't valid.");
+    // Excel's message box (XL-UX-168), where this was a status-bar line.
+    await expect(page.locator("#oc-msgbox-text")).toHaveText("Reference isn't valid.");
+    await page.keyboard.press("Enter");
+    await expect(page.locator("#oc-msgbox")).toBeHidden();
     expect(await sheet(page)).toBe(0);
     // The click selects the link's own cell; the link must not move it on.
     expect(await sel(page)).toEqual({ r0: 1, c0: 1, r1: 1, c1: 1 });
@@ -166,14 +169,18 @@ test.describe("following a link (XL-FEAT-139)", () => {
       await boot(page);
       await link(page, 1, 1, target, "");
       await clickCell(page, 1, 1);
+      // Excel's message box (XL-UX-168), where this was a status-bar line.
+      await expect(page.locator("#oc-msgbox-text")).toHaveText("Cannot open the specified file.");
+      await page.keyboard.press("Enter");
+      await expect(page.locator("#oc-msgbox")).toBeHidden();
       await ed(page, ([t]) => {
         const e = window.opencalcEditor;
         e.wasmApi().session_set_cell(0, 3, 3, `=HYPERLINK("${t.replace(/"/g, '""')}","x")`);
         e.draw();
       }, [target]);
       await clickCell(page, 3, 3);
+      await expect(page.locator("#oc-msgbox-text")).toHaveText("Cannot open the specified file.");
       expect(await opened(page), "nothing may be opened").toEqual([]);
-      await expect(page.locator("#tb-status")).toContainText("Cannot open the specified file.");
     });
   }
 
@@ -274,13 +281,15 @@ test.describe("Insert Hyperlink dialog (XL-UX-164)", () => {
     expect(await cellText(page, 1, 1)).toBe("example.com/docs");
   });
 
-  test("an address that is not web or e-mail is refused inline, dialog kept", async ({ page }) => {
+  test("an address that is not web or e-mail is refused in a message box, dialog kept", async ({ page }) => {
     await boot(page);
     await openDialog(page, 1, 1);
     await page.locator("#oc-link-address").fill("javascript:alert(1)");
     await page.locator("#oc-modal .oc-btn.primary").click();
     await expect(modal(page)).toBeVisible();
-    await expect(page.locator("#oc-link-address-error")).toBeVisible();
+    await expect(page.locator("#oc-msgbox-text")).toHaveText("Only web (http, https) and e-mail addresses can be linked.");
+    await page.keyboard.press("Enter");
+    await expect(page.locator("#oc-link-address")).toBeFocused();
     await expect(page.locator("#oc-link-address")).toHaveValue("javascript:alert(1)");
     expect(await linkAt(page, 1, 1)).toBeNull();
   });
@@ -324,18 +333,19 @@ test.describe("Insert Hyperlink dialog (XL-UX-164)", () => {
     expect((await linkAt(page, 2, 2)).location).toBe("Totals");
   });
 
-  test("an invalid cell reference is answered inline in Excel's words", async ({ page }) => {
+  test("an invalid cell reference is answered in Excel's words and Excel's message box", async ({ page }) => {
     await boot(page);
     await openDialog(page, 1, 1);
     await page.locator("#oc-link-to-place").click();
     await page.locator("#oc-link-ref").fill("not a ref");
     await page.locator("#oc-modal .oc-btn.primary").click();
     await expect(modal(page)).toBeVisible();
-    await expect(page.locator("#oc-link-ref-error")).toHaveText("Reference isn't valid.");
+    // A box over the dialog (docs/95 rule 8, XL-UX-168), which stays open.
+    await expect(page.locator("#oc-msgbox-text")).toHaveText("Reference isn't valid.");
+    await page.keyboard.press("Enter");
+    await expect(page.locator("#oc-msgbox")).toBeHidden();
     await expect(page.locator("#oc-link-ref")).toHaveValue("not a ref");
-    await expect(page.locator("#oc-link-ref")).toHaveAttribute("aria-invalid", "true");
-    // One dialog: the message is not a box over it.
-    expect(await page.locator(".oc-modal:visible, #oc-modal:visible").count()).toBe(1);
+    await expect(page.locator("#oc-link-ref")).toBeFocused();
     expect(await linkAt(page, 1, 1)).toBeNull();
   });
 

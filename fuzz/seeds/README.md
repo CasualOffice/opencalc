@@ -40,7 +40,7 @@ which is the point: the question is not whether a fuzzer can be kept out, it is
 whether anything it builds is **accepted**.
 
 `formula_parse/` is one formula per file for each construct the grammar has
-grown beyond the arithmetic core ([101](../../docs/101-FORMULA-GRAMMAR-EXTENSIONS.md)):
+grown beyond the arithmetic core ([102](../../docs/102-FORMULA-GRAMMAR-EXTENSIONS.md)):
 whole-row references, array constants, the spill and implicit-intersection
 operators, and 3-D references. Each one adds tokens (`{`, `;`, `#`, `@`, a
 digit run read as a row) that a fuzzer mutating `1+1` would take a long time to
