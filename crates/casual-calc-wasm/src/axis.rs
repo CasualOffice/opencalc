@@ -242,6 +242,63 @@ pub fn session_spill_owners(sheet: usize, r0: u32, r1: u32, c0: u32, c1: u32) ->
     .unwrap_or_else(|| "{\"left\":null,\"right\":null}".to_owned())
 }
 
+/// Every centre-across-selection run in rows `r0..=r1` that reaches columns
+/// `c0..=c1`, as `[{"r":row,"c0":label,"c1":last}]`.
+///
+/// A run is a label cell carrying `centerContinuous` followed by the empty
+/// cells that also carry it; the label is centred over all of them. The host
+/// asks for its window, and a run is usually wider than the part of it on
+/// screen — so deciding the extent from the window's cells centred the label
+/// over whatever happened to be visible, and lost it entirely once the label
+/// cell scrolled out (`XL-UX-183`). Answered here from the row's own cells,
+/// which is bounded by the populated cells of the visible rows, the same scan
+/// [`session_spill_owners`] makes.
+#[wasm_bindgen]
+pub fn session_center_across_runs(sheet: usize, r0: u32, r1: u32, c0: u32, c1: u32) -> String {
+    with_session(|s| {
+        let wb = s.workbook();
+        let Some(sh) = wb.sheets.get(sheet) else {
+            return "[]".to_owned();
+        };
+        let mut out: Vec<String> = Vec::new();
+        // The open run: (row, label column, last column so far).
+        let mut open: Option<(u32, u32, u32)> = None;
+        let close = |run: Option<(u32, u32, u32)>, out: &mut Vec<String>| {
+            if let Some((r, lc, last)) = run
+                && last >= c0
+                && lc <= c1
+            {
+                out.push(format!("{{\"r\":{r},\"c0\":{lc},\"c1\":{last}}}"));
+            }
+        };
+        for (at, cell) in sh.cells.row_band(r0, r1) {
+            let cont = cell
+                .style
+                .and_then(|id| wb.styles.get(id))
+                .and_then(|st| st.align)
+                .is_some_and(|a| a == HAlign::CenterContinuous);
+            let has_text = !(cell.value.is_empty() && cell.formula.is_none());
+            // An empty `centerContinuous` cell directly after the run extends it.
+            if let Some((r, lc, last)) = open
+                && cont
+                && !has_text
+                && at.row == r
+                && at.col == last + 1
+            {
+                open = Some((r, lc, at.col));
+                continue;
+            }
+            close(open.take(), &mut out);
+            if cont && has_text {
+                open = Some((at.row, at.col, at.col));
+            }
+        }
+        close(open.take(), &mut out);
+        format!("[{}]", out.join(","))
+    })
+    .unwrap_or_else(|| "[]".to_owned())
+}
+
 /// Absolute pixel offset (96 dpi) of a row's top edge from row 0.
 #[wasm_bindgen]
 pub fn session_row_offset_px(sheet: usize, row: u32) -> i32 {
@@ -1516,6 +1573,43 @@ mod show_formulas_tests {
         assert!(
             hits.contains("\"r\":4"),
             "Find did not see the formula: {hits}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod center_across_tests {
+    use super::{session_center_across_runs, session_new, session_set_align, session_set_cell};
+
+    /// **A run is the label plus the empty `centerContinuous` cells after it,
+    /// whatever part of it is asked about.** The host asks for its window; the
+    /// answer must be the whole run, or the label is centred over the visible
+    /// part only and moves as the sheet scrolls (`XL-UX-183`).
+    #[test]
+    fn a_run_is_reported_whole_from_any_window_that_touches_it() {
+        session_new();
+        session_set_cell(0, 3, 1, "Title").unwrap();
+        session_set_align(0, 3, 1, 3, 11, "centerContinuous").unwrap();
+        let whole = "[{\"r\":3,\"c0\":1,\"c1\":11}]";
+        // From the left part, the right part, and a window past the label.
+        assert_eq!(session_center_across_runs(0, 0, 10, 0, 3), whole);
+        assert_eq!(session_center_across_runs(0, 0, 10, 9, 20), whole);
+        assert_eq!(session_center_across_runs(0, 3, 3, 6, 6), whole);
+        // A window that misses it entirely.
+        assert_eq!(session_center_across_runs(0, 0, 10, 12, 20), "[]");
+    }
+
+    /// A second label inside the cells starts a run of its own: each label is
+    /// centred over its own empty followers, never over the next label.
+    #[test]
+    fn a_second_label_ends_the_first_run() {
+        session_new();
+        session_set_align(0, 0, 0, 0, 7, "centerContinuous").unwrap();
+        session_set_cell(0, 0, 0, "one").unwrap();
+        session_set_cell(0, 0, 4, "two").unwrap();
+        assert_eq!(
+            session_center_across_runs(0, 0, 0, 0, 7),
+            "[{\"r\":0,\"c0\":0,\"c1\":3},{\"r\":0,\"c0\":4,\"c1\":7}]"
         );
     }
 }
