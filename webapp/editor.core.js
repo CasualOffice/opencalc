@@ -62,6 +62,7 @@ import {
   confirmModal,
   messageBox,
   selectBoxes,
+  sheetRef,
   customFormatDialog,
   deleteSheetWithConfirm,
   formatCellsDialog,
@@ -519,6 +520,7 @@ export {
   confirmModal,
   messageBox,
   selectBoxes,
+  sheetRef,
   customFormatDialog,
   deleteSheetWithConfirm,
   formatCellsDialog,
@@ -4716,7 +4718,7 @@ export function buildChartPanel(body) {
     c.series.push({
       name: "",
       categories: c.series[0] ? c.series[0].categories : null,
-      values: `${/^[A-Za-z_][A-Za-z0-9_.]*$/.test(sheetName) ? sheetName : `'${sheetName.replace(/'/g, "''")}'`}!$${colName(r.c0)}$${r.r0 + 1}:$${colName(r.c1)}$${r.r1 + 1}`,
+      values: `${sheetRef(sheetName)}!$${colName(r.c0)}$${r.r0 + 1}:$${colName(r.c1)}$${r.r1 + 1}`,
     });
     applyChart(c);
   });
@@ -4933,7 +4935,7 @@ export function buildPivotPanel(body) {
   body.appendChild(name);
 
   const src = el("div", "panel-range",
-    `${sheetNameAt(p.sourceSheet) || "?"}!${A1(p.source[0], p.source[1])}:${A1(p.source[2], p.source[3])}`);
+    `${sheetNameAt(p.sourceSheet) ? sheetRef(sheetNameAt(p.sourceSheet)) : "?"}!${A1(p.source[0], p.source[1])}:${A1(p.source[2], p.source[3])}`);
   body.appendChild(src);
   if (p.imported) {
     body.appendChild(el("div", "panel-note",

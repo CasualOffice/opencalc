@@ -33,6 +33,7 @@ import {
   commandRules,
   confirmModal,
   messageBox,
+  sheetRef,
   ctx,
   draw,
   editHome,
@@ -1893,8 +1894,7 @@ export function insertRef(text) {
   // it is not a bare word, and double any quote inside it, as Excel does.
   if (editHome && editHome.sheet !== state.sheet) {
     const name = sheetNameAt(state.sheet) || "";
-    const q = /^[A-Za-z_][A-Za-z0-9_.]*$/.test(name) ? name : `'${name.replace(/'/g, "''")}'`;
-    text = `${q}!${text}`;
+    text = `${sheetRef(name)}!${text}`;
   }
   const pending = formulaRefDrag ?? pointMode;
   const val = editSurface.value;

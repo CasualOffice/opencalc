@@ -24,6 +24,7 @@ import {
   findState,
   messageBox,
   selectBoxes,
+  sheetRef,
   invalidateGrowth,
   navBlock,
   select,
@@ -654,7 +655,7 @@ export function gotoName(v) {
     const r = effectiveRange();
     const names = JSON.parse(wasm.session_sheet_names());
     const sn = names[state.sheet] || "Sheet1";
-    const q = /[^A-Za-z0-9_]/.test(sn) ? `'${sn.replace(/'/g, "''")}'` : sn;
+    const q = sheetRef(sn);
     const refers = `${q}!${A1(r.r0, r.c0)}:${A1(r.r1, r.c1)}`;
     try { wasm.session_define_name(s, refers); status.textContent = `defined name “${s}”`; }
     catch (e) { statusError(errText(e)); }

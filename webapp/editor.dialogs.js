@@ -2152,10 +2152,7 @@ export function hyperlinkDialog() {
   }
 
   /// The address a mode would link to, as Excel shows it in Text to display.
-  const sheetPrefix = (i) => {
-    const n = sheetNames[i] ?? "";
-    return /^[A-Za-z_][A-Za-z0-9_.]*$/.test(n) && !/^[A-Za-z]{1,3}\d+$/.test(n) ? n : `'${n.replace(/'/g, "''")}'`;
-  };
+  const sheetPrefix = (i) => sheetRef(sheetNames[i] ?? "");
   const locationText = () => {
     if (place.kind === "name") {
       return place.scope >= 0 ? `${sheetPrefix(place.scope)}!${place.name}` : place.name;
@@ -3595,7 +3592,24 @@ const GOTO_MAX_COLS = 16384;
 /// reload would be remembering somebody else's document.
 const goToRecent = [];
 
-const quoteSheet = (n) => (/^[A-Za-z_][A-Za-z0-9_.]*$/.test(n) ? n : `'${n.replace(/'/g, "''")}'`);
+/// A sheet name as written before a reference's `!` — the engine's own rule
+/// (`sheet_name_quoted`, the formula printer's), so the name box, Go To, New
+/// Name, Insert Hyperlink, a reference picked while typing and a chart all
+/// quote alike. Bare only for a plain identifier that cannot be read as
+/// anything else: `Sheet1`, but `'A1'`, `'R1C1'`, `'2024'`, `'My Sheet'`
+/// (XL-UX-166).
+///
+/// The fallback is the same rule, for a host whose engine predates the
+/// binding; quoting more than needed is always safe, quoting less is not.
+export function sheetRef(name) {
+  const n = String(name ?? "");
+  try { if (wasm && wasm.sheet_name_quoted) return wasm.sheet_name_quoted(n); } catch {}
+  const plain = /^[A-Za-z_][A-Za-z0-9_]*$/.test(n)
+    && !/^[A-Za-z]{1,3}\d{1,7}$/.test(n)
+    && !/^(R\d*C\d*|R\d+|C\d+|R|C)$/i.test(n);
+  return plain ? n : `'${n.replace(/'/g, "''")}'`;
+}
+const quoteSheet = sheetRef;
 
 /// `$C$5`, `$B$2:$D$4`, `$A:$C`, `$2:$4` — the way Excel writes a reference it
 /// remembers.
