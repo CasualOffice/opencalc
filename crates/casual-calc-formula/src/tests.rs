@@ -886,3 +886,28 @@ fn a_number_past_the_largest_double_is_refused() {
     }
     assert!(parse("1e308").is_ok());
 }
+
+/// Found by the `formula_parse` fuzz target on main: an implicit intersection
+/// used as a callee, inside another one. It printed `@@F0C.(C.)(.)`, which does
+/// not parse; then `@(@F0C.)(C.)(.)`, which leaves `(C.)(.)` over. A callee
+/// intersection is written `SINGLE(x)`, and a call chain after `@` keeps its
+/// brackets, so every one of these prints and reads back to the same tree.
+#[test]
+fn an_intersection_as_a_callee_round_trips() {
+    for text in [
+        "+@SINGLE(F0C.)(C.)(.)",
+        "SINGLE(A1)(2)",
+        "@SINGLE(A1)(2)",
+        "@(@A1)",
+        "@LAMBDA(x,x)(1)",
+    ] {
+        let expr = crate::parse(text).unwrap_or_else(|e| panic!("{text:?}: {e}"));
+        let printed = expr.to_string();
+        let again = crate::parse(&printed)
+            .unwrap_or_else(|e| panic!("{text:?} printed {printed:?}, which does not parse: {e}"));
+        assert_eq!(
+            again, expr,
+            "{text:?} printed {printed:?}, which reads back differently"
+        );
+    }
+}

@@ -209,16 +209,7 @@ fn write_operand(f: &mut fmt::Formatter<'_>, expr: &Expr, origin: Origin) -> fmt
         Expr::Raw(text) => write!(f, "{text}"),
         // Prints as nothing, which is exactly how it was written.
         Expr::Empty => Ok(()),
-        Expr::Call { callee, args } => {
-            write!(f, "{}(", At(callee, origin))?;
-            for (i, a) in args.iter().enumerate() {
-                if i > 0 {
-                    f.write_str(",")?;
-                }
-                write!(f, "{}", At(a, origin))?;
-            }
-            f.write_str(")")
-        }
+        Expr::Call { callee, args } => write_call(f, callee, args, origin),
         Expr::Name(name) => f.write_str(name),
         Expr::StructuredRef { table, spec } => {
             if let Some(table) = table {
@@ -335,6 +326,34 @@ fn write_intersection(f: &mut fmt::Formatter<'_>, operand: &Expr, origin: Origin
     let nested = matches!(operand, Expr::Function { name, args }
         if name == crate::parse::SINGLE && args.len() == 1);
     write_child(f, operand, origin, nested || bp(operand).0 < ATOM_BP)
+}
+
+/// `callee(args)`. A callee that is an implicit intersection is written in its
+/// function form, `SINGLE(F)(C)`, which parses back to the same tree: as `@F(C)`
+/// it would read as `@` applied to the call `F(C)`, and a bracketed `(@F)(C)` is
+/// not a call the grammar has (found by fuzzing).
+#[inline(never)]
+fn write_call(
+    f: &mut fmt::Formatter<'_>,
+    callee: &Expr,
+    args: &[Expr],
+    origin: Origin,
+) -> fmt::Result {
+    match callee {
+        Expr::Function { name, args: inner }
+            if name == crate::parse::SINGLE && inner.len() == 1 =>
+        {
+            write!(f, "{}({})(", crate::parse::SINGLE, At(&inner[0], origin))?;
+        }
+        _ => write!(f, "{}(", At(callee, origin))?,
+    }
+    for (i, a) in args.iter().enumerate() {
+        if i > 0 {
+            f.write_str(",")?;
+        }
+        write!(f, "{}", At(a, origin))?;
+    }
+    f.write_str(")")
 }
 
 /// Whether `ANCHORARRAY(args)` is one the parser builds from `x#` — one single
