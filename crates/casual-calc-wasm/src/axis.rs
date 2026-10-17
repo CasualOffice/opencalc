@@ -690,7 +690,7 @@ thread_local! {
 /// counts — and that pass ran on *every* `session_cells` call: on a frame, at
 /// a hundred thousand cells, it was most of the frame. The statistics depend
 /// only on the workbook, so they are kept until the session's generation moves,
-/// which it does on any mutable access whatsoever (see [`SessionCell`]): an
+/// which it does on any mutable access whatsoever (see `SessionCell`): an
 /// edit, an undo, a recalculation, a remote operation, a new document. Keyed
 /// on the sheet too, because two sheets' rules are different rules.
 pub(crate) fn cached_cf_stats(wb: &Workbook, sheet_index: usize, sheet: &Sheet) -> SharedStats {

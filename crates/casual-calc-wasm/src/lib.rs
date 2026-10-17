@@ -129,7 +129,7 @@ impl SessionCell {
 }
 
 /// The session's generation: a number that changes whenever the session could
-/// have (see [`SessionCell`]). For a host caching something it derived from the
+/// have (see `SessionCell`). For a host caching something it derived from the
 /// document — compare, and rebuild on any difference. Not a count of edits and
 /// not comparable across page loads; only equality means anything.
 #[wasm_bindgen]
