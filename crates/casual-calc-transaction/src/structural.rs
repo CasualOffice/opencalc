@@ -658,10 +658,11 @@ pub(crate) fn delete(
     // a hidden line outright — a shift alone is not invertible — so undo restores
     // the exact pre-delete metadata rather than trying to un-shift it.
     let restores = snapshot_for_delete(workbook, sheet, axis, at, cross);
-    // A block shift's inverse also puts the names back: one that named a
-    // deleted cell reads `#REF!` afterwards, which re-opening the block cannot
-    // undo.
-    let names_restore = cross.map(|_| Operation::SetDefinedNames(workbook.defined_names.clone()));
+    // Names live outside the grid, so re-opening the band cannot bring back one
+    // the delete turned into `#REF!`: the snapshot has to. Taken for a whole
+    // line as well as a block (XL-FEAT-157) — it used to be the block's alone,
+    // and undoing a row delete left the name broken.
+    let names_restore = Some(Operation::SetDefinedNames(workbook.defined_names.clone()));
     let metadata_restore = snapshot_metadata(workbook, sheet);
     // A pivot reading this sheet usually *lives* on another one, and the
     // snapshot above covers only this sheet — so until `PIV-06` the delete's
