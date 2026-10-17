@@ -10,7 +10,7 @@ publish = false
 [dependencies]
 casual-calc-formula = { path = "../casual-calc-formula" }
 casual-calc-model = { path = "../casual-calc-model" }
-zip = { version = "2", default-features = false, features = ["deflate"] }
+zip = { version = "9", default-features = false, features = ["deflate"] }
 
 [dev-dependencies]
 casual-calc-import = { path = "../casual-calc-import" }

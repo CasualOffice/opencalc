@@ -30,7 +30,7 @@ fn zip_parts(parts: &[(&str, &[u8])]) -> Vec<u8> {
 
 fn names(package: &[u8]) -> Vec<String> {
     let zip = zip::ZipArchive::new(Cursor::new(package)).unwrap();
-    zip.file_names().map(str::to_owned).collect()
+    zip.file_names().map(|n| n.unwrap().into_owned()).collect()
 }
 
 fn part(package: &[u8], name: &str) -> Option<String> {
