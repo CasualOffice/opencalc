@@ -618,6 +618,64 @@ pub(crate) fn axis_edit_blocked(sheet: usize, action: &str) -> bool {
     .unwrap_or(false)
 }
 
+/// One sheet's conditional-format range statistics, shared with the caller.
+type SharedStats = std::rc::Rc<Vec<casual_calc_layout::conditional::RangeStats>>;
+
+thread_local! {
+    /// The last range statistics computed, with the session generation and
+    /// sheet they were computed for (`PERF-24`).
+    static CF_STATS: RefCell<Option<(u64, usize, SharedStats)>> = const { RefCell::new(None) };
+    /// How many times the statistics were actually computed. Diagnostics: a
+    /// scroll over an unchanged sheet should not move it.
+    static CF_STATS_COMPUTED: core::cell::Cell<u64> = const { core::cell::Cell::new(0) };
+}
+
+/// Every conditional format's range statistics for a sheet, computed once per
+/// session generation (`PERF-24`).
+///
+/// A colour scale, a data bar, a top-N, an above-average and a duplicate rule
+/// all need a pass over their whole applies-to range — extremes, mean, cutoff,
+/// counts — and that pass ran on *every* `session_cells` call: on a frame, at
+/// a hundred thousand cells, it was most of the frame. The statistics depend
+/// only on the workbook, so they are kept until the session's generation moves,
+/// which it does on any mutable access whatsoever (see [`SessionCell`]): an
+/// edit, an undo, a recalculation, a remote operation, a new document. Keyed
+/// on the sheet too, because two sheets' rules are different rules.
+pub(crate) fn cached_cf_stats(wb: &Workbook, sheet_index: usize, sheet: &Sheet) -> SharedStats {
+    let generation = SESSION.with(SessionCell::generation);
+    if let Some(hit) = CF_STATS.with(|c| {
+        c.borrow()
+            .as_ref()
+            .filter(|(g, sh, _)| *g == generation && *sh == sheet_index)
+            .map(|(_, _, stats)| std::rc::Rc::clone(stats))
+    }) {
+        return hit;
+    }
+    // One pass per rule that needs the whole range — its extremes, its mean,
+    // its top-N cutoff, how often each value repeats.
+    let stats: Vec<casual_calc_layout::conditional::RangeStats> = sheet
+        .conditional_formats
+        .iter()
+        .map(|cf| casual_calc_layout::conditional::range_stats(wb, sheet, cf))
+        .collect();
+    if !stats.is_empty() {
+        CF_STATS_COMPUTED.with(|n| n.set(n.get() + 1));
+    }
+    let stats = std::rc::Rc::new(stats);
+    CF_STATS
+        .with(|c| *c.borrow_mut() = Some((generation, sheet_index, std::rc::Rc::clone(&stats))));
+    stats
+}
+
+/// How many times conditional-format range statistics have been computed in
+/// this page (`PERF-24`). Diagnostics for a test: scrolling an unchanged sheet
+/// must not move it, and any edit must.
+#[wasm_bindgen]
+#[must_use]
+pub fn session_cf_stats_computed() -> f64 {
+    CF_STATS_COMPUTED.with(core::cell::Cell::get) as f64
+}
+
 /// Visible cells in `[first_row..=last_row] × [first_col..=last_col]` as a JSON
 /// array of `{ r, c, t, a }` (row, col, display text, align: "l"|"r").
 #[wasm_bindgen]
@@ -634,15 +692,7 @@ pub fn session_cells(
         let Some(sheet) = wb.sheets.get(sheet_index) else {
             return "[]".to_owned();
         };
-        // One pass per rule that needs the whole range — its extremes, its mean,
-        // its top-N cutoff, how often each value repeats. Done once per call
-        // rather than per cell: a colour scale over a thousand rows would
-        // otherwise cost a thousand scans.
-        let cf_stats: Vec<casual_calc_layout::conditional::RangeStats> = sheet
-            .conditional_formats
-            .iter()
-            .map(|cf| casual_calc_layout::conditional::range_stats(wb, sheet, cf))
-            .collect();
+        let cf_stats = cached_cf_stats(wb, sheet_index, sheet);
         let cf_order = casual_calc_layout::conditional::priority_order(sheet);
         // The formula rules, parsed once for this call. The canvas is the one
         // renderer with a formula engine behind it, so it is the one that can
@@ -1611,5 +1661,99 @@ mod center_across_tests {
             session_center_across_runs(0, 0, 0, 0, 7),
             "[{\"r\":0,\"c0\":0,\"c1\":3},{\"r\":0,\"c0\":4,\"c1\":7}]"
         );
+    }
+}
+
+#[cfg(test)]
+mod frame_fetch_tests {
+    use super::{session_cells, session_cf_stats_computed};
+    use crate::{
+        session_add_cf, session_generation, session_new, session_recalculate,
+        session_set_calculation_mode, session_set_cell, session_undo,
+    };
+
+    /// The fill the colour scale gives A5.
+    fn a5_fill() -> String {
+        let json = session_cells(0, 4, 0, 4, 0);
+        let at = json.find("\"bg\":\"").expect("A5 is painted");
+        json[at + 6..at + 12].to_owned()
+    }
+
+    fn seeded() {
+        session_new();
+        for r in 0..10u32 {
+            session_set_cell(0, r, 0, &r.to_string()).unwrap();
+        }
+        session_add_cf(0, 0, 0, 19, 0, "colorscale", 0.0, 0.0, "FF0000,00FF00", "").unwrap();
+    }
+
+    /// **The statistics are computed once and then reused** (`PERF-24`):
+    /// asking again with nothing changed does no range pass.
+    #[test]
+    fn unchanged_sheet_reuses_its_statistics() {
+        seeded();
+        let first = a5_fill();
+        let runs = session_cf_stats_computed();
+        for _ in 0..5 {
+            assert_eq!(a5_fill(), first);
+        }
+        assert_eq!(
+            session_cf_stats_computed(),
+            runs,
+            "asking for the same cells of an unchanged sheet recomputed its statistics"
+        );
+    }
+
+    /// **Every way the values can change shows on the next fetch** — an edit,
+    /// an undo, an F9 in manual mode (which does not move the edit counter),
+    /// and a new document with a sheet at the same index. A stale cache is
+    /// worse than none.
+    #[test]
+    fn statistics_follow_edits_undo_recalculation_and_a_new_document() {
+        seeded();
+        let start = a5_fill();
+        session_set_cell(0, 10, 0, "1000").unwrap();
+        let widened = a5_fill();
+        assert_ne!(widened, start, "a new maximum must recolour A5");
+        session_undo().unwrap();
+        assert_eq!(a5_fill(), start, "undo must restore A5's colour");
+
+        // A12 = A2*1000 is the maximum; in manual mode clearing A2 leaves it
+        // stale until F9, which then moves the maximum without an edit.
+        session_set_cell(0, 11, 0, "=A2*1000").unwrap();
+        session_set_calculation_mode("manual");
+        session_set_cell(0, 1, 0, "0").unwrap();
+        let stale = a5_fill();
+        session_recalculate();
+        assert_ne!(
+            a5_fill(),
+            stale,
+            "a recalculation that moves the maximum must recolour A5"
+        );
+        session_set_calculation_mode("auto");
+
+        // Same sheet index, different book, reversed values.
+        session_new();
+        for r in 0..10u32 {
+            session_set_cell(0, r, 0, &(9 - r).to_string()).unwrap();
+        }
+        session_add_cf(0, 0, 0, 19, 0, "colorscale", 0.0, 0.0, "FF0000,00FF00", "").unwrap();
+        assert_ne!(
+            a5_fill(),
+            start,
+            "a new document must not be given the last one's statistics"
+        );
+    }
+
+    /// The generation moves on a mutable access that the edit counter does
+    /// not see — F9 — and stays put across reads.
+    #[test]
+    fn generation_moves_on_recalculation_and_not_on_reads() {
+        seeded();
+        let g = session_generation();
+        let _ = session_cells(0, 0, 0, 30, 3);
+        assert_eq!(session_generation(), g, "a read moved the generation");
+        session_recalculate();
+        assert_ne!(session_generation(), g, "F9 must move the generation");
     }
 }
