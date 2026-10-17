@@ -867,6 +867,31 @@ export let init, wasm;
 // dialog, and `ACCENT` reaches a CSS custom property — a colour that is allowed
 // to be arbitrary text can close the declaration and start another.
 const PARAMS = new URL(location.href).searchParams;
+// Frame-phase instrumentation for the renderer benchmark (`PERF-18`,
+// `tests/perf/render-bench.mjs`). **Off unless the page is loaded with
+// `?perfmarks=1`**, and then each `draw()` records how long each of its phases
+// took. Off, every probe below is a branch on this constant and nothing else:
+// no clock read, no allocation, no entry in the performance timeline.
+//
+// The phases exist to answer one question — is the frame's cost in getting
+// and laying out the data (`measure`, which a GPU renderer would still have to
+// do) or in issuing canvas work (which one might do faster) — so they follow
+// `draw()`'s own structure rather than any finer one.
+const PERF_MARKS = PARAMS.get("perfmarks") === "1";
+const perfFrames = [];
+let perfFrame = null;
+let perfAt = 0;
+function perfLap(phase) {
+  const now = performance.now();
+  perfFrame[phase] = (perfFrame[phase] || 0) + (now - perfAt);
+  perfAt = now;
+}
+/// The phase records since the last call, emptied as they are read. Always
+/// empty without `?perfmarks=1` — which `editor.perf-marks.spec.mjs` asserts,
+/// because a probe that is quietly on costs every user a clock read per phase.
+export function takePerfFramesForTest() {
+  return perfFrames.splice(0, perfFrames.length);
+}
 const BRAND = (PARAMS.get("brand") || "OpenCalc").slice(0, 60);
 const ACCENT = /^#[0-9a-f]{3,8}$|^[a-z]{3,20}$/i.test(PARAMS.get("accent") || "")
   ? PARAMS.get("accent")
@@ -2214,9 +2239,11 @@ function measure() {
   const lastColIdx = geo.colIdx[geo.colIdx.length - 1] ?? fsc;
   const firstRowIdx = fr > 0 ? 0 : fsr;
   const firstColIdx = fc > 0 ? 0 : fsc;
+  if (PERF_MARKS && perfFrame) perfLap("measure");
   geoItems = JSON.parse(
     wasm.session_cells(state.sheet, firstRowIdx, firstColIdx, lastRowIdx, lastColIdx),
   );
+  if (PERF_MARKS && perfFrame) perfLap("fetch");
   // Text spills across empty neighbours, so a label whose own cell is outside
   // the window can still be showing inside it — and only the *nearest*
   // populated cell on each side can, since anything beyond is blocked by it.
@@ -2262,6 +2289,7 @@ function measure() {
     if (span.left !== null && firstColIdx > 0) gather(span.left, firstColIdx - 1, true);
     if (span.right !== null) gather(lastColIdx + 1, span.right, false);
   } catch { /* nothing outside the window is the common case */ }
+  if (PERF_MARKS && perfFrame) perfLap("spill");
   // Rows the workbook sized itself are pinned: auto-height must not override an
   // imported height (nor one the user dragged), exactly as Excel stops
   // auto-fitting a row once its height is set. Without this every styled row of
@@ -2286,6 +2314,7 @@ function measure() {
     if (needed !== null && needed > geo.rowH[ri]) geo.rowH[ri] = needed;
   }
 
+  if (PERF_MARKS && perfFrame) perfLap("autoheight");
   // Positions: frozen lines from HW/HH, scrolling lines from bodyX0/Y0 − sub.
   geo.colX = new Array(geo.colIdx.length);
   let x = HW; geo.cols = 0;
@@ -2433,7 +2462,9 @@ function setHeaderCollapsed(collapsed) {
 
 
 export function draw() {
+  if (PERF_MARKS) { perfFrame = { t0: performance.now() }; perfAt = perfFrame.t0; }
   const v = measure();
+  if (PERF_MARKS) perfLap("measure");
   ctx.clearRect(0, 0, v.w, v.h);
   ctx.fillStyle = colors.bg;
   ctx.fillRect(0, 0, v.w, v.h);
@@ -2528,6 +2559,24 @@ export function draw() {
   const lastCol = (geo.colIdx[geo.colIdx.length - 1] ?? state.firstCol) + 1;
   const items = geoItems;
   sheetMerges = wasm ? JSON.parse(wasm.session_merges(state.sheet)) : [];
+  // **Only the merges that can reach the drawn window**, for the two passes
+  // below (`PERF-18`). Both used to walk every merge on the sheet every frame,
+  // and the paint pass placed each one through `mergeSlices` — two to four
+  // engine geometry calls apiece — before culling it as off-screen. On a sheet
+  // of 10,000 merges that was tens of thousands of engine calls per frame to
+  // paint the dozen in view (`docs/101-RENDER-BENCHMARK.md`). The box is the
+  // drawn lines' extent, frozen bands included, so it is a superset of what is
+  // visible: a merge outside it has no cell on screen, and neither pass draws
+  // one. `sheetMerges` stays the whole list — hit-testing and the format
+  // commands read it, and they are not about the window.
+  const mergesInView = (() => {
+    if (!geo.rowIdx.length || !geo.colIdx.length) return [];
+    let r0 = Infinity, r1 = -Infinity, c0 = Infinity, c1 = -Infinity;
+    for (const r of geo.rowIdx) { if (r < r0) r0 = r; if (r > r1) r1 = r; }
+    for (const c of geo.colIdx) { if (c < c0) c0 = c; if (c > c1) c1 = c; }
+    return sheetMerges.filter((m) => m.r1 >= r0 && m.r0 <= r1 && m.c1 >= c0 && m.c0 <= c1);
+  })();
+  if (PERF_MARKS) perfFrame.mergesInView = mergesInView.length;
 
   // Clip a cell's drawing to its pane quadrant (a no-op when nothing is frozen).
   const frozen = F.fc || F.fr;
@@ -2617,6 +2666,7 @@ export function draw() {
   // Charts, drawn over the grid at their anchors. Read-only: the engine parses
   // the chart part for display and still writes it back from its own bytes, so
   // nothing here can change the file.
+  if (PERF_MARKS) perfLap("grid");
   drawImages();
   drawCharts(withQuad);
 
@@ -2650,6 +2700,7 @@ export function draw() {
     }
   }
 
+  if (PERF_MARKS) perfLap("objects");
   // Tables: header shading and banded rows.
   //
   // This has to run before the cell pass, not after it: the fills are opaque,
@@ -2812,13 +2863,14 @@ export function draw() {
     }
   }
 
+  if (PERF_MARKS) perfLap("fills");
   // The merges touching each drawn row. Built once per frame so the text pass
   // can ask "is this cell inside a merge?" with a lookup over the one or two
   // merges on its row, instead of scanning the whole sheet's merge list for
   // every cell it paints (which made draw() O(visible cells × total merges),
   // on the unthrottled wheel-scroll path).
   const mergesByRow = new Map();
-  for (const m of sheetMerges) {
+  for (const m of mergesInView) {
     for (const r of geo.rowIdx) {
       if (r < m.r0 || r > m.r1) continue;
       const list = mergesByRow.get(r);
@@ -3153,6 +3205,7 @@ export function draw() {
     ctx.restore();
   }
 
+  if (PERF_MARKS) perfLap("text");
   // A table's own outline, over its fills and its text.
   //
   // Before the cell borders below on purpose: a border the *file* puts on a
@@ -3181,9 +3234,10 @@ export function draw() {
     });
   }
 
+  if (PERF_MARKS) perfLap("borders");
   // Merged ranges: paint each as one cell — erase interior gridlines, redraw the
   // top-left cell's fill + text across the span, outline it.
-  for (const m of sheetMerges) {
+  for (const m of mergesInView) {
     const it = items.find((t) => t.r === m.r0 && t.c === m.c0);
     const selected = mergeInSel(m);
     for (const s of mergeSlices(m)) {
@@ -3215,6 +3269,7 @@ export function draw() {
     }
   }
 
+  if (PERF_MARKS) perfLap("merges");
   // Find highlights: every match on this sheet gets a soft tint, so "3 of 47"
   // is answerable by looking at the sheet rather than by stepping through it.
   // The current match keeps the ordinary selection, which stays distinct.
@@ -3514,6 +3569,7 @@ export function draw() {
   ctx.restore(); // end body clip
 
 
+  if (PERF_MARKS) perfLap("overlays");
   // Which columns/rows are covered by the current selection (for header tint).
   const rr = selRect();
   const colInSel = (c) => state.selKind === "all" ||
@@ -3596,6 +3652,7 @@ export function draw() {
   drawMoveDropIndicator(v);
   drawFreezeHandles();
 
+  if (PERF_MARKS) perfLap("headers");
   // The in-cell editor is a DOM element over the canvas: keep it on its cell as
   // the grid scrolls or resizes under it (grid-wrap's overflow clips it once the
   // cell leaves the viewport), instead of leaving it parked mid-air.
@@ -3615,6 +3672,16 @@ export function draw() {
   // than the one it started from.
   if (wasm) emitStateEvents();
   if (wasm) { try { customFunctionsTick(); } catch {} }
+  if (PERF_MARKS) {
+    perfLap("dom");
+    perfFrame.total = perfAt - perfFrame.t0;
+    perfFrame.cells = geoItems.length;
+    perfFrame.merges = sheetMerges.length;
+    perfFrames.push(perfFrame);
+    if (perfFrames.length > 20000) perfFrames.splice(0, perfFrames.length - 20000);
+    performance.measure("oc:draw", { start: perfFrame.t0, end: perfAt });
+    perfFrame = null;
+  }
 }
 
 // px proximity to the freeze divider that arms a drag.
