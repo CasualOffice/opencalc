@@ -115,6 +115,29 @@ async function scrollFrames(page, { freeze, frames = 24 }) {
 
 const round = (m) => Object.fromEntries(Object.entries(m).map(([k, v]) => [k, typeof v === "number" ? Math.round(v * 10) / 10 : v]));
 
+test("a scroll frame at row 20,000 of a 100k-cell sheet fits the frame budget, frozen or not", async ({ page }) => {
+  test.setTimeout(120_000);
+  await boot(page);
+  const { seedMs } = await seed(page);
+  const budget = FRAME_BUDGET_MS * Math.max(1, seedMs / REFERENCE_SEED_MS);
+  const open = await scrollFrames(page, { freeze: 0 });
+  const frozen = await scrollFrames(page, { freeze: 1 });
+  console.log(
+    `seed ${Math.round(seedMs)} ms (reference ${REFERENCE_SEED_MS}); budget ${budget.toFixed(1)} ms; ` +
+    `unfrozen ${JSON.stringify(round(open))}; frozen 1x1 ${JSON.stringify(round(frozen))}`,
+  );
+  expect(open.firstRow, "the frames were drawn where they were meant to be").toBeGreaterThanOrEqual(20_000);
+  expect(frozen.firstRow).toBeGreaterThanOrEqual(20_000);
+  expect(open.median, `unfrozen frame ${open.median.toFixed(1)} ms against ${budget.toFixed(1)} ms`).toBeLessThan(budget);
+  expect(frozen.median, `frozen frame ${frozen.median.toFixed(1)} ms against ${budget.toFixed(1)} ms`).toBeLessThan(budget);
+  // PERF-23's acceptance: freezing a row and a column costs the frame next to
+  // nothing — within 10%, plus a millisecond for timer noise at this scale.
+  expect(
+    frozen.median,
+    `frozen ${frozen.median.toFixed(1)} ms against unfrozen ${open.median.toFixed(1)} ms`,
+  ).toBeLessThanOrEqual(open.median * 1.1 + 1);
+});
+
 test("a scroll frame does not scan the used range (PERF-22)", async ({ page }) => {
   test.setTimeout(120_000);
   await boot(page);
@@ -132,6 +155,19 @@ test("a scroll frame does no conditional-format statistics work (PERF-24)", asyn
   expect(m.statsRuns, "the engine exposes its statistics count").not.toBeNull();
   expect(m.statsRuns, `${m.statsRuns} range-statistics passes over 12 frames with nothing edited`).toBe(0);
 });
+
+test("with a frozen row and column a frame holds the window, not every cell scrolled past (PERF-23)", async ({ page }) => {
+  test.setTimeout(120_000);
+  await boot(page);
+  await seed(page);
+  const m = await scrollFrames(page, { freeze: 1, frames: 6 });
+  // The window, plus an edge line each way for borders, plus one spill owner
+  // per row per side.
+  expect(m.held, `${m.held} cells held for a ${m.window}-cell window at row ${m.firstRow}`)
+    .toBeLessThanOrEqual(m.window + 4 * m.rows + 64);
+});
+
+// --- Staleness: every cache must follow every kind of edit -----------------
 
 test("the used range follows an edit by the editor, by the engine, by undo and by a new document (PERF-22)", async ({ page }) => {
   await boot(page);
