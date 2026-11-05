@@ -100,6 +100,7 @@ import {
   wasm,
   wrap,
   holdBlock,
+  releaseBlock,
   caretAnchor,
 } from "./editor.core.js";
 
@@ -418,19 +419,72 @@ export function stepFrom(row, col, dr, dc) {
   return { row: fromRow + dr, col: fromCol + dc };
 }
 
+/// `g` with the rectangle `cut` taken out, as up to four rectangles: the rows
+/// above and below the cut across `g`'s full width, then what is left beside
+/// it on the cut's own rows.
+function carve(g, cut) {
+  const r0 = Math.max(g.r0, cut.r0), r1 = Math.min(g.r1, cut.r1);
+  const c0 = Math.max(g.c0, cut.c0), c1 = Math.min(g.c1, cut.c1);
+  if (r0 > r1 || c0 > c1) return [g];
+  const out = [];
+  if (g.r0 < r0) out.push({ r0: g.r0, c0: g.c0, r1: r0 - 1, c1: g.c1 });
+  if (g.c0 < c0) out.push({ r0, c0: g.c0, r1, c1: c0 - 1 });
+  if (c1 < g.c1) out.push({ r0, c0: c1 + 1, r1, c1: g.c1 });
+  if (r1 < g.r1) out.push({ r0: r1 + 1, c0: g.c0, r1: g.r1, c1: g.c1 });
+  return out;
+}
+
+/// Excel 365's Ctrl+click on a selected cell: that cell — and only that cell —
+/// leaves the selection (PIPE-08). Microsoft: "While pressing the Ctrl key,
+/// you can click … to deselect any cells … within a selection." The editor
+/// used to drop the whole banked range the cell was in, and inside the active
+/// range it banked a duplicate rather than deselecting anything.
+///
+/// Returns false, changing nothing, when the cell is not selected or when it is
+/// all that is selected (a selection cannot be empty). The active cell stays
+/// put if it is still selected; otherwise it moves to the top-left of the last
+/// range left, which becomes the active one. [Excel's choice of the new active
+/// cell is not documented; this keeps it inside what the selection shows.]
+function deselectCell(row, col) {
+  const m = mergeAt(row, col);
+  const cut = m ? { r0: m.r0, c0: m.c0, r1: m.r1, c1: m.c1 } : { r0: row, c0: col, r1: row, c1: col };
+  const within = (g, r, c) => r >= g.r0 && r <= g.r1 && c >= g.c0 && c <= g.c1;
+  // Whole-row and whole-column selections are left to the banking path: their
+  // extent follows the used area, which a carved rectangle would freeze.
+  if (state.selKind !== "cells") return false;
+  const before = allRanges();
+  if (!before.some((g) => within(g, row, col))) return false;
+  const left = before.flatMap((g) => carve(g, cut));
+  if (!left.length) return false;
+  const { row: ar, col: ac } = state.sel;
+  let active = left.findLastIndex((g) => within(g, ar, ac));
+  const keep = active >= 0;
+  if (!keep) active = left.length - 1;
+  const block = left[active];
+  state.ranges = left.filter((_, i) => i !== active);
+  state.selKind = "cells";
+  if (keep && !(ar === block.r0 && ac === block.c0)) {
+    state.sel = { row: ar, col: ac };
+    state.anchor = { row: block.r1, col: block.c1 };
+    holdBlock(block);
+  } else {
+    releaseBlock();
+    state.sel = { row: block.r0, col: block.c0 };
+    state.anchor = { row: block.r1, col: block.c1 };
+  }
+  draw();
+  return true;
+}
+
 export function addRange(row, col) {
   // Ctrl+clicking a cell that is already selected *removes* it, as in Excel —
   // otherwise a mis-click into a multi-range selection could only be undone by
   // starting the whole selection again.
-  const hit = state.ranges.findIndex(
-    (g) => row >= g.r0 && row <= g.r1 && col >= g.c0 && col <= g.c1,
-  );
-  if (hit >= 0) {
-    state.ranges = state.ranges.filter((_, i) => i !== hit);
-    draw();
-    return;
-  }
+  if (deselectCell(row, col)) return false;
   state.ranges = state.ranges.concat([effectiveRange()]);
+  // A held block (Ctrl+A, an Enter walk) *is* the active range until now; left
+  // in place it would go on answering `selRect` for the fresh cell below.
+  releaseBlock();
   let r = Math.max(0, row), c = Math.max(0, col);
   const m = mergeAt(r, c);
   if (m) { r = m.r0; c = m.c0; }
@@ -438,6 +492,7 @@ export function addRange(row, col) {
   state.anchor = { row: r, col: c };
   state.selKind = "cells";
   draw();
+  return true;
 }
 
 export function addColumnRange(c) {

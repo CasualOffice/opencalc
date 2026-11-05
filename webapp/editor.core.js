@@ -3910,6 +3910,11 @@ export function holdBlock(b) {
   navBlock = { r0: b.r0, c0: b.c0, r1: b.r1, c1: b.c1 };
 }
 
+/// Let go of a held block, so the selection is anchor+sel again.
+export function releaseBlock() {
+  navBlock = null;
+}
+
 // The block Enter/Tab should walk, or null for a single cell.
 
 // Step the active cell within `b`, wrapping at the edges. `axis` is "row" for
@@ -8298,7 +8303,9 @@ function wireEvents() {
     // other than the primary one are left to it.
     if (hit && e.button === 0) {
       endInline();
-      if ((e.metaKey || e.ctrlKey) && !e.shiftKey) { addRange(hit.row, hit.col); state.dragging = true; }
+      // `addRange` answers false when the click *deselected* a cell (PIPE-08):
+      // a drag from there would grow a range back over the cell just removed.
+      if ((e.metaKey || e.ctrlKey) && !e.shiftKey) { if (addRange(hit.row, hit.col)) state.dragging = true; }
       else if (e.shiftKey) extend(hit.row, hit.col);
       else { select(hit.row, hit.col); state.dragging = true; }
       canvas.focus();
@@ -8741,8 +8748,12 @@ function wireEvents() {
     if (HW && HH && px < HW && py < HH) { selectAll(); cellMenu(e.clientX, e.clientY); return; }
     const hit = cellAt(px, py);
     if (hit && state.selKind === "cells") {
-      const r = selRect();
-      const inside = hit.row >= r.r0 && hit.row <= r.r1 && hit.col >= r.c0 && hit.col <= r.c1;
+      // Inside *any* of the selected ranges (PIPE-08). Asking only the active
+      // one (`selRect`) read a right-click on a range banked by an earlier
+      // Ctrl+click as "outside", collapsed the multi-range to one cell, and the
+      // menu's verbs then acted on that cell.
+      const inside = allRanges().some(
+        (r) => hit.row >= r.r0 && hit.row <= r.r1 && hit.col >= r.c0 && hit.col <= r.c1);
       if (!inside) select(hit.row, hit.col);
     }
     cellMenu(e.clientX, e.clientY);
