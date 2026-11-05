@@ -224,6 +224,62 @@ pub fn shrink_3d_span(expr: &mut Expr, gone: &str, order: &[&str]) -> bool {
     }
 }
 
+/// Collapse to `#REF!` every reference that names the deleted sheet `gone`
+/// (case-insensitively, as a reference resolves), returning whether anything
+/// changed.
+///
+/// What Excel does to `=Gone!A1` when `Gone` is deleted: the break is written
+/// into the formula, not left for evaluation to discover. Leaving the name in
+/// place is not a broken reference — it is one waiting for the next sheet to
+/// be called `Gone`, which then silently becomes what the formula computes
+/// from (`PIPE-01`).
+///
+/// A range is broken whole if either end names the sheet, and a 3-D span if
+/// either endpoint still does — run [`shrink_3d_span`] first, which moves an
+/// endpoint inward where there is a sheet to move it to. Excel's own text is
+/// `#REF!A1`; this writes the plain `#REF!` a row or column delete already
+/// writes, because the tree has no reference-with-a-broken-sheet node, and the
+/// address after a dead qualifier names nothing either way.
+pub fn break_sheet_references(expr: &mut Expr, gone: &str) -> bool {
+    let names = |r: &StoredRef| {
+        r.sheet
+            .as_deref()
+            .is_some_and(|s| s.eq_ignore_ascii_case(gone))
+    };
+    let broken = match expr {
+        Expr::Reference(r) => names(r),
+        Expr::Range(a, b) => names(a) || names(b),
+        Expr::Reference3d(r) => {
+            r.first.eq_ignore_ascii_case(gone) || r.last.eq_ignore_ascii_case(gone)
+        }
+        Expr::Unary { operand, .. } => return break_sheet_references(operand, gone),
+        Expr::Binary { left, right, .. } => {
+            let l = break_sheet_references(left, gone);
+            let r = break_sheet_references(right, gone);
+            return l || r;
+        }
+        Expr::Function { args, .. } => {
+            let mut changed = false;
+            for arg in args {
+                changed |= break_sheet_references(arg, gone);
+            }
+            return changed;
+        }
+        Expr::Call { callee, args } => {
+            let mut changed = break_sheet_references(callee, gone);
+            for arg in args {
+                changed |= break_sheet_references(arg, gone);
+            }
+            return changed;
+        }
+        _ => false,
+    };
+    if broken {
+        *expr = Expr::Error("#REF!".to_owned());
+    }
+    broken
+}
+
 fn rename_ref(r: &mut StoredRef, old: &str, new: &str) -> bool {
     if r.sheet
         .as_deref()

@@ -665,7 +665,32 @@ fn the_refusal_surface_is_exactly_these_cases() {
         count,
         before,
     };
+    // A typed formula meeting a concurrent sheet removal (`PIPE-01`): refused
+    // only when what it names could be the removed sheet.
+    let typed = |base: &mut Workbook, text: &str| {
+        let mut cell = Cell::value(CellValue::Empty);
+        cell.formula = Some(
+            base.store_formula_at(casual_calc_formula::parse(text).unwrap(), Origin::at(11, 7)),
+        );
+        Operation::SetCell {
+            sheet: 0,
+            at: CellRef::new(11, 7),
+            cell: Some(cell),
+        }
+    };
+    let naming_removed = typed(&mut base, "T!A1*2");
+    let naming_survivor = typed(&mut base, "S!A1*2");
     let cases: Vec<(&str, Operation, Operation)> = vec![
+        (
+            "formula naming the removed sheet/remove sheet",
+            naming_removed,
+            Operation::RemoveSheet { index: 1 },
+        ),
+        (
+            "formula naming a surviving sheet/remove sheet",
+            naming_survivor,
+            Operation::RemoveSheet { index: 1 },
+        ),
         ("move/move identical", mc(2, 1, 6), mc(2, 1, 6)),
         ("move/move disjoint", mc(2, 1, 6), mc(10, 1, 14)),
         ("move/move same source", mc(2, 1, 6), mc(2, 1, 9)),
@@ -714,6 +739,8 @@ fn the_refusal_surface_is_exactly_these_cases() {
     // Each entry is a case the module docs must name. Adding one here without
     // adding it there is the drift this test exists to stop.
     let expected = vec![
+        "formula naming the removed sheet/remove sheet (Earlier)",
+        "formula naming the removed sheet/remove sheet (Later)",
         "move/move nested bands (Earlier)",
         "move/move nested bands (Later)",
         "move/move overlapping bands (Earlier)",

@@ -4591,3 +4591,51 @@ fn a_session_opened_elsewhere_is_the_session_opened_here() {
         "an untouched save is the file"
     );
 }
+
+/// **Deleting a sheet breaks the formulas that read it, and a new sheet of the
+/// same name does not bring them back to life** (`PIPE-01`).
+///
+/// The formula used to keep `Gone!A1` and read `#REF!` only while nothing
+/// answered to the name. Adding a sheet called `Gone` — by hand, by import, by
+/// a collaborator — then made it compute `99 * 2` from a sheet it had never
+/// seen, with nothing on screen to say the reference had ever been broken.
+#[test]
+fn a_new_sheet_with_a_deleted_sheets_name_does_not_revive_its_formulas() {
+    use casual_calc_model::{CellRef, Id, Sheet, SheetId};
+
+    let mut s = WorkbookSession::with_sheet();
+    s.edit(crate::EditOperation::InsertSheet {
+        index: 1,
+        sheet: Box::new(Sheet::new(SheetId(Id::from_parts(70, 1)), "Gone")),
+    })
+    .unwrap();
+    let a1 = CellRef::new(0, 0);
+    let op = s.input_edit(1, a1, "5");
+    s.edit(op).unwrap();
+    let op = s.input_edit(0, a1, "=Gone!A1*2");
+    s.edit(op).unwrap();
+    s.recalculate();
+    assert_eq!(s.cell_display(0, a1), "10");
+
+    s.edit(crate::EditOperation::RemoveSheet { index: 1 })
+        .unwrap();
+    s.edit(crate::EditOperation::InsertSheet {
+        index: 1,
+        sheet: Box::new(Sheet::new(SheetId(Id::from_parts(71, 1)), "Gone")),
+    })
+    .unwrap();
+    let op = s.input_edit(1, a1, "99");
+    s.edit(op).unwrap();
+    s.recalculate();
+
+    assert_eq!(
+        s.cell_input(0, a1),
+        "=#REF!*2",
+        "the break is in the formula"
+    );
+    assert_eq!(
+        s.cell_display(0, a1),
+        "#REF!",
+        "and the new sheet is not read"
+    );
+}

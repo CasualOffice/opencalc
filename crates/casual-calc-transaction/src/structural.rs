@@ -2450,11 +2450,10 @@ pub(crate) fn sheets_charting(workbook: &Workbook, gone: &str) -> Vec<usize> {
 /// unrelated sheet created later under the same name (`CHT-08`): the picture
 /// changed from one workbook's numbers to another's with nothing raised.
 ///
-/// A *cell formula* is deliberately left alone here, and that is not an
-/// inconsistency: a formula's dead reference is visible where the user works —
-/// the cell prints `#REF!` — so both the break and any later re-resolution are
-/// on screen. A chart series' dead reference is visible nowhere, which is the
-/// whole of why this one has to be written down in the model.
+/// Cell formulas and defined names are broken the same way, in
+/// `unlink_sheet_from_formulas` (`PIPE-01`). They used to be left spelled by
+/// name on the argument that a cell's `#REF!` is on screen — but the *next*
+/// sheet of that name is not, and it silently revived every one of them.
 pub(crate) fn break_series_naming(workbook: &mut Workbook, gone: &str) {
     for sheet in workbook.sheets.iter_mut() {
         for chart in sheet.charts.iter_mut() {
@@ -2470,6 +2469,58 @@ pub(crate) fn break_series_naming(workbook: &mut Workbook, gone: &str) {
             }
         }
     }
+}
+
+/// Every sheet index holding a conditional-format or validation formula that
+/// names `gone`, read before the removal so exactly those sheets are
+/// snapshotted for the inverse (`PIPE-01`).
+pub(crate) fn sheets_with_rules_naming(workbook: &Workbook, gone: &str) -> Vec<usize> {
+    workbook
+        .sheets
+        .iter()
+        .enumerate()
+        .filter(|(_, sheet)| {
+            sheet.conditional_formats.iter().any(|f| match &f.rule {
+                casual_calc_model::CfRule::Expression(text) => broken_text(text, gone).is_some(),
+                _ => false,
+            }) || sheet.validations.iter().any(|v| {
+                broken_text(&v.formula1, gone).is_some() || broken_text(&v.formula2, gone).is_some()
+            })
+        })
+        .map(|(index, _)| index)
+        .collect()
+}
+
+/// Collapse to `#REF!` every reference to `gone` in `sheet`'s
+/// conditional-format and validation formulas — the same break a cell formula
+/// gets, because a rule naming a dead sheet revives on the next sheet of that
+/// name just as a cell does, and nowhere is it on screen.
+pub(crate) fn break_rules_naming(sheet: &mut Sheet, gone: &str) {
+    for format in &mut sheet.conditional_formats {
+        if let casual_calc_model::CfRule::Expression(text) = &mut format.rule
+            && let Some(broken) = broken_text(text, gone)
+        {
+            *text = broken;
+        }
+    }
+    for validation in &mut sheet.validations {
+        for text in [&mut validation.formula1, &mut validation.formula2] {
+            if let Some(broken) = broken_text(text, gone) {
+                *text = broken;
+            }
+        }
+    }
+}
+
+/// `text` with every reference to `gone` broken, or `None` when it names no
+/// such sheet (or is not a formula at all — an empty operand, say).
+///
+/// Only re-printed when something changed, so a rule that never named the
+/// sheet keeps its text byte-for-byte. The text is the file's own A1 form and
+/// parses at the absolute origin, so printing the tree back is that form too.
+fn broken_text(text: &str, gone: &str) -> Option<String> {
+    let mut expr = casual_calc_formula::parse(text).ok()?;
+    casual_calc_formula::break_sheet_references(&mut expr, gone).then(|| expr.to_string())
 }
 
 /// Whether a reference string is qualified with `sheet`.
