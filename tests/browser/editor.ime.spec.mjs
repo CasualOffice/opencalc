@@ -125,7 +125,11 @@ test.describe("IME composition (XL-FEAT-023)", () => {
     await jp.key("Enter", "Enter");
     await jp.commit("に");
     expect(await editing(page)).toBe(false);
-    await expect(page.locator("#tb-status")).toContainText("protected");
+    // Refused the way Excel refuses a typed key: its message box, not status
+    // text — grid alerts moved into the box with XL-UX-174 (CI-036).
+    await expect(page.locator("#oc-msgbox-text")).toContainText("on a protected sheet");
+    await page.keyboard.press("Enter");
+    await expect(page.locator("#oc-msgbox")).toBeHidden();
     // Nothing the IME committed waits in the hidden host to start a later edit.
     await page.evaluate(() => window.opencalcEditor.wasmApi().session_set_sheet_protected(0, false));
     await page.locator("#grid").focus();

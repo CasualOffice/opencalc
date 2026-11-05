@@ -48,6 +48,13 @@ const PREFIX_BP: u8 = 50;
 /// postfix `%`, which the parser reads before it considers any operator at all.
 const ATOM_BP: u8 = u8::MAX;
 
+/// How far `@x` reaches on its right. The parser reads `@` and then a whole
+/// postfix operand, so `@A1%` is `@(A1%)`: on its right the intersection binds
+/// looser than `%` and tighter than every binary operator. Printed as an atom it
+/// lost the brackets in `(@A1)%`, which then read back as `@(A1%)`, and
+/// `SU(@(@x)%)` printed as `SU(@@x%)`, which does not parse (XL-FEAT-158).
+const INTERSECTION_RIGHT_BP: u8 = 60;
+
 /// The (left, right) binding powers the parser gives a binary operator.
 ///
 /// Kept identical to `binary_op` in [`crate::parse`]; the round-trip gate is
@@ -80,6 +87,9 @@ fn bp(expr: &Expr) -> (u8, u8) {
             ..
         } => (ATOM_BP, ATOM_BP),
         Expr::Unary { .. } => (PREFIX_BP, PREFIX_BP),
+        Expr::Function { name, args } if name == crate::parse::SINGLE && args.len() == 1 => {
+            (ATOM_BP, INTERSECTION_RIGHT_BP)
+        }
         _ => (ATOM_BP, ATOM_BP),
     }
 }

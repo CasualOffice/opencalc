@@ -1193,12 +1193,16 @@ fn textbefore_and_textafter() {
     error(&format!("TEXTBEFORE({red},\"red\",2)"), ErrorValue::Na);
     error("TEXTBEFORE(\"abc\",\"x\")", ErrorValue::Na);
     text("TEXTBEFORE(\"abc\",\"x\",,,,\"none\")", "none");
+    // `match_end` makes the edge the search runs *towards* one more delimiter:
+    // the end for a positive instance, the start for a negative one — for
+    // both functions (XL-FEAT-159). The earlier reading tied the edge to the
+    // function instead, which LibreOffice 26.2 and Excel both contradict.
     text("TEXTBEFORE(\"abc\",\"x\",,,1)", "abc");
-    text("TEXTAFTER(\"abc\",\"x\",,,1)", "abc");
+    text("TEXTAFTER(\"abc\",\"x\",,,1)", "");
     error("TEXTBEFORE(\"a-b-c\",\"-\",3)", ErrorValue::Na);
     text("TEXTBEFORE(\"a-b-c\",\"-\",3,,1)", "a-b-c");
-    text("TEXTBEFORE(\"a-b-c\",\"-\",-3,,1)", "a");
-    text("TEXTAFTER(\"a-b-c\",\"-\",3,,1)", "c");
+    text("TEXTBEFORE(\"a-b-c\",\"-\",-3,,1)", "");
+    text("TEXTAFTER(\"a-b-c\",\"-\",3,,1)", "");
     text("TEXTAFTER(\"a-b-c\",\"-\",-3,,1)", "a-b-c");
     text("TEXTAFTER(\"alpha-beta\",\"a\",2)", "-beta");
     // MS: an empty delimiter matches at once — TEXTBEFORE gives "" forwards
