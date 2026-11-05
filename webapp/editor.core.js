@@ -358,6 +358,7 @@ import {
   scrollStateForTest,
   seed,
   selectAll,
+  selectedBands,
   selectColsSpan,
   selectColumn,
   selectForTest,
@@ -8235,6 +8236,12 @@ function wireEvents() {
     const fnew = freezeHandleAt(px, py);
     if (fnew) { endInline(); state.freezeDrag = { axis: fnew.axis, px, py }; return; }
     if (px < HW && py < HH) { selectAll(); canvas.focus(); return; }
+    // Header presses with any button but the primary one are left to the
+    // `contextmenu` handler, as cell presses are below (PIPE-08): the right
+    // button's `mousedown` comes first, and selecting the column here
+    // collapsed a multi-band selection before the menu could keep it.
+    if (py < HH && px >= HW && e.button !== 0) return;
+    if (px < HW && py >= HH && e.button !== 0) return;
     if (py < HH && px >= HW) {
       endInline();
       const c = colAtX(px);
@@ -8732,16 +8739,16 @@ function wireEvents() {
     // acted on the wrong target, including Delete.
     if (HH && py < HH && px >= HW) {
       const col = colAtX(px);
-      const r = selRect();
-      const covered = state.selKind === "cols" && col >= r.c0 && col <= r.c1;
+      // Any selected band, banked ones included (PIPE-08): asking only the
+      // active one collapsed a Ctrl+click column selection on a right-click.
+      const covered = (selectedBands("col") ?? []).some(([lo, hi]) => col >= lo && col <= hi);
       if (!covered) selectColumn(col, false);
       headerMenu("col", e.clientX, e.clientY);
       return;
     }
     if (HW && px < HW && py >= HH) {
       const row = rowAtY(py);
-      const r = selRect();
-      const covered = state.selKind === "rows" && row >= r.r0 && row <= r.r1;
+      const covered = (selectedBands("row") ?? []).some(([lo, hi]) => row >= lo && row <= hi);
       if (!covered) selectRow(row, false);
       headerMenu("row", e.clientX, e.clientY);
       return;

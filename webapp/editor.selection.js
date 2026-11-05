@@ -476,12 +476,60 @@ function deselectCell(row, col) {
   return true;
 }
 
+/// The active range as it is banked by a Ctrl+click. A whole row or column
+/// band keeps its kind (PIPE-08): its rectangle alone cannot say so — a band
+/// is stored to the used area's edge, the same shape a cell range across the
+/// table has — and the header menu needs to know whether every selected range
+/// is a band its verbs can act on. Cell ranges stay plain rectangles.
+function bankable() {
+  const r = effectiveRange();
+  return state.selKind === "rows" || state.selKind === "cols" ? { ...r, kind: state.selKind } : r;
+}
+
+/// The selected bands along `axis` ("col" or "row") as `[lo, hi]` spans, or
+/// null when the selection is not made only of such bands.
+///
+/// A header right-click keeps the selection only when this answers (PIPE-08):
+/// the header menu's verbs act on whole rows or columns, so a selection that
+/// mixes in a cell range is not one they can act on, and collapses as before.
+/// Overlapping spans are merged; adjacent ones stay separate, since each is
+/// an area an Insert adds before.
+export function selectedBands(axis) {
+  const kind = axis === "col" ? "cols" : "rows";
+  if (state.selKind !== kind || state.ranges.some((g) => g.kind !== kind)) return null;
+  const spans = allRanges()
+    .map((g) => (axis === "col" ? [g.c0, g.c1] : [g.r0, g.r1]))
+    .sort((a, b) => a[0] - b[0]);
+  const out = [];
+  for (const [lo, hi] of spans) {
+    const last = out[out.length - 1];
+    if (last && lo <= last[1]) last[1] = Math.max(last[1], hi);
+    else out.push([lo, hi]);
+  }
+  return out;
+}
+
+/// Apply `fn(lo, hi)` to every band as one undo step.
+///
+/// Last band first, so an insert or delete never shifts a band still to come.
+/// Folded with `session_group_undo_since`: Excel deletes a non-adjacent
+/// column selection as one action, and one Ctrl+Z brings every band back.
+export function editBands(bands, fn) {
+  const mark = undoMark();
+  tryEdit(() => {
+    for (const [lo, hi] of [...bands].sort((a, b) => b[0] - a[0])) fn(lo, hi);
+  });
+  if (bands.length > 1 && mark >= 0) {
+    try { wasm.session_group_undo_since(mark); } catch {}
+  }
+}
+
 export function addRange(row, col) {
   // Ctrl+clicking a cell that is already selected *removes* it, as in Excel —
   // otherwise a mis-click into a multi-range selection could only be undone by
   // starting the whole selection again.
   if (deselectCell(row, col)) return false;
-  state.ranges = state.ranges.concat([effectiveRange()]);
+  state.ranges = state.ranges.concat([bankable()]);
   // A held block (Ctrl+A, an Enter walk) *is* the active range until now; left
   // in place it would go on answering `selRect` for the fresh cell below.
   releaseBlock();
@@ -496,7 +544,7 @@ export function addRange(row, col) {
 }
 
 export function addColumnRange(c) {
-  state.ranges = state.ranges.concat([effectiveRange()]);
+  state.ranges = state.ranges.concat([bankable()]);
   state.selKind = "cols";
   state.anchor = { row: 0, col: c };
   state.sel = { row: 0, col: c };
@@ -505,7 +553,7 @@ export function addColumnRange(c) {
 }
 
 export function addRowRange(r) {
-  state.ranges = state.ranges.concat([effectiveRange()]);
+  state.ranges = state.ranges.concat([bankable()]);
   state.selKind = "rows";
   state.anchor = { row: r, col: 0 };
   state.sel = { row: r, col: 0 };

@@ -89,7 +89,7 @@ import {
   wasm,
   wrap,
 } from "./editor.core.js";
-import { syncVolatileClock } from "./editor.selection.js";
+import { editBands, selectedBands, syncVolatileClock } from "./editor.selection.js";
 import { followHyperlink, safeLinkUrl } from "./editor.selection.js";
 
 export function manageCfRules() {
@@ -3460,9 +3460,15 @@ export function headerMenu(axis, x, y, fromKeyboard = false) {
     menu.appendChild(b);
   };
   const sep = () => menu.appendChild(el("div", "menu-sep"));
-  const span = () => {
+  // Every selected band, not only the active one (PIPE-08): a header
+  // right-click keeps a Ctrl+click selection of several bands, and a verb that
+  // acted on the active band alone would hit a band other than the one the
+  // user right-clicked.
+  const bands = () => {
+    const found = selectedBands(axis);
+    if (found) return found;
     const r = effectiveRange();
-    return { r, n: isCol ? r.c1 - r.c0 + 1 : r.r1 - r.r0 + 1 };
+    return [isCol ? [r.c0, r.c1] : [r.r0, r.r1]];
   };
   const what = isCol ? "column" : "row";
   const plural = (n) => (n === 1 ? what : `${what}s`);
@@ -3471,24 +3477,21 @@ export function headerMenu(axis, x, y, fromKeyboard = false) {
   item("Copy", false, () => doCopy());
   item("Paste", false, () => doPaste());
   sep();
-  const { n } = span();
+  const n = bands().reduce((t, [lo, hi]) => t + hi - lo + 1, 0);
   item(isCol ? `Insert ${n} ${plural(n)} left` : `Insert ${n} ${plural(n)} above`, false, () => {
-    const { r, n: count } = span();
-    tryEdit(() => (isCol
-      ? wasm.session_insert_columns(state.sheet, r.c0, count)
-      : wasm.session_insert_rows(state.sheet, r.r0, count)));
+    editBands(bands(), (lo, hi) => (isCol
+      ? wasm.session_insert_columns(state.sheet, lo, hi - lo + 1)
+      : wasm.session_insert_rows(state.sheet, lo, hi - lo + 1)));
   });
   item(isCol ? `Insert ${n} ${plural(n)} right` : `Insert ${n} ${plural(n)} below`, false, () => {
-    const { r, n: count } = span();
-    tryEdit(() => (isCol
-      ? wasm.session_insert_columns(state.sheet, r.c1 + 1, count)
-      : wasm.session_insert_rows(state.sheet, r.r1 + 1, count)));
+    editBands(bands(), (lo, hi) => (isCol
+      ? wasm.session_insert_columns(state.sheet, hi + 1, hi - lo + 1)
+      : wasm.session_insert_rows(state.sheet, hi + 1, hi - lo + 1)));
   });
   item(`Delete ${n} ${plural(n)}`, true, () => {
-    const { r, n: count } = span();
-    tryEdit(() => (isCol
-      ? wasm.session_delete_columns(state.sheet, r.c0, count)
-      : wasm.session_delete_rows(state.sheet, r.r0, count)));
+    editBands(bands(), (lo, hi) => (isCol
+      ? wasm.session_delete_columns(state.sheet, lo, hi - lo + 1)
+      : wasm.session_delete_rows(state.sheet, lo, hi - lo + 1)));
   });
   item("Clear contents", false, () => clearSelection());
   sep();
@@ -3497,22 +3500,20 @@ export function headerMenu(axis, x, y, fromKeyboard = false) {
     sizeDialog(axis, isCol ? r.c0 : r.r0);
   });
   item(isCol ? "Autofit width" : "Autofit height", false, () => {
-    const r = selRect();
-    if (isCol) for (let c = r.c0; c <= r.c1; c += 1) autofitColumn(c);
-    else for (let row = r.r0; row <= r.r1; row += 1) autofitRow(row);
+    for (const [lo, hi] of bands()) {
+      for (let i = lo; i <= hi; i += 1) (isCol ? autofitColumn : autofitRow)(i);
+    }
   });
   sep();
   item(`Hide ${plural(n)}`, false, () => {
-    const { r } = span();
-    tryEdit(() => (isCol
-      ? wasm.session_hide_cols(state.sheet, r.c0, r.c1)
-      : wasm.session_hide_rows(state.sheet, r.r0, r.r1)));
+    editBands(bands(), (lo, hi) => (isCol
+      ? wasm.session_hide_cols(state.sheet, lo, hi)
+      : wasm.session_hide_rows(state.sheet, lo, hi)));
   });
   item("Unhide", false, () => {
-    const { r } = span();
-    tryEdit(() => (isCol
-      ? wasm.session_unhide_cols(state.sheet, r.c0, r.c1)
-      : wasm.session_unhide_rows(state.sheet, r.r0, r.r1)));
+    editBands(bands(), (lo, hi) => (isCol
+      ? wasm.session_unhide_cols(state.sheet, lo, hi)
+      : wasm.session_unhide_rows(state.sheet, lo, hi)));
   });
   positionMenu(menu, x, y);
   menuKeyboard(menu, fromKeyboard);
