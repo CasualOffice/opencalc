@@ -34,7 +34,7 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 # Non-hairline `px` lengths per chrome stylesheet. Lower these as the
 # conversion lands; never raise them.
 BASELINE = {
-    "webapp/editor.css": 1131,
+    "webapp/editor.css": 1130,
     "webapp/ribbon.css": 205,
     "webapp/ribbon.tokens.css": 18,
 }
