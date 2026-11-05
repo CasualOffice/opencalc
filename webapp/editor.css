@@ -1366,7 +1366,9 @@ input.tb-size::placeholder, input.tb-font::placeholder { color: var(--oc-faint-t
 .ac-menu {
   position: fixed; z-index: 70; min-width: 260px; max-width: 360px;
   background: var(--oc-background-color); border: 1px solid var(--oc-border-color); border-radius: 8px;
-  box-shadow: var(--oc-elevation-overlay); padding: 4px; overflow: hidden;
+  box-shadow: var(--oc-elevation-overlay); padding: 0.25rem;
+  /* Eight rows, then it scrolls: functions, names and tables share one list. */
+  max-height: 14.5rem; overflow-x: hidden; overflow-y: auto;
 }
 /* Argument hint: which parameter of the current call is being typed. */
 .sig-tip {
@@ -1381,7 +1383,10 @@ input.tb-size::placeholder, input.tb-font::placeholder { color: var(--oc-faint-t
 .sig-arg.active { color: var(--oc-text-color); font-weight: 700; text-decoration: underline; }
 .ac-item { display: flex; align-items: baseline; gap: 8px; padding: 5px 9px; border-radius: 5px; cursor: pointer; }
 .ac-item.active { background: var(--oc-accent-color); }
-.ac-item.active .ac-name, .ac-item.active .ac-sig { color: #fff; }
+.ac-item.active .ac-name, .ac-item.active .ac-sig, .ac-item.active .ac-icon { color: #fff; }
+/* Which kind of entry it is — function, defined name, table — as Excel marks it. */
+.ac-icon { flex: none; width: 1rem; text-align: center; font-size: 0.6875rem; font-style: italic; color: var(--oc-muted-text-color); }
+.ac-item[data-kind="name"] .ac-icon, .ac-item[data-kind="table"] .ac-icon { font-style: normal; font-size: 0.8125rem; }
 .ac-name { font-weight: 700; font-size: 13px; color: var(--oc-text-color); font-family: inherit; }
 .ac-sig { font-size: 12px; color: var(--oc-muted-text-color); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 /* Invalid-formula editor outline + status error text. */
@@ -2841,4 +2846,8 @@ html, .editor-body { overscroll-behavior: none; }
    name lists its reasons). */
 .oc-msgbox-text { margin: 6px 0 0; font-size: 13px; line-height: 1.45; white-space: pre-line; overflow-wrap: anywhere; }
 .oc-msgbox-actions { margin-top: 16px; }
+/* The Sort Warning's choice (XL-UX-175), indented under the message as in
+   Excel; `[hidden]` restated because `.oc-radio-group` sets a display. */
+.oc-msgbox-choices { margin: 0.75rem 0 0 2.875rem; }
+.oc-msgbox-choices[hidden] { display: none; }
 .oc-msgbox-actions .oc-btn { min-width: 76px; }

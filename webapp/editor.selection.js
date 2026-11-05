@@ -6,6 +6,7 @@
 // without touching a single body.
 
 import { command as registryCommand, isRegistered, registeredIds, setPolicy } from "./commands.js";
+import { asOneUndoStep } from "./editor.formatting.js";
 import {
   A1,
   A1_PART,
@@ -100,6 +101,7 @@ import {
   wasm,
   wrap,
   holdBlock,
+  releaseBlock,
   caretAnchor,
 } from "./editor.core.js";
 
@@ -418,19 +420,120 @@ export function stepFrom(row, col, dr, dc) {
   return { row: fromRow + dr, col: fromCol + dc };
 }
 
+/// `g` with the rectangle `cut` taken out, as up to four rectangles: the rows
+/// above and below the cut across `g`'s full width, then what is left beside
+/// it on the cut's own rows.
+function carve(g, cut) {
+  const r0 = Math.max(g.r0, cut.r0), r1 = Math.min(g.r1, cut.r1);
+  const c0 = Math.max(g.c0, cut.c0), c1 = Math.min(g.c1, cut.c1);
+  if (r0 > r1 || c0 > c1) return [g];
+  const out = [];
+  if (g.r0 < r0) out.push({ r0: g.r0, c0: g.c0, r1: r0 - 1, c1: g.c1 });
+  if (g.c0 < c0) out.push({ r0, c0: g.c0, r1, c1: c0 - 1 });
+  if (c1 < g.c1) out.push({ r0, c0: c1 + 1, r1, c1: g.c1 });
+  if (r1 < g.r1) out.push({ r0: r1 + 1, c0: g.c0, r1: g.r1, c1: g.c1 });
+  return out;
+}
+
+/// Excel 365's Ctrl+click on a selected cell: that cell — and only that cell —
+/// leaves the selection (PIPE-08). Microsoft: "While pressing the Ctrl key,
+/// you can click … to deselect any cells … within a selection." The editor
+/// used to drop the whole banked range the cell was in, and inside the active
+/// range it banked a duplicate rather than deselecting anything.
+///
+/// Returns false, changing nothing, when the cell is not selected or when it is
+/// all that is selected (a selection cannot be empty). The active cell stays
+/// put if it is still selected; otherwise it moves to the top-left of the last
+/// range left, which becomes the active one. [Excel's choice of the new active
+/// cell is not documented; this keeps it inside what the selection shows.]
+function deselectCell(row, col) {
+  const m = mergeAt(row, col);
+  const cut = m ? { r0: m.r0, c0: m.c0, r1: m.r1, c1: m.c1 } : { r0: row, c0: col, r1: row, c1: col };
+  const within = (g, r, c) => r >= g.r0 && r <= g.r1 && c >= g.c0 && c <= g.c1;
+  // Whole-row and whole-column selections are left to the banking path: their
+  // extent follows the used area, which a carved rectangle would freeze.
+  if (state.selKind !== "cells") return false;
+  const before = allRanges();
+  if (!before.some((g) => within(g, row, col))) return false;
+  const left = before.flatMap((g) => carve(g, cut));
+  if (!left.length) return false;
+  const { row: ar, col: ac } = state.sel;
+  let active = left.findLastIndex((g) => within(g, ar, ac));
+  const keep = active >= 0;
+  if (!keep) active = left.length - 1;
+  const block = left[active];
+  state.ranges = left.filter((_, i) => i !== active);
+  state.selKind = "cells";
+  if (keep && !(ar === block.r0 && ac === block.c0)) {
+    state.sel = { row: ar, col: ac };
+    state.anchor = { row: block.r1, col: block.c1 };
+    holdBlock(block);
+  } else {
+    releaseBlock();
+    state.sel = { row: block.r0, col: block.c0 };
+    state.anchor = { row: block.r1, col: block.c1 };
+  }
+  draw();
+  return true;
+}
+
+/// The active range as it is banked by a Ctrl+click. A whole row or column
+/// band keeps its kind (PIPE-08): its rectangle alone cannot say so — a band
+/// is stored to the used area's edge, the same shape a cell range across the
+/// table has — and the header menu needs to know whether every selected range
+/// is a band its verbs can act on. Cell ranges stay plain rectangles.
+function bankable() {
+  const r = effectiveRange();
+  return state.selKind === "rows" || state.selKind === "cols" ? { ...r, kind: state.selKind } : r;
+}
+
+/// The selected bands along `axis` ("col" or "row") as `[lo, hi]` spans, or
+/// null when the selection is not made only of such bands.
+///
+/// A header right-click keeps the selection only when this answers (PIPE-08):
+/// the header menu's verbs act on whole rows or columns, so a selection that
+/// mixes in a cell range is not one they can act on, and collapses as before.
+/// Overlapping spans are merged; adjacent ones stay separate, since each is
+/// an area an Insert adds before.
+export function selectedBands(axis) {
+  const kind = axis === "col" ? "cols" : "rows";
+  if (state.selKind !== kind || state.ranges.some((g) => g.kind !== kind)) return null;
+  const spans = allRanges()
+    .map((g) => (axis === "col" ? [g.c0, g.c1] : [g.r0, g.r1]))
+    .sort((a, b) => a[0] - b[0]);
+  const out = [];
+  for (const [lo, hi] of spans) {
+    const last = out[out.length - 1];
+    if (last && lo <= last[1]) last[1] = Math.max(last[1], hi);
+    else out.push([lo, hi]);
+  }
+  return out;
+}
+
+/// Apply `fn(lo, hi)` to every band as one undo step.
+///
+/// Last band first, so an insert or delete never shifts a band still to come.
+/// Folded with `session_group_undo_since`: Excel deletes a non-adjacent
+/// column selection as one action, and one Ctrl+Z brings every band back.
+export function editBands(bands, fn) {
+  const mark = undoMark();
+  tryEdit(() => {
+    for (const [lo, hi] of [...bands].sort((a, b) => b[0] - a[0])) fn(lo, hi);
+  });
+  if (bands.length > 1 && mark >= 0) {
+    try { wasm.session_group_undo_since(mark); } catch {}
+  }
+}
+
 export function addRange(row, col) {
   // Ctrl+clicking a cell that is already selected *removes* it, as in Excel —
   // otherwise a mis-click into a multi-range selection could only be undone by
   // starting the whole selection again.
-  const hit = state.ranges.findIndex(
-    (g) => row >= g.r0 && row <= g.r1 && col >= g.c0 && col <= g.c1,
-  );
-  if (hit >= 0) {
-    state.ranges = state.ranges.filter((_, i) => i !== hit);
-    draw();
-    return;
-  }
-  state.ranges = state.ranges.concat([effectiveRange()]);
+  if (deselectCell(row, col)) return false;
+  state.ranges = state.ranges.concat([bankable()]);
+  // A held block (Ctrl+A, an Enter walk) *is* the active range until now; left
+  // in place it would go on answering `selRect` for the fresh cell below.
+  releaseBlock();
   let r = Math.max(0, row), c = Math.max(0, col);
   const m = mergeAt(r, c);
   if (m) { r = m.r0; c = m.c0; }
@@ -438,10 +541,11 @@ export function addRange(row, col) {
   state.anchor = { row: r, col: c };
   state.selKind = "cells";
   draw();
+  return true;
 }
 
 export function addColumnRange(c) {
-  state.ranges = state.ranges.concat([effectiveRange()]);
+  state.ranges = state.ranges.concat([bankable()]);
   state.selKind = "cols";
   state.anchor = { row: 0, col: c };
   state.sel = { row: 0, col: c };
@@ -450,7 +554,7 @@ export function addColumnRange(c) {
 }
 
 export function addRowRange(r) {
-  state.ranges = state.ranges.concat([effectiveRange()]);
+  state.ranges = state.ranges.concat([bankable()]);
   state.selKind = "rows";
   state.anchor = { row: r, col: 0 };
   state.sel = { row: r, col: 0 };
@@ -973,8 +1077,82 @@ export function looksLikeHeader(s) {
   return differs;
 }
 
-export function sortRange(desc) {
-  const s = sortTarget();
+/// Excel's *current region* around a cell — the block bounded by blank rows
+/// and columns that Ctrl+A's first press selects — or null for an empty cell.
+export function currentRegion(row, col) {
+  try {
+    const j = wasm.session_block_bounds(state.sheet, row, col);
+    return j && j !== "null" ? JSON.parse(j) : null;
+  } catch { return null; }
+}
+
+/// Excel's Sort Warning text. "OpenCalc" where Excel says "Microsoft Excel".
+export const SORT_WARNING_TEXT =
+  "OpenCalc found data next to your selection. Since you have not selected this data, " +
+  "it will not be sorted.\n\nWhat do you want to do?";
+/// Excel's answer to a sort from an empty cell with no data around it.
+export const SORT_NOTHING_TEXT =
+  "This can't be applied to the selected range. Select a single cell in a range and try again.";
+
+/// What a sort acts on (XL-UX-175), asking first where Excel asks. Resolves to
+/// `{r0,c0,r1,c1}`, or null when there is nothing to sort or the user cancelled.
+///
+/// - **One cell**: its current region. The editor used to sort the whole used
+///   area from A1, so a second table across a blank column was reordered by a
+///   key column it does not have.
+/// - **A range with data beside it** (one column of a table): Excel's Sort
+///   Warning — *Expand the selection* (the default) sorts the current region,
+///   *Continue with the current selection* sorts only what is selected, Cancel
+///   sorts nothing. "Beside" is the columns either side on the selection's
+///   rows, which is where a row-wise sort would tear records apart; a range
+///   that leaves out only the header row above it is the ordinary way to sort
+///   without one, and is not asked about. [Excel's exact trigger is from
+///   memory, unverified.]
+/// - **Whole rows, columns or the sheet**: as selected, over the used extent.
+export async function resolveSortTarget() {
+  const s = effectiveRange();
+  if (state.selKind !== "cells") return s;
+  if (s.r0 === s.r1 && s.c0 === s.c1) {
+    const region = currentRegion(s.r0, s.c0);
+    if (!region) {
+      await messageBox(SORT_NOTHING_TEXT, { icon: "warning" });
+      return null;
+    }
+    return region;
+  }
+  const filledAt = (r, c) => {
+    try { return wasm.session_cell_input(state.sheet, r, c) !== ""; } catch { return false; }
+  };
+  // Bounded like `looksLikeHeader`: a selection a million rows tall is asked
+  // about its first few thousand, which is where the table it belongs to is.
+  const last = Math.min(s.r1, s.r0 + 4095);
+  let beside = null;
+  for (let r = s.r0; r <= last && !beside; r += 1) {
+    if (s.c0 > 0 && filledAt(r, s.c0 - 1)) beside = { row: r, col: s.c0 - 1 };
+    else if (s.c1 < 16383 && filledAt(r, s.c1 + 1)) beside = { row: r, col: s.c1 + 1 };
+  }
+  if (!beside) return s;
+  const reply = await messageBox(SORT_WARNING_TEXT, {
+    title: "Sort Warning",
+    buttons: "sortCancel",
+    choices: [["expand", "Expand the selection"], ["continue", "Continue with the current selection"]],
+    choice: "expand",
+  });
+  if (reply.answer !== "sort") return null;
+  if (reply.choice === "continue") return s;
+  // The region around the active cell, or — when that cell is empty — around
+  // the data found beside the selection; never smaller than the selection.
+  const region = currentRegion(state.sel.row, state.sel.col) ?? currentRegion(beside.row, beside.col);
+  if (!region) return s;
+  return {
+    r0: Math.min(region.r0, s.r0), c0: Math.min(region.c0, s.c0),
+    r1: Math.max(region.r1, s.r1), c1: Math.max(region.c1, s.c1),
+  };
+}
+
+export async function sortRange(desc) {
+  const s = await resolveSortTarget();
+  if (!s) return;
   const hasHeader = looksLikeHeader(s);
   const key = Math.min(Math.max(state.sel.col, s.c0), s.c1);
   applySort(s, [{ col: key, asc: !desc }], hasHeader);
@@ -1603,8 +1781,9 @@ export function autoSum() {
 }
 
 export function clearSelection() {
-  try { for (const s of allRanges()) wasm.session_clear_contents(state.sheet, s.r0, s.c0, s.r1, s.c1); }
-  catch (e) { statusError(errText(e)); }
+  // Delete over a Ctrl+click selection is one undo step, as Clear All and the
+  // formatting commands are (`PIPE-02`).
+  asOneUndoStep(allRanges(), (s) => wasm.session_clear_contents(state.sheet, s.r0, s.c0, s.r1, s.c1));
   draw();
 }
 
@@ -1814,7 +1993,10 @@ export function currentFnToken() {
   if (!val.startsWith("=")) return null;
   const before = val.slice(0, pos);
   if (inStringLiteral(before)) return null; // don't autocomplete inside "text"
-  const m = before.match(/([A-Za-z][A-Za-z0-9.]*)$/);
+  // A defined name may start with `_` or `\` and hold `_` (`Region_North`),
+  // which a function name never does; without them the token stopped at the
+  // underscore and the name dropped out of the list mid-word (`PIPE-10`).
+  const m = before.match(/([A-Za-z_\\][A-Za-z0-9._\\]*)$/);
   if (!m) return null;
   const prev = before[before.length - m[1].length - 1];
   if (prev !== undefined && !"=+-*/^(,:&<>% ".includes(prev)) return null;
@@ -1827,10 +2009,24 @@ export function renderAutocomplete() {
   acState.matches.forEach((f, i) => {
     const row = document.createElement("div");
     row.className = "ac-item" + (i === acState.idx ? " active" : "");
-    // oc-safe-html: built-in function names and signatures from the engine's
-    // own catalogue, not from any document.
-    // oc-safe-html: see the note above.
-    row.innerHTML = `<span class="ac-name">${f.n}</span><span class="ac-sig">${f.sig.replace(/^[A-Z0-9]+/, "")}</span>`;
+    // What the entry is, which Excel shows with an icon (`PIPE-10`): `fx` for a
+    // function, a grid for a table, a tag-like mark for a defined name.
+    const kind = f.kind || "function";
+    row.dataset.kind = kind;
+    row.title = kind === "name" ? "Defined name" : kind === "table" ? "Table" : "Function";
+    const icon = document.createElement("span");
+    icon.className = "ac-icon";
+    icon.setAttribute("aria-hidden", "true");
+    icon.textContent = kind === "function" ? "fx" : kind === "table" ? "▦" : "≡";
+    const name = document.createElement("span");
+    name.className = "ac-name";
+    name.textContent = f.n;
+    // Text, not markup: a name and what it refers to are the document's own
+    // text, and a defined name's formula may hold any string literal.
+    const sig = document.createElement("span");
+    sig.className = "ac-sig";
+    sig.textContent = kind === "function" ? f.sig.replace(/^[A-Z0-9._]+/, "") : f.sig;
+    row.append(icon, name, sig);
     row.addEventListener("mousedown", (e) => { e.preventDefault(); acState.idx = i; acceptAutocomplete(); });
     acEl.appendChild(row);
   });
@@ -1847,6 +2043,17 @@ export function renderAutocomplete() {
   const width = acEl.offsetWidth;
   acEl.style.left = Math.max(4, Math.min(a.left, window.innerWidth - 4 - width)) + "px";
   acEl.style.top = a.top + 2 + "px";
+  // The list scrolls once it is longer than the menu; the highlighted entry is
+  // kept in view as the arrows move through it. Measured once shown, and by
+  // hand rather than with `scrollIntoView`, which also scrolls every ancestor —
+  // an embedding page included.
+  const active = acEl.children[acState.idx];
+  if (active) {
+    if (active.offsetTop < acEl.scrollTop) acEl.scrollTop = active.offsetTop;
+    else if (active.offsetTop + active.offsetHeight > acEl.scrollTop + acEl.clientHeight) {
+      acEl.scrollTop = active.offsetTop + active.offsetHeight - acEl.clientHeight;
+    }
+  }
 }
 
 export function callAtCaret() {
@@ -1890,10 +2097,14 @@ export function callAtCaret() {
 
 export function acceptAutocomplete() {
   if (!acState || !editSurface) return;
-  const name = acState.matches[acState.idx].n;
+  const pick = acState.matches[acState.idx];
+  const name = pick.n;
+  // A function opens its argument list; a name or a table is a value in its
+  // own right and is written bare, as Excel writes it.
+  const open = !pick.kind || pick.kind === "function" ? "(" : "";
   const val = editSurface.value, pos = editSurface.selectionStart;
-  editSurface.value = val.slice(0, acState.start) + name + "(" + val.slice(pos);
-  const caret = acState.start + name.length + 1;
+  editSurface.value = val.slice(0, acState.start) + name + open + val.slice(pos);
+  const caret = acState.start + name.length + open.length;
   editSurface.setSelectionRange(caret, caret);
   hideAutocomplete();
   editSurface.focus();

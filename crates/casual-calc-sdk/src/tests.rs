@@ -2075,6 +2075,73 @@ fn a_personal_view_does_not_reach_the_saved_file() {
     );
 }
 
+/// **A total over a filtered list is right the moment the file opens.**
+///
+/// Microsoft, SUBTOTAL: "1-11 includes manually-hidden rows, while 101-111
+/// excludes them; filtered-out cells are always excluded." A file cannot say
+/// which: ECMA-376 stores a filtered-out row as `<row hidden="1">`, so the
+/// import puts it in `hidden_rows`. The open recalculated straight away, before
+/// anything moved those rows to `filter_hidden`, so `SUBTOTAL(9,…)` counted
+/// what the filter hides and overwrote Excel's correct cached total — and a
+/// save wrote the wrong one back (`XL-FEAT-136`).
+#[test]
+fn a_subtotal_over_an_autofiltered_list_is_right_straight_after_open() {
+    use casual_calc_model::{AutoFilter, Cell, CellRange, FilterRule};
+    let mut session = WorkbookSession::blank();
+    {
+        let wb = session.workbook_mut();
+        let mut sheet = Sheet::new(SheetId(Id::from_parts(9, 1)), "Sheet1");
+        // A1 header, A2:A4 = 1, 2, 3; the filter keeps 1 and 3.
+        let header = wb.intern_string("N");
+        sheet.cells.set(
+            CellRef::new(0, 0),
+            Cell::value(CellValue::SharedString(header)),
+        );
+        for (row, n) in [(1u32, 1.0), (2, 2.0), (3, 3.0)] {
+            sheet
+                .cells
+                .set(CellRef::new(row, 0), Cell::value(CellValue::Number(n)));
+        }
+        let mut filter = AutoFilter::new(CellRange {
+            start: CellRef::new(0, 0),
+            end: CellRef::new(3, 0),
+        });
+        filter
+            .rules
+            .insert(0, FilterRule::Values(vec!["1".to_owned(), "3".to_owned()]));
+        sheet.auto_filter = Some(filter);
+        sheet.filter_hidden.insert(2);
+        let handle = wb.store_formula_at(
+            casual_calc_formula::parse("SUBTOTAL(9,A2:A4)").unwrap(),
+            casual_calc_formula::stored::Origin::at(5, 0),
+        );
+        let mut total = Cell::value(CellValue::Empty);
+        total.formula = Some(handle);
+        sheet.cells.set(CellRef::new(5, 0), total);
+        wb.sheets.push(sheet);
+    }
+    session.recalculate();
+    let total = |s: &WorkbookSession| {
+        s.workbook().sheets[0]
+            .cells
+            .get(CellRef::new(5, 0))
+            .map(|c| c.value.clone())
+    };
+    assert_eq!(total(&session), Some(CellValue::Number(4.0)), "the control");
+
+    let reopened = WorkbookSession::open(session.save().expect("save")).expect("reopen");
+    assert_eq!(
+        total(&reopened),
+        Some(CellValue::Number(4.0)),
+        "SUBTOTAL(9) counted the filtered-out row on open"
+    );
+    let sheet = &reopened.workbook().sheets[0];
+    assert!(
+        sheet.filter_hidden.contains(&2) && !sheet.hidden_rows.contains(&2),
+        "the filtered-out row came back as hidden by hand"
+    );
+}
+
 /// **One participant's view leaves the other's rows exactly as they were.**
 ///
 /// The tracker's acceptance, at the session level: two sessions over the same
@@ -4237,13 +4304,15 @@ mod typed_entry {
         // `1/2` alone is 2-Jan in Excel en-US, covered above; with a whole part
         // it is a fraction.
         //
-        // Excel would also apply `# ?/?`; the renderer cannot draw fraction
-        // codes yet (it shows 0.5 as `1  /`), so the value lands in General
-        // until it can — see `entry::fraction`.
-        number("0 1/2", 0.5, None);
-        number("1 3/4", 1.75, None);
-        number("-1 1/2", -1.5, None);
-        number("2 1/16", 2.0625, None);
+        // Excel applies `# ?/?` for a one-digit denominator and `# ??/??` for
+        // two (`XL-FEAT-110`) — the renderer now draws both (`XL-FEAT-021`).
+        number("0 1/2", 0.5, Some("# ?/?"));
+        number("1 3/4", 1.75, Some("# ?/?"));
+        number("-1 1/2", -1.5, Some("# ?/?"));
+        number("2 1/16", 2.0625, Some("# ??/??"));
+        // Three digits: Excel's choice of code is unverified here, so the
+        // value is kept and left in General rather than given a guessed code.
+        number("1 1/100", 1.01, None);
         text("1 1/0");
         text("1 1/2/3");
     }
@@ -4590,4 +4659,145 @@ fn a_session_opened_elsewhere_is_the_session_opened_here() {
         bytes,
         "an untouched save is the file"
     );
+}
+
+/// **Deleting a sheet breaks the formulas that read it, and a new sheet of the
+/// same name does not bring them back to life** (`PIPE-01`).
+///
+/// The formula used to keep `Gone!A1` and read `#REF!` only while nothing
+/// answered to the name. Adding a sheet called `Gone` — by hand, by import, by
+/// a collaborator — then made it compute `99 * 2` from a sheet it had never
+/// seen, with nothing on screen to say the reference had ever been broken.
+#[test]
+fn a_new_sheet_with_a_deleted_sheets_name_does_not_revive_its_formulas() {
+    use casual_calc_model::{CellRef, Id, Sheet, SheetId};
+
+    let mut s = WorkbookSession::with_sheet();
+    s.edit(crate::EditOperation::InsertSheet {
+        index: 1,
+        sheet: Box::new(Sheet::new(SheetId(Id::from_parts(70, 1)), "Gone")),
+    })
+    .unwrap();
+    let a1 = CellRef::new(0, 0);
+    let op = s.input_edit(1, a1, "5");
+    s.edit(op).unwrap();
+    let op = s.input_edit(0, a1, "=Gone!A1*2");
+    s.edit(op).unwrap();
+    s.recalculate();
+    assert_eq!(s.cell_display(0, a1), "10");
+
+    s.edit(crate::EditOperation::RemoveSheet { index: 1 })
+        .unwrap();
+    s.edit(crate::EditOperation::InsertSheet {
+        index: 1,
+        sheet: Box::new(Sheet::new(SheetId(Id::from_parts(71, 1)), "Gone")),
+    })
+    .unwrap();
+    let op = s.input_edit(1, a1, "99");
+    s.edit(op).unwrap();
+    s.recalculate();
+
+    assert_eq!(
+        s.cell_input(0, a1),
+        "=#REF!*2",
+        "the break is in the formula"
+    );
+    assert_eq!(
+        s.cell_display(0, a1),
+        "#REF!",
+        "and the new sheet is not read"
+    );
+}
+
+/// Switching sheets is what a saved file opens on, and nothing more (`PIPE-05`):
+/// not an undo step, not unsaved work, and not the end of the untouched
+/// original — an opened file looked through and saved unedited is still the
+/// file it was, signature and all.
+#[test]
+fn the_active_sheet_is_saved_without_being_an_edit() {
+    use crate::SessionFormat;
+    let mut session = WorkbookSession::blank();
+    for (i, name) in ["One", "Two", "Three"].into_iter().enumerate() {
+        session
+            .workbook_mut()
+            .sheets
+            .push(Sheet::new(SheetId(Id::from_parts(9, i as u64 + 1)), name));
+    }
+    let bytes = session.save_as(SessionFormat::Xlsx).unwrap();
+    let mut opened = WorkbookSession::open(bytes).unwrap();
+    let applied = opened.edits_applied();
+
+    assert!(opened.set_active_sheet(2));
+    assert!(!opened.can_undo(), "a sheet switch is not an undo step");
+    assert_eq!(opened.edits_applied(), applied, "nor unsaved work");
+    assert!(opened.is_unmodified(), "nor the end of the original");
+    // Selecting the selected sheet changes nothing.
+    assert!(!opened.set_active_sheet(2));
+    // Out of range is refused rather than clearing every tab.
+    assert!(!opened.set_active_sheet(7));
+
+    // Once edited, the saved file opens on the sheet it was left on.
+    opened
+        .edit(EditOperation::SetValue {
+            sheet: 0,
+            at: CellRef::new(0, 0),
+            value: CellValue::Number(1.0),
+        })
+        .unwrap();
+    let back = WorkbookSession::open(opened.save_as(SessionFormat::Xlsx).unwrap()).unwrap();
+    let selected: Vec<bool> = back
+        .workbook()
+        .sheets
+        .iter()
+        .map(|s| s.view.tab_selected)
+        .collect();
+    assert_eq!(selected, [false, false, true]);
+}
+
+/// A hidden sheet cannot be the one a file opens on: its tab is not shown.
+#[test]
+fn a_hidden_sheet_is_not_made_active() {
+    let mut session = WorkbookSession::blank();
+    for (i, name) in ["One", "Two"].into_iter().enumerate() {
+        session
+            .workbook_mut()
+            .sheets
+            .push(Sheet::new(SheetId(Id::from_parts(9, i as u64 + 1)), name));
+    }
+    session.workbook_mut().sheets[1].visibility = casual_calc_model::SheetVisibility::Hidden;
+    session.workbook_mut().sheets[0].view.tab_selected = true;
+    assert!(!session.set_active_sheet(1));
+    assert!(session.workbook().sheets[0].view.tab_selected);
+}
+
+/// The bound can be set on a session that already exists, and takes effect on
+/// what it already holds — which is how the editor bounds every session it is
+/// handed, whichever constructor made it (`PIPE-02`).
+#[test]
+fn undo_depth_can_be_bounded_after_construction() {
+    let mut session = WorkbookSession::blank();
+    session
+        .workbook_mut()
+        .sheets
+        .push(Sheet::new(SheetId(Id::from_parts(9, 1)), "Sheet1"));
+    for n in 0..5 {
+        session
+            .edit(EditOperation::SetValue {
+                sheet: 0,
+                at: CellRef::new(n, 0),
+                value: CellValue::Number(f64::from(n)),
+            })
+            .unwrap();
+    }
+    session.set_undo_depth(Some(3));
+    assert_eq!(session.config().undo_depth, Some(3));
+    let mut steps = 0;
+    while session.can_undo() && steps < 10 {
+        session.undo().unwrap();
+        steps += 1;
+    }
+    assert_eq!(steps, 3);
+    // The newest three were reversed; the two before them stand.
+    assert_eq!(value(&session, CellRef::new(1, 0)), CellValue::Number(1.0));
+    assert_eq!(value(&session, CellRef::new(2, 0)), CellValue::Empty);
 }

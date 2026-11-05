@@ -12,7 +12,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use casual_calc_formula::{Expr, rename_sheet_references, shrink_3d_span};
+use casual_calc_formula::{Expr, break_sheet_references, rename_sheet_references, shrink_3d_span};
 use casual_calc_model::{
     AutoFilter, AxisSizing, Cell, CellComment, CellRange, CellRef, CellValue, ChartView,
     ConditionalFormat, DataValidation, DefinedName, Hyperlink, MacroLibrary, PivotTable,
@@ -1287,17 +1287,27 @@ pub fn apply(workbook: &mut Workbook, op: Operation) -> Result<Operation, TxnErr
             // indices, which is what the inverse restores them at: the batch
             // re-inserts the sheet first, so every later index is the one it was.
             let gone = workbook.sheets[index].name.clone();
-            let charting = structural::sheets_charting(workbook, &gone);
-            let mut restores: Vec<Operation> = charting
+            // The sheets whose metadata will change: a chart series, or a
+            // conditional format or validation formula, naming the sheet.
+            let mut touched: BTreeSet<usize> = structural::sheets_charting(workbook, &gone)
                 .into_iter()
-                .filter(|at| *at != index)
-                .map(|at| structural::snapshot_metadata(workbook, at))
                 .collect();
-            // A 3-D reference ending on this sheet moves its end one sheet
-            // inward, as Excel does (`XL-FEAT-017`). Rewritten before the
-            // removal, at pre-removal indices, for the same reason the chart
-            // snapshots are: that is where the inverse puts them back.
-            restores.extend(shrink_3d_spans_in_formulas(workbook, index));
+            touched.extend(structural::sheets_with_rules_naming(workbook, &gone));
+            touched.remove(&index);
+            let mut restores: Vec<Operation> = touched
+                .iter()
+                .map(|&at| structural::snapshot_metadata(workbook, at))
+                .collect();
+            // Then every formula that names it (`PIPE-01`): a 3-D reference
+            // ending on this sheet moves its end one sheet inward, as Excel
+            // does (`XL-FEAT-017`), and every other reference to it becomes
+            // `#REF!`. Rewritten before the removal, at pre-removal indices,
+            // for the same reason the chart snapshots are: that is where the
+            // inverse puts them back.
+            restores.extend(unlink_sheet_from_formulas(workbook, index));
+            for &at in &touched {
+                structural::break_rules_naming(&mut workbook.sheets[at], &gone);
+            }
             let removed = workbook.sheets.remove(index);
             structural::break_series_naming(workbook, &gone);
             let reinsert = Operation::InsertSheet {
@@ -1410,30 +1420,31 @@ fn set_axis_override(axis: &mut AxisSizing, index: u32, size: Option<i64>) -> Op
     previous
 }
 
-/// Rewrite every workbook formula that references sheet `old` (by name) so it
-/// points at `new`. Only formulas that actually change are re-stored, mirroring
-/// the structural row/column rewrite pass.
-///
-/// **Defined names are formulas too**, and this pass used to walk only the
-/// cells — so renaming a sheet left every name that referred to it pointing at
-/// a sheet no longer in the workbook, with nothing said. The same shape as
-/// `FID-24`, which fixed the row/column rewrite for defined names and did not
-/// reach the rename. Found by the TP1 property the first time its seed carried
-/// a defined name: an `InsertRows` and a `RenameSheet` on the same sheet
-/// settled the name at `$C$4` in one order and `$C$3` in the other, because in
-/// the second order the insert no longer recognised the sheet the stale
-/// qualifier still named.
-/// Follow the removal of sheet `index` in every 3-D reference that ends on it,
+/// Follow the removal of sheet `index` in every formula that names it,
 /// returning the operations that put each rewritten formula back.
+///
+/// Two rewrites, in this order, on each cell formula and defined name:
+/// a 3-D reference that *ends* on the sheet moves that end one sheet inward
+/// (`shrink_3d_span`, `XL-FEAT-017`), and whatever still names the sheet
+/// becomes `#REF!` (`break_sheet_references`, `PIPE-01`). Both on one copy and
+/// restored by one operation per cell: two restores for one cell would put
+/// back the intermediate state if applied in the wrong order. A defined name
+/// *scoped* to the sheet goes with it, as Excel removes a sheet's local names.
 ///
 /// Called while the sheet is still there, so `order` — the tab order the span
 /// is measured in — still holds it, and every index in the returned
 /// operations is a pre-removal one. The removed sheet's own cells are left
 /// alone: they leave with it and come back with it.
-fn shrink_3d_spans_in_formulas(workbook: &mut Workbook, index: usize) -> Vec<Operation> {
+fn unlink_sheet_from_formulas(workbook: &mut Workbook, index: usize) -> Vec<Operation> {
     let gone = workbook.sheets[index].name.clone();
+    let gone_id = workbook.sheets[index].id;
     let order: Vec<String> = workbook.sheets.iter().map(|s| s.name.clone()).collect();
     let order: Vec<&str> = order.iter().map(String::as_str).collect();
+    let unlink = |expr: &mut Expr| {
+        let shrunk = shrink_3d_span(expr, &gone, &order);
+        let broken = break_sheet_references(expr, &gone);
+        shrunk || broken
+    };
     let mut jobs: Vec<(usize, CellRef, Cell, Expr)> = Vec::new();
     for (idx, sheet) in workbook.sheets.iter().enumerate() {
         if idx == index {
@@ -1444,7 +1455,7 @@ fn shrink_3d_spans_in_formulas(workbook: &mut Workbook, index: usize) -> Vec<Ope
                 && let Some(expr) = workbook.formula(handle)
             {
                 let mut rewritten = expr.clone();
-                if shrink_3d_span(&mut rewritten, &gone, &order) {
+                if unlink(&mut rewritten) {
                     jobs.push((idx, addr, cell.clone(), rewritten));
                 }
             }
@@ -1462,9 +1473,13 @@ fn shrink_3d_spans_in_formulas(workbook: &mut Workbook, index: usize) -> Vec<Ope
         });
     }
     let names_before = workbook.defined_names.clone();
-    let mut names_changed = false;
+    let held = workbook.defined_names.len();
+    workbook
+        .defined_names
+        .retain(|name| name.sheet != Some(gone_id));
+    let mut names_changed = workbook.defined_names.len() != held;
     for name in &mut workbook.defined_names {
-        names_changed |= shrink_3d_span(&mut name.formula, &gone, &order);
+        names_changed |= unlink(&mut name.formula);
     }
     if names_changed {
         restores.push(Operation::SetDefinedNames(names_before));
@@ -1472,6 +1487,19 @@ fn shrink_3d_spans_in_formulas(workbook: &mut Workbook, index: usize) -> Vec<Ope
     restores
 }
 
+/// Rewrite every workbook formula that references sheet `old` (by name) so it
+/// points at `new`. Only formulas that actually change are re-stored, mirroring
+/// the structural row/column rewrite pass.
+///
+/// **Defined names are formulas too**, and this pass used to walk only the
+/// cells — so renaming a sheet left every name that referred to it pointing at
+/// a sheet no longer in the workbook, with nothing said. The same shape as
+/// `FID-24`, which fixed the row/column rewrite for defined names and did not
+/// reach the rename. Found by the TP1 property the first time its seed carried
+/// a defined name: an `InsertRows` and a `RenameSheet` on the same sheet
+/// settled the name at `$C$4` in one order and `$C$3` in the other, because in
+/// the second order the insert no longer recognised the sheet the stale
+/// qualifier still named.
 fn rename_sheet_in_formulas(workbook: &mut Workbook, old: &str, new: &str) {
     let mut jobs: Vec<(usize, CellRef, Expr)> = Vec::new();
     for (idx, sheet) in workbook.sheets.iter().enumerate() {
@@ -1583,6 +1611,21 @@ impl History {
         Self {
             depth,
             ..Self::default()
+        }
+    }
+
+    /// Change how many undo entries are kept, dropping the oldest at once when
+    /// the history already holds more than the new bound.
+    ///
+    /// Dropping entries is the bounded stack's ordinary behaviour, so it seals
+    /// the history the way [`Self::apply`]'s own trimming implicitly does: a
+    /// mark taken before can no longer reach entries that are gone, and
+    /// [`Self::group_since`] already refuses when it would.
+    pub fn set_depth(&mut self, depth: Option<usize>) {
+        self.depth = depth;
+        if let Some(depth) = depth {
+            let excess = self.undo.len().saturating_sub(depth);
+            self.undo.drain(..excess);
         }
     }
 

@@ -9,9 +9,10 @@
 //! `h:mm AM/PM`) on the 1900 serial-date system; the positive/negative/zero/text
 //! sections of a multi-section code; the text section applied to string values
 //! ([`format_text`]); and the eight named section colours
-//! ([`format_number_colored`]).
+//! ([`format_number_colored`]); and fractions (`# ?/?`, `# ??/??`, `?/?`,
+//! fixed denominators like `# ?/16`).
 //!
-//! Deferred: fractions (`# ??/??`), conditional
+//! Deferred: conditional
 //! sections (`[>100]`), and the legacy `[Color n]` palette index.
 
 /// Split a SpreadsheetML format code into sections separated by unquoted `;`.
@@ -158,6 +159,12 @@ fn format_sections(value: f64, code: &str, date1904: bool) -> (String, Option<&'
     if is_date_or_time(section) {
         return (format_date_time(value, section, date1904), color);
     }
+    // Fractions before the plain numeric path: `?/?` has no `0` or `#` at all,
+    // and `# ?/?` has one, so the numeric path would print the integer part and
+    // turn the rest into spaces and a slash — 0.5 came out as `1  / `.
+    if let Some(spec) = fraction_spec(section) {
+        return (format_fraction(value, &spec, is_custom_negative), color);
+    }
     if has_digit_placeholder(section) {
         return (
             format_numeric_section(value, section, is_custom_negative),
@@ -255,6 +262,119 @@ pub fn format_general(value: f64) -> String {
     let decimals = (14 - magnitude).clamp(0, 30) as usize;
     let rounded: f64 = format!("{value:.decimals$}").parse().unwrap_or(value);
     format!("{rounded}")
+}
+
+/// General's fit-to-width rule (`XL-UX-152`): the General rendering of `value`
+/// in at most `max_chars` characters, or `None` when no shortening fits — the
+/// caller then shows `#####`.
+///
+/// Excel does this for General and only General: "if the cell isn't wide
+/// enough to show the entire number, this format rounds the number", and large
+/// numbers go to scientific. A fixed format (`0.00`) asked for its digits, so it
+/// keeps `#####` — that is the caller's business, not this function's.
+///
+/// Two shortenings are tried — fewer decimals, and scientific with a mantissa
+/// as long as fits — and the one keeping more significant digits wins, so
+/// `3.14159265` in four characters is `3.14` and `0.00001234` in seven is
+/// `1.2E-05` rather than `0.00001`. A shortening that would round the whole
+/// number away (`0.000` for 0.00001234) is never chosen: that would be a
+/// different number on screen, which is exactly what `#####` exists to avoid.
+///
+/// Counted in characters. The host measures pixels and asks for successively
+/// shorter budgets until the result fits; this function does not know a font.
+pub fn format_general_fit(value: f64, max_chars: usize) -> Option<String> {
+    let full = format_general(value);
+    if full.chars().count() <= max_chars {
+        return Some(full);
+    }
+    if !value.is_finite() || max_chars == 0 {
+        return None;
+    }
+    match (
+        general_fit_decimal(value, max_chars),
+        general_fit_scientific(value, max_chars),
+    ) {
+        (Some(d), Some(s)) => Some(if significant_digits(&s) > significant_digits(&d) {
+            s
+        } else {
+            d
+        }),
+        (d, s) => d.or(s),
+    }
+}
+
+/// `value` rounded to as many decimals as fit, trailing zeros dropped.
+fn general_fit_decimal(value: f64, max_chars: usize) -> Option<String> {
+    let magnitude = value.abs();
+    for decimals in (0..=max_chars.min(20)).rev() {
+        let factor = 10f64.powi(i32::try_from(decimals).ok()?);
+        let scaled = magnitude * factor;
+        if !scaled.is_finite() {
+            continue;
+        }
+        // Half away from zero, as the numeric path rounds.
+        let rounded = scaled.round() / factor;
+        let mut text = format!("{rounded:.decimals$}");
+        if text.contains('.') {
+            text = text.trim_end_matches('0').trim_end_matches('.').to_owned();
+        }
+        if !text.bytes().any(|b| (b'1'..=b'9').contains(&b)) {
+            // Rounded to nothing; fewer decimals can only make that worse.
+            return None;
+        }
+        if value < 0.0 {
+            text.insert(0, '-');
+        }
+        if text.chars().count() <= max_chars {
+            return Some(text);
+        }
+    }
+    None
+}
+
+/// `value` as `d.dddE+XX` with as long a mantissa as fits — General's
+/// scientific form: two-digit exponent at least, mantissa zeros dropped.
+fn general_fit_scientific(value: f64, max_chars: usize) -> Option<String> {
+    // Mantissa and exponent from Rust's own exponent form, which is exact for
+    // subnormals and 1e308 alike — `10f64.powi(exp)` is not.
+    let raw = format!("{:.16e}", value.abs());
+    let (m, e) = raw.split_once('e')?;
+    let base_mantissa: f64 = m.parse().ok()?;
+    let base_exp: i32 = e.parse().ok()?;
+    for decimals in (0..=14usize).rev() {
+        // Half away from zero, not `{:e}`'s half-to-even: 1.5E+100 in six
+        // characters is `2E+100`, as the numeric path would round it.
+        let factor = 10f64.powi(i32::try_from(decimals).ok()?);
+        let mut rounded = (base_mantissa * factor).round() / factor;
+        let mut exp = base_exp;
+        if rounded >= 10.0 {
+            rounded /= 10.0;
+            exp += 1;
+        }
+        let digits = format!("{rounded:.decimals$}");
+        let mantissa = if digits.contains('.') {
+            digits.trim_end_matches('0').trim_end_matches('.')
+        } else {
+            digits.as_str()
+        };
+        let sign = if value < 0.0 { "-" } else { "" };
+        let exp_sign = if exp < 0 { '-' } else { '+' };
+        let text = format!("{sign}{mantissa}E{exp_sign}{:02}", exp.unsigned_abs());
+        if text.chars().count() <= max_chars {
+            return Some(text);
+        }
+    }
+    None
+}
+
+/// How many significant digits a rendering shows (the mantissa's, for `E`).
+fn significant_digits(text: &str) -> usize {
+    let mantissa = text.split('E').next().unwrap_or(text);
+    mantissa
+        .chars()
+        .filter(char::is_ascii_digit)
+        .skip_while(|c| *c == '0')
+        .count()
 }
 
 /// Whether a section contains a real digit placeholder, ignoring the places a
@@ -539,6 +659,377 @@ fn format_numeric_section(value: f64, section: &str, is_custom_negative: bool) -
     format!("{sign}{prefix}{digits}{suffix}")
 }
 
+/// One element of a fraction section, after quotes, escapes and bracket tokens
+/// have been resolved to the text they print.
+#[derive(Clone, Debug, PartialEq)]
+enum FracTok {
+    /// A digit placeholder: `0`, `#` or `?`.
+    Ph(char),
+    /// A thousands separator inside the integer part.
+    Comma,
+    Slash,
+    /// A literal digit `1`–`9` — the start of a fixed denominator (`?/16`).
+    Digit(char),
+    Lit(String),
+}
+
+/// The denominator of a fraction code.
+#[derive(Debug, PartialEq)]
+enum Denominator {
+    /// `?/8`, `??/100`: always this denominator, never reduced.
+    Fixed(u64),
+    /// `?/?`, `??/??`: the closest fraction whose denominator fits these
+    /// placeholders — one `?` allows up to 9, two up to 99.
+    UpTo(Vec<char>),
+}
+
+/// A parsed fraction section: `prefix [integer sep] numerator/denominator suffix`.
+#[derive(Debug)]
+struct FractionSpec {
+    prefix: String,
+    /// The integer placeholders (`#`, `0`, `#,###`), or `None` for a code like
+    /// `?/?` that shows an improper fraction.
+    integer: Option<Vec<char>>,
+    /// Literal text between the integer and the numerator — the space in `# ?/?`.
+    separator: String,
+    numerator: Vec<char>,
+    denominator: Denominator,
+    suffix: String,
+}
+
+fn fraction_tokens(section: &str) -> Vec<FracTok> {
+    let mut out = Vec::new();
+    let mut chars = section.chars().peekable();
+    let lit = |out: &mut Vec<FracTok>, s: String| out.push(FracTok::Lit(s));
+    while let Some(ch) = chars.next() {
+        match ch {
+            '0' | '#' | '?' => out.push(FracTok::Ph(ch)),
+            ',' => out.push(FracTok::Comma),
+            '/' => out.push(FracTok::Slash),
+            '1'..='9' => out.push(FracTok::Digit(ch)),
+            '"' => {
+                let mut s = String::new();
+                for q in chars.by_ref() {
+                    if q == '"' {
+                        break;
+                    }
+                    s.push(q);
+                }
+                lit(&mut out, s);
+            }
+            '\\' => {
+                if let Some(esc) = chars.next() {
+                    lit(&mut out, esc.to_string());
+                }
+            }
+            '[' => {
+                let mut token = String::new();
+                for b in chars.by_ref() {
+                    if b == ']' {
+                        break;
+                    }
+                    token.push(b);
+                }
+                if let Some(rest) = token.strip_prefix('$') {
+                    lit(&mut out, rest.split('-').next().unwrap_or("").to_owned());
+                }
+            }
+            '_' => {
+                chars.next();
+                lit(&mut out, " ".to_owned());
+            }
+            '*' => {
+                chars.next();
+            }
+            c => lit(&mut out, c.to_string()),
+        }
+    }
+    out
+}
+
+/// Literal text of a token run that sits outside the number. A stray `?` there
+/// is alignment padding, as everywhere else.
+fn fraction_literal(tokens: &[FracTok]) -> String {
+    tokens
+        .iter()
+        .map(|t| match t {
+            FracTok::Lit(s) => s.clone(),
+            FracTok::Ph('?') => " ".to_owned(),
+            FracTok::Ph(c) | FracTok::Digit(c) => c.to_string(),
+            FracTok::Comma => ",".to_owned(),
+            FracTok::Slash => "/".to_owned(),
+        })
+        .collect()
+}
+
+/// Recognise a fraction section: an unquoted `/` with digit placeholders
+/// immediately before it and placeholders or a fixed denominator after it.
+///
+/// The accounting zero section `"-"??` has `?` but no slash, and a date's `/`
+/// is never reached (dates are recognised first), so neither is mistaken for a
+/// fraction.
+fn fraction_spec(section: &str) -> Option<FractionSpec> {
+    let toks = fraction_tokens(section);
+    let slash = toks.iter().position(|t| *t == FracTok::Slash)?;
+    let is_ph = |t: &FracTok| matches!(t, FracTok::Ph(_));
+
+    // Numerator: the placeholder run that ends at the slash.
+    let mut num_start = slash;
+    while num_start > 0 && is_ph(&toks[num_start - 1]) {
+        num_start -= 1;
+    }
+    if num_start == slash {
+        return None;
+    }
+    let numerator: Vec<char> = toks[num_start..slash]
+        .iter()
+        .filter_map(|t| match t {
+            FracTok::Ph(c) => Some(*c),
+            _ => None,
+        })
+        .collect();
+
+    // Denominator: a fixed number (it starts with 1–9; `0` after it is a digit
+    // of the number, as in `?/10`), or a placeholder run.
+    let mut end = slash + 1;
+    let denominator = match toks.get(end) {
+        Some(FracTok::Digit(_)) => {
+            let mut digits = String::new();
+            while let Some(FracTok::Digit(c) | FracTok::Ph(c @ '0')) = toks.get(end) {
+                digits.push(*c);
+                end += 1;
+            }
+            Denominator::Fixed(digits.parse().ok().filter(|d| *d > 0)?)
+        }
+        Some(FracTok::Ph(_)) => {
+            let mut pat = Vec::new();
+            while let Some(FracTok::Ph(c)) = toks.get(end) {
+                pat.push(*c);
+                end += 1;
+            }
+            Denominator::UpTo(pat)
+        }
+        _ => return None,
+    };
+
+    // Integer part: a placeholder run before the numerator, separated from it
+    // by literal text (the space). Without one the fraction is improper.
+    let mut sep_start = num_start;
+    while sep_start > 0 && matches!(toks[sep_start - 1], FracTok::Lit(_)) {
+        sep_start -= 1;
+    }
+    let (prefix_end, integer, separator) =
+        if sep_start > 0 && matches!(toks[sep_start - 1], FracTok::Ph(_) | FracTok::Comma) {
+            let mut int_start = sep_start;
+            while int_start > 0 && matches!(toks[int_start - 1], FracTok::Ph(_) | FracTok::Comma) {
+                int_start -= 1;
+            }
+            let pat: Vec<char> = toks[int_start..sep_start]
+                .iter()
+                .map(|t| match t {
+                    FracTok::Ph(c) => *c,
+                    _ => ',',
+                })
+                .collect();
+            (
+                int_start,
+                Some(pat),
+                fraction_literal(&toks[sep_start..num_start]),
+            )
+        } else {
+            (num_start, None, String::new())
+        };
+
+    Some(FractionSpec {
+        prefix: fraction_literal(&toks[..prefix_end]),
+        integer,
+        separator,
+        numerator,
+        denominator,
+        suffix: fraction_literal(&toks[end..]),
+    })
+}
+
+/// The fraction closest to `x` (≥ 0) whose denominator is at most `max_den`:
+/// continued-fraction convergents, then the best semiconvergent at the bound.
+/// Equivalent to trying every denominator, and cheap for `?????/?????`.
+fn closest_fraction(x: f64, max_den: u64) -> (u64, u64) {
+    let (mut p0, mut q0, mut p1, mut q1) = (0u64, 1u64, 1u64, 0u64);
+    let mut r = x;
+    for _ in 0..64 {
+        let mut a = r.floor();
+        let mut frac = r - a;
+        // `3.0000000000000004` and `2.9999999999999996` are both 3.
+        if frac > 1.0 - 1e-10 {
+            a += 1.0;
+            frac = 0.0;
+        }
+        if !(0.0..1e15).contains(&a) {
+            break;
+        }
+        let a = a as u64;
+        let Some(q2) = a.checked_mul(q1).and_then(|v| v.checked_add(q0)) else {
+            break;
+        };
+        if q2 > max_den {
+            break;
+        }
+        // An improper fraction's numerator is about x times its denominator,
+        // which can pass u64 before the denominator reaches its cap; a
+        // saturated numerator would be a wrong fraction, so stop instead.
+        let Some(p2) = a.checked_mul(p1).and_then(|v| v.checked_add(p0)) else {
+            break;
+        };
+        (p0, q0, p1, q1) = (p1, q1, p2, q2);
+        if frac < 1e-10 {
+            return (p1, q1);
+        }
+        r = 1.0 / frac;
+    }
+    if q1 == 0 {
+        // Only possible for a value too large to have a fractional part at all.
+        return (x.round() as u64, 1);
+    }
+    let k = (max_den - q0) / q1;
+    let err = |p: u64, q: u64| (x - p as f64 / q as f64).abs();
+    // Same bound for the semiconvergent: if it does not fit, the convergent
+    // stands (`=TEXT(1E12+0.3,"?????????/?????????")` reaches here).
+    let semi = k
+        .checked_mul(p1)
+        .and_then(|v| v.checked_add(p0))
+        .zip(k.checked_mul(q1).and_then(|v| v.checked_add(q0)));
+    let Some((sp, sq)) = semi else {
+        return (p1, q1);
+    };
+    // On a tie the convergent wins: it has the smaller denominator.
+    if err(sp, sq) < err(p1, q1) {
+        (sp, sq)
+    } else {
+        (p1, q1)
+    }
+}
+
+/// Digits right-aligned in a placeholder run: `0` pads with a zero, `?` with a
+/// space, `#` with nothing — which is what lines up the slashes in a column.
+fn pad_placeholders_left(digits: &str, pat: &[char]) -> String {
+    let n = digits.chars().count();
+    let mut out = String::new();
+    if n < pat.len() {
+        for c in &pat[..pat.len() - n] {
+            match c {
+                '0' => out.push('0'),
+                '?' => out.push(' '),
+                _ => {}
+            }
+        }
+    }
+    out.push_str(digits);
+    out
+}
+
+/// Digits left-aligned in a denominator's placeholders: a `?` pads after the
+/// number with a space. A `0` pads in front with a zero, since a trailing zero
+/// would change the number being read.
+fn pad_denominator(digits: &str, pat: &[char]) -> String {
+    let n = digits.chars().count();
+    if n >= pat.len() {
+        return digits.to_owned();
+    }
+    let unused = &pat[..pat.len() - n];
+    let zeros = unused.iter().filter(|c| **c == '0').count();
+    let spaces = unused.iter().filter(|c| **c == '?').count();
+    format!("{}{digits}{}", "0".repeat(zeros), " ".repeat(spaces))
+}
+
+/// Render a value through a fraction section (`XL-FEAT-021`).
+fn format_fraction(value: f64, spec: &FractionSpec, is_custom_negative: bool) -> String {
+    let target = if is_custom_negative {
+        value.abs()
+    } else {
+        value
+    };
+    if !target.is_finite() || target.abs() >= 1e15 {
+        // No fractional part survives at this magnitude; do not pretend.
+        return format_general(target);
+    }
+    let x = target.abs();
+    let approx = |v: f64| match &spec.denominator {
+        Denominator::Fixed(d) => ((v * *d as f64).round() as u64, *d),
+        Denominator::UpTo(pat) => {
+            let max = 10u64.saturating_pow(u32::try_from(pat.len().min(9)).unwrap_or(9)) - 1;
+            closest_fraction(v, max.max(1))
+        }
+    };
+
+    let (whole, num, den) = match &spec.integer {
+        Some(_) => {
+            let mut whole = x.trunc() as u64;
+            let (mut num, den) = approx(x - x.trunc());
+            // Rounding up to a whole (0.99 under `?/?` is 1/1) carries.
+            if den > 0 && num >= den {
+                whole += num / den;
+                num %= den;
+            }
+            (whole, num, den)
+        }
+        None => {
+            let (num, den) = approx(x);
+            (0, num, den)
+        }
+    };
+    let negative = target < 0.0 && (whole > 0 || num > 0);
+    let sign = if negative { "-" } else { "" };
+    let den_text = match &spec.denominator {
+        Denominator::Fixed(d) => d.to_string(),
+        Denominator::UpTo(pat) => pad_denominator(&den.to_string(), pat),
+    };
+
+    let body = match &spec.integer {
+        None => format!(
+            "{}/{den_text}",
+            pad_placeholders_left(&num.to_string(), &spec.numerator)
+        ),
+        Some(int_pat) => {
+            let digits: Vec<char> = int_pat.iter().copied().filter(|c| *c != ',').collect();
+            let group = |s: String| {
+                if int_pat.contains(&',') && !s.trim().is_empty() {
+                    group_thousands(&s)
+                } else {
+                    s
+                }
+            };
+            if num == 0 {
+                // A whole number: the fraction is blanked to spaces of its own
+                // width so the integer stays in its column (`2    `), and a
+                // zero is shown as `0` even under `#`.
+                let int_text = group(pad_placeholders_left(&whole.to_string(), &digits));
+                let width = spec.separator.chars().count()
+                    + spec.numerator.len()
+                    + 1
+                    + den_text.chars().count();
+                format!("{int_text}{}", " ".repeat(width))
+            } else {
+                let whole_digits = if whole == 0 {
+                    String::new()
+                } else {
+                    whole.to_string()
+                };
+                let int_text = group(pad_placeholders_left(&whole_digits, &digits));
+                let num_text = pad_placeholders_left(&num.to_string(), &spec.numerator);
+                // With no integer shown (`#` on 0.5) the separator goes too:
+                // Excel shows `1/2`, not ` 1/2`.
+                let sep = if int_text.is_empty() {
+                    ""
+                } else {
+                    spec.separator.as_str()
+                };
+                format!("{int_text}{sep}{num_text}/{den_text}")
+            }
+        }
+    };
+    format!("{sign}{}{body}{}", spec.prefix, spec.suffix)
+}
+
 /// Split a numeric format section into `(prefix literal, digit pattern, suffix
 /// literal)`. Literal runs honor quotes (`"…"`), escapes (`\x`), and `[$SYM-…]`
 /// currency tokens; `_x` (spacing) and `*x` (fill) are skipped.
@@ -605,8 +1096,8 @@ fn split_literal_runs(section: &str) -> (String, String, String) {
             // `?` is a digit-alignment placeholder (pads with a space instead of
             // a digit when there's nothing to show — used e.g. in the Accounting
             // zero-section `"-"??` to align with the decimal digits of the
-            // positive/negative sections). Fraction layout (`# ??/??`) is still
-            // unsupported; this covers the common alignment-padding usage.
+            // positive/negative sections). A fraction (`# ??/??`) never gets
+            // here: `fraction_spec` claims it first.
             '?' => out.push(' '),
             c if !matches!(c, '0' | '#' | '.' | ',') => out.push(c),
             _ => {}
@@ -1695,5 +2186,173 @@ mod format_defect_tests {
         assert_eq!(format_number(123456.0, "000"), "123456");
         // And a negative keeps its sign outside the padding.
         assert_eq!(format_number(-42.0, "00000"), "-00042");
+    }
+}
+
+/// Fraction codes (`XL-FEAT-021`). Expected strings follow Excel: the `# ???/???`
+/// rows are Microsoft's own example ("Number format codes" support article,
+/// 5.25 → `5 1/4`, 5.3 → `5 3/10`, "numerators of fractions aligned"); the
+/// rest follow the same layout rule — `?` pads the numerator on the left and
+/// the denominator on the right, so the slashes of a column line up.
+#[cfg(test)]
+mod fraction_tests {
+    use super::format_number;
+
+    #[test]
+    fn up_to_n_digit_denominators_find_the_closest_fraction() {
+        assert_eq!(format_number(0.5, "# ?/?"), "1/2");
+        assert_eq!(format_number(1.5, "# ?/?"), "1 1/2");
+        assert_eq!(format_number(0.75, "# ?/?"), "3/4");
+        assert_eq!(format_number(1.0 / 3.0, "# ?/?"), "1/3");
+        // π: the best one-digit denominator is 7, two digits 99, three 113.
+        assert_eq!(format_number(std::f64::consts::PI, "# ?/?"), "3 1/7");
+        assert_eq!(format_number(std::f64::consts::PI, "# ??/??"), "3 14/99");
+        assert_eq!(
+            format_number(std::f64::consts::PI, "# ???/???"),
+            "3  16/113"
+        );
+        // Microsoft's example for `# ???/???`, padding included.
+        assert_eq!(format_number(5.25, "# ???/???"), "5   1/4  ");
+        assert_eq!(format_number(5.3, "# ???/???"), "5   3/10 ");
+    }
+
+    #[test]
+    fn question_marks_pad_so_the_slashes_align() {
+        assert_eq!(format_number(0.25, "# ??/??"), " 1/4 ");
+        assert_eq!(format_number(1.25, "# ??/??"), "1  1/4 ");
+        assert_eq!(format_number(1.2, "# ??/??"), "1  1/5 ");
+        assert_eq!(format_number(0.3, "# ??/??"), " 3/10");
+    }
+
+    #[test]
+    fn a_whole_number_blanks_the_fraction_part() {
+        // Spaces as wide as the fraction, so the integer stays in its column.
+        assert_eq!(format_number(2.0, "# ?/?"), "2    ");
+        assert_eq!(format_number(2.0, "# ??/??"), "2      ");
+        // Rounding up to a whole carries into the integer.
+        assert_eq!(format_number(0.99, "# ?/?"), "1    ");
+        assert_eq!(format_number(1.97, "# ?/?"), "2    ");
+        // Zero is shown, not left blank.
+        assert_eq!(format_number(0.0, "# ?/?"), "0    ");
+    }
+
+    #[test]
+    fn without_an_integer_part_the_fraction_is_improper() {
+        assert_eq!(format_number(1.5, "?/?"), "3/2");
+        assert_eq!(format_number(2.75, "?/?"), "11/4");
+        assert_eq!(format_number(2.0, "?/?"), "2/1");
+        assert_eq!(format_number(0.999, "?/?"), "1/1");
+        assert_eq!(format_number(0.0, "?/?"), "0/1");
+    }
+
+    #[test]
+    fn a_large_improper_fraction_does_not_overflow() {
+        // No integer part, so the numerator is about value x denominator: with
+        // nine-digit denominators a 1e12 value walks the semiconvergent past
+        // u64. It must fall back to the convergent, not panic (overflow checks
+        // are on in release, so this would abort a recalc).
+        // The f64 is exactly 1000000000000.300048828125 = 4096000000001229/4096.
+        assert_eq!(
+            format_number(1e12 + 0.3, "?????????/?????????"),
+            "4096000000001229/4096     "
+        );
+        // Every width up to the cap stays total.
+        for n in 1..=9 {
+            let q = "?".repeat(n);
+            let _ = format_number(9.99e14 + 0.7, &format!("{q}/{q}"));
+        }
+    }
+
+    #[test]
+    fn a_fixed_denominator_is_kept_and_not_reduced() {
+        assert_eq!(format_number(0.5, "# ?/2"), "1/2");
+        assert_eq!(format_number(0.5, "# ?/4"), "2/4");
+        assert_eq!(format_number(1.3, "# ?/4"), "1 1/4");
+        assert_eq!(format_number(0.5, "# ?/8"), "4/8");
+        assert_eq!(format_number(0.0625, "# ??/16"), " 1/16");
+        assert_eq!(format_number(0.3, "# ?/10"), "3/10");
+        assert_eq!(format_number(0.25, "# ??/100"), "25/100");
+        assert_eq!(format_number(0.07, "# ??/100"), " 7/100");
+        assert_eq!(format_number(1.5, "?/4"), "6/4");
+    }
+
+    #[test]
+    fn negatives_carry_one_sign_in_front() {
+        assert_eq!(format_number(-1.5, "# ?/?"), "-1 1/2");
+        assert_eq!(format_number(-0.5, "# ?/?"), "-1/2");
+        assert_eq!(format_number(-1.5, "?/?"), "-3/2");
+        // An explicit negative section supplies its own sign.
+        assert_eq!(format_number(-1.5, "# ?/?;(# ?/?)"), "(1 1/2)");
+    }
+
+    #[test]
+    fn literals_and_zero_padded_integers_around_a_fraction() {
+        assert_eq!(format_number(1.5, "0 ?/?"), "1 1/2");
+        assert_eq!(format_number(0.5, "0 ?/?"), "0 1/2");
+        assert_eq!(format_number(2.5, "# ?/?\" in\""), "2 1/2 in");
+        assert_eq!(format_number(1234.5, "#,### ?/?"), "1,234 1/2");
+        assert_eq!(format_number(1.5, "$# ?/?"), "$1 1/2");
+    }
+}
+
+/// General's fit-to-width rule (`XL-UX-152`). Microsoft: General "rounds numbers
+/// that have decimals" when the cell is not wide enough, and "uses scientific
+/// (exponential) notation for large numbers" ("Available number formats in
+/// Excel"). Which of the two wins for a small number is not documented; the
+/// rule here is the one that keeps more significant digits.
+#[cfg(test)]
+mod general_fit_tests {
+    use super::format_general_fit as fit;
+
+    #[test]
+    fn a_number_that_fits_is_left_alone() {
+        assert_eq!(fit(1234567.0, 7).as_deref(), Some("1234567"));
+        assert_eq!(fit(1.23456789, 10).as_deref(), Some("1.23456789"));
+        assert_eq!(fit(-42.0, 3).as_deref(), Some("-42"));
+    }
+
+    #[test]
+    fn decimals_are_rounded_away_first() {
+        assert_eq!(fit(1.23456789, 4).as_deref(), Some("1.23"));
+        assert_eq!(fit(1.23456789, 6).as_deref(), Some("1.2346"));
+        assert_eq!(fit(1.23456789, 2).as_deref(), Some("1"));
+        assert_eq!(fit(1.23456789, 1).as_deref(), Some("1"));
+        // Trailing zeros of the rounding are not shown.
+        assert_eq!(fit(2.5004, 4).as_deref(), Some("2.5"));
+        // The carry may round up a digit and still fit.
+        assert_eq!(fit(9.996, 4).as_deref(), Some("10"));
+        assert_eq!(fit(-0.123456, 5).as_deref(), Some("-0.12"));
+        assert_eq!(fit(1234.5678, 6).as_deref(), Some("1234.6"));
+    }
+
+    #[test]
+    fn an_integer_part_too_wide_goes_scientific() {
+        assert_eq!(fit(1234567.0, 6).as_deref(), Some("1E+06"));
+        assert_eq!(fit(1234567.0, 5).as_deref(), Some("1E+06"));
+        assert_eq!(fit(12345678.0, 7).as_deref(), Some("1.2E+07"));
+        assert_eq!(fit(1234567890.0, 9).as_deref(), Some("1.235E+09"));
+        assert_eq!(fit(-12345678.0, 8).as_deref(), Some("-1.2E+07"));
+        // The mantissa's rounding carries into the exponent.
+        assert_eq!(fit(99_960_000.0, 7).as_deref(), Some("1E+08"));
+        // Trailing zeros of the mantissa are dropped.
+        assert_eq!(fit(12_000_000.0, 7).as_deref(), Some("1.2E+07"));
+        assert_eq!(fit(1e20, 7).as_deref(), Some("1E+20"));
+        assert_eq!(fit(1.5e100, 7).as_deref(), Some("2E+100"));
+    }
+
+    #[test]
+    fn a_small_number_keeps_its_significant_digits() {
+        // `0.00001` keeps one digit of 0.00001234, `1.2E-05` keeps two.
+        assert_eq!(fit(0.000_012_34, 7).as_deref(), Some("1.2E-05"));
+        // Rounded to `0.0`, nothing of the number would be left.
+        assert_eq!(fit(0.000_012_34, 5).as_deref(), Some("1E-05"));
+        assert_eq!(fit(0.0123, 5).as_deref(), Some("0.012"));
+    }
+
+    #[test]
+    fn nothing_fits_is_none() {
+        assert_eq!(fit(1234567.0, 4), None);
+        assert_eq!(fit(-1234567.0, 5), None);
+        assert_eq!(fit(1.0, 0), None);
     }
 }

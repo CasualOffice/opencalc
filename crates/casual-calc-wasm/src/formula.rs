@@ -72,6 +72,15 @@ pub fn format_preview(value: f64, code: &str) -> String {
     }
 }
 
+/// A General number shortened to at most `max_chars` characters — fewer
+/// decimals, or scientific — as Excel does when the column is too narrow
+/// (`XL-UX-152`). Empty when nothing fits, and the host shows `#####`. Pure, so
+/// the painter can ask for successively shorter budgets until it fits.
+#[wasm_bindgen]
+pub fn general_fit(value: f64, max_chars: usize) -> String {
+    casual_calc_layout::format_general_fit(value, max_chars).unwrap_or_default()
+}
+
 /// Likewise for a text value, so a preview shows what the `@` section does.
 #[wasm_bindgen]
 pub fn format_preview_text(text: &str, code: &str) -> String {

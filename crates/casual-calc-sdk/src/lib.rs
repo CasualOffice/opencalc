@@ -12,6 +12,8 @@ use casual_calc_export::{ExportError, PackageKind, write_workbook_as};
 use casual_calc_formula::parse;
 use casual_calc_formula::stored::Origin;
 use casual_calc_import::{ImportError, import_package_cancellable};
+// Typed entry's reader lives below the engine, which shares it (`XL-FEAT-019`).
+use casual_calc_io::entry;
 use casual_calc_io::{IoError, read_delimited, write_delimited};
 use casual_calc_layout::print::PrintContext;
 use casual_calc_layout::{DisplayList, Freeze, GridGeometry, Viewport, panes};
@@ -745,6 +747,11 @@ impl WorkbookSession {
         let mut report = outcome.report;
         report_uncomputable(&workbook, &mut report);
         apply_environment(&mut workbook, &config);
+        // Before the recalculation, not after it: a filtered-out row arrives as
+        // a hand-hidden one, and `SUBTOTAL(1-11, …)` counts a hand-hidden row.
+        // Recalculating first replaced Excel's cached total with one that
+        // included what the filter hides (`XL-FEAT-136`).
+        autofilter::reconcile_filters_after_load(&mut workbook);
         let calculation = config
             .calculation
             .unwrap_or_else(|| file_calculation_mode(&workbook));
@@ -862,6 +869,9 @@ impl WorkbookSession {
     pub fn open_ods_with(bytes: Vec<u8>, config: SessionConfig) -> Result<Self, SdkError> {
         let (mut workbook, report) = casual_calc_ods::import_ods(&bytes)?;
         apply_environment(&mut workbook, &config);
+        // As for a package: the filtered rows are the filter's before anything
+        // is recalculated over them.
+        autofilter::reconcile_filters_after_load(&mut workbook);
         // The file's own cached values came from LibreOffice's engine, and this
         // reader does not carry a calculation mode to say otherwise; a formula
         // that translated is recalculated here so the session starts consistent
@@ -1261,12 +1271,6 @@ impl WorkbookSession {
     /// It returns the operation rather than applying it, so a caller can put it
     /// in a batch — a paste is many of these and one undo.
     pub fn input_edit(&mut self, sheet: usize, at: CellRef, input: &str) -> Operation {
-        // Spaces are part of typed **text** (XL-FEAT-128): Excel stores
-        // `"  abc "` as typed, and only reads a number or date through its
-        // spaces (`" 42 "` is 42). So `=` and `'` are recognised on the raw
-        // entry — a leading space makes them text, as in Excel — numbers and
-        // dates are parsed from `trimmed`, and text is stored as `input`.
-        let trimmed = input.trim();
         let existing_style = self
             .workbook()
             .sheets
@@ -1274,126 +1278,180 @@ impl WorkbookSession {
             .and_then(|s| s.cells.get(at))
             .and_then(|c| c.style);
 
-        if input.is_empty() {
-            return Operation::ClearCell { sheet, at };
-        }
+        match self.classify_typed(sheet, at, input) {
+            Typed::Clear => Operation::ClearCell { sheet, at },
 
-        // A leading apostrophe forces the rest to be text, however numeric it
-        // looks, and is not part of the value. The marker has to be recorded on the
-        // style (`quotePrefix`), not merely obeyed here: without it the cell saves
-        // as a plain string and Excel re-reads `0123` as the number 123 the next
-        // time the file is opened.
-        if let Some(body) = input.strip_prefix('\'') {
-            let mut style = existing_style
-                .and_then(|id| self.workbook().styles.get(id))
-                .cloned()
-                .unwrap_or_default();
-            style.quote_prefix = true;
-            let style = self.workbook_mut().intern_style(style);
-            let text = self.workbook_mut().intern_string(body);
-            let mut cell = Cell::value(CellValue::InlineString(text));
-            cell.style = Some(style);
-            return Operation::SetCell {
+            // A leading apostrophe forces the rest to be text, however numeric
+            // it looks, and is not part of the value. The marker has to be
+            // recorded on the style (`quotePrefix`), not merely obeyed here:
+            // without it the cell saves as a plain string and Excel re-reads
+            // `0123` as the number 123 the next time the file is opened.
+            Typed::Quoted(body) => {
+                let mut style = existing_style
+                    .and_then(|id| self.workbook().styles.get(id))
+                    .cloned()
+                    .unwrap_or_default();
+                style.quote_prefix = true;
+                let style = self.workbook_mut().intern_style(style);
+                let text = self.workbook_mut().intern_string(body);
+                let mut cell = Cell::value(CellValue::InlineString(text));
+                cell.style = Some(style);
+                Operation::SetCell {
+                    sheet,
+                    at,
+                    cell: Some(cell),
+                }
+            }
+
+            Typed::Formula(expr) => {
+                let handle = self
+                    .workbook_mut()
+                    .store_formula_at(expr, Origin::at(at.row, at.col));
+                let mut cell = Cell::value(CellValue::Empty);
+                cell.style = existing_style;
+                cell.formula = Some(handle);
+                Operation::SetCell {
+                    sheet,
+                    at,
+                    cell: Some(cell),
+                }
+            }
+
+            // The value and the format it implies land in one operation, so
+            // one undo takes both back.
+            Typed::Entry(entry) => {
+                if let Some(b) = entry.boolean {
+                    return Operation::SetValue {
+                        sheet,
+                        at,
+                        value: CellValue::Bool(b),
+                    };
+                }
+                let current = existing_style
+                    .and_then(|id| self.workbook().styles.get(id))
+                    .and_then(|st| st.number_format.as_deref())
+                    .filter(|code| {
+                        !code.trim().is_empty() && !code.eq_ignore_ascii_case("general")
+                    });
+                if entry.format.is_none()
+                    || current.is_some_and(|code| keeps_format(code, entry.kind))
+                {
+                    return Operation::SetValue {
+                        sheet,
+                        at,
+                        value: CellValue::Number(entry.number),
+                    };
+                }
+                let mut style = existing_style
+                    .and_then(|id| self.workbook().styles.get(id))
+                    .cloned()
+                    .unwrap_or_default();
+                style.number_format = entry.format;
+                let style = self.workbook_mut().intern_style(style);
+                let mut cell = Cell::value(CellValue::Number(entry.number));
+                cell.style = Some(style);
+                Operation::SetCell {
+                    sheet,
+                    at,
+                    cell: Some(cell),
+                }
+            }
+
+            // An ISO date brings its own format, since a bare serial displayed
+            // as a number is not what was typed.
+            Typed::Iso(serial, code) => {
+                // An existing date format wins — someone who set dd/mm/yyyy on
+                // the column means it, and retyping a cell should not reset the
+                // column.
+                let keep = existing_style
+                    .and_then(|id| self.workbook().styles.get(id))
+                    .and_then(|st| st.number_format.as_deref())
+                    .is_some_and(casual_calc_io::is_date_format);
+                let style = if keep {
+                    existing_style
+                } else {
+                    let mut style = existing_style
+                        .and_then(|id| self.workbook().styles.get(id))
+                        .cloned()
+                        .unwrap_or_default();
+                    style.number_format = Some(code.to_owned());
+                    Some(self.workbook_mut().intern_style(style))
+                };
+                let mut cell = Cell::value(CellValue::Number(serial));
+                cell.style = style;
+                Operation::SetCell {
+                    sheet,
+                    at,
+                    cell: Some(cell),
+                }
+            }
+
+            Typed::Number(n) => Operation::SetValue {
                 sheet,
                 at,
-                cell: Some(cell),
-            };
+                value: CellValue::Number(n),
+            },
+            Typed::Text => Operation::SetValue {
+                sheet,
+                at,
+                value: CellValue::InlineString(self.workbook_mut().intern_string(input)),
+            },
         }
+    }
 
+    /// What typing `input` into a cell **means**, decided without changing
+    /// anything — the half of [`Self::input_edit`] that reads, split out so
+    /// [`Self::typed_number`] answers from the same decision rather than from a
+    /// second copy of it (`XL-FEAT-127`).
+    fn classify_typed<'i>(&self, sheet: usize, at: CellRef, input: &'i str) -> Typed<'i> {
+        // Spaces are part of typed **text** (XL-FEAT-128): Excel stores
+        // `"  abc "` as typed, and only reads a number or date through its
+        // spaces (`" 42 "` is 42). So `=` and `'` are recognised on the raw
+        // entry — a leading space makes them text, as in Excel — numbers and
+        // dates are parsed from `trimmed`, and text is stored as `input`.
+        let trimmed = input.trim();
+        if input.is_empty() {
+            return Typed::Clear;
+        }
+        if let Some(body) = input.strip_prefix('\'') {
+            return Typed::Quoted(body);
+        }
         if let Some(body) = input.strip_prefix('=')
             && let Ok(expr) = parse(body)
         {
-            let handle = self
-                .workbook_mut()
-                .store_formula_at(expr, Origin::at(at.row, at.col));
-            let mut cell = Cell::value(CellValue::Empty);
-            cell.style = existing_style;
-            cell.formula = Some(handle);
-            return Operation::SetCell {
-                sheet,
-                at,
-                cell: Some(cell),
-            };
+            return Typed::Formula(expr);
         }
 
         // A cell formatted as Text (`@`) keeps what was typed as text — that is the
         // entire point of the format, and coercing "007" or "1-2" to a number here
         // is a silent edit of what the user entered.
-        let text_formatted = existing_style
+        let text_formatted = self
+            .workbook()
+            .sheets
+            .get(sheet)
+            .and_then(|s| s.cells.get(at))
+            .and_then(|c| c.style)
             .and_then(|id| self.workbook().styles.get(id))
             .and_then(|st| st.number_format.as_deref())
             .is_some_and(is_text_format);
+        if text_formatted {
+            return Typed::Text;
+        }
 
         // Everything else Excel (en-US) reads on entry: booleans, `1,234.5`,
         // `50%`, `$5.00`, `(5)`, `1e3`, `0 1/2`, `12/31/2026`, `1:30 PM`
-        // (`XL-FEAT-001`). The value and the format it implies land in one
-        // operation, so one undo takes both back.
-        if !text_formatted && let Some(entry) = entry::parse(trimmed, self.config.environment.now) {
-            if let Some(b) = entry.boolean {
-                return Operation::SetValue {
-                    sheet,
-                    at,
-                    value: CellValue::Bool(b),
-                };
-            }
-            let current = existing_style
-                .and_then(|id| self.workbook().styles.get(id))
-                .and_then(|st| st.number_format.as_deref())
-                .filter(|code| !code.trim().is_empty() && !code.eq_ignore_ascii_case("general"));
-            if entry.format.is_none() || current.is_some_and(|code| keeps_format(code, entry.kind))
-            {
-                return Operation::SetValue {
-                    sheet,
-                    at,
-                    value: CellValue::Number(entry.number),
-                };
-            }
-            let mut style = existing_style
-                .and_then(|id| self.workbook().styles.get(id))
-                .cloned()
-                .unwrap_or_default();
-            style.number_format = entry.format;
-            let style = self.workbook_mut().intern_style(style);
-            let mut cell = Cell::value(CellValue::Number(entry.number));
-            cell.style = Some(style);
-            return Operation::SetCell {
-                sheet,
-                at,
-                cell: Some(cell),
-            };
+        // (`XL-FEAT-001`).
+        if let Some(entry) = entry::parse(trimmed, self.config.environment.now) {
+            return Typed::Entry(entry);
         }
 
-        // An ISO date becomes a real date, keeping the same rules the importer uses
-        // so that typing a date and pasting one from a file agree. It brings its own
-        // format, since a bare serial displayed as a number is not what was typed.
-        if !text_formatted && let Some((serial, code)) = casual_calc_io::parse_iso_datetime(trimmed)
-        {
-            // An existing date format wins — someone who set dd/mm/yyyy on the
-            // column means it, and retyping a cell should not reset the column.
-            let keep = existing_style
-                .and_then(|id| self.workbook().styles.get(id))
-                .and_then(|st| st.number_format.as_deref())
-                .is_some_and(casual_calc_io::is_date_format);
-            let style = if keep {
-                existing_style
-            } else {
-                let mut style = existing_style
-                    .and_then(|id| self.workbook().styles.get(id))
-                    .cloned()
-                    .unwrap_or_default();
-                style.number_format = Some(code.to_owned());
-                Some(self.workbook_mut().intern_style(style))
-            };
-            let mut cell = Cell::value(CellValue::Number(serial));
-            cell.style = style;
-            return Operation::SetCell {
-                sheet,
-                at,
-                cell: Some(cell),
-            };
+        // An ISO date becomes a real date, keeping the same rules the importer
+        // uses so that typing a date and pasting one from a file agree.
+        if let Some((serial, code)) = casual_calc_io::parse_iso_datetime(trimmed) {
+            return Typed::Iso(serial, code);
         }
 
-        let value = match trimmed.parse::<f64>() {
+        match trimmed.parse::<f64>() {
             // **`is_finite`, and the reason is a round trip rather than taste**
             // (`WASM-02`). `f64::from_str` accepts `1e400` and answers `inf`, so
             // typing it stored `Number(inf)`. There is no CSV spelling of infinity
@@ -1408,12 +1466,48 @@ impl WorkbookSession {
             // Kept as what was typed, which is what the reader does with anything
             // it will not type as a number. The person sees their own text back
             // rather than a number they did not write.
-            Ok(n) if n.is_finite() && !text_formatted && !has_leading_zero(trimmed) => {
-                CellValue::Number(n)
-            }
-            _ => CellValue::InlineString(self.workbook_mut().intern_string(input)),
-        };
-        Operation::SetValue { sheet, at, value }
+            Ok(n) if n.is_finite() && !has_leading_zero(trimmed) => Typed::Number(n),
+            _ => Typed::Text,
+        }
+    }
+
+    /// The number typing `input` into a cell stores, or `None` when it stores
+    /// anything else — text, a boolean, a formula, nothing.
+    ///
+    /// **This is what a data-validation rule judges** (`XL-FEAT-127`). Excel
+    /// validates the *value* an entry becomes, so `50%` is `0.5` to a decimal
+    /// rule between 0 and 1, `$1,200` is `1200` to a whole-number rule, and
+    /// `3/15/2026` is a date serial to a date rule. Judging the raw text
+    /// instead refused every one of them, because none of them is something
+    /// `f64::from_str` reads. One answer, from the same decision
+    /// [`Self::input_edit`] makes, for every host that gates typed entry.
+    #[must_use]
+    pub fn typed_number(&self, sheet: usize, at: CellRef, input: &str) -> Option<f64> {
+        match self.classify_typed(sheet, at, input) {
+            Typed::Entry(entry) if entry.boolean.is_none() => Some(entry.number),
+            Typed::Iso(serial, _) | Typed::Number(serial) => Some(serial),
+            _ => None,
+        }
+    }
+
+    /// The number a validation **operand** means, read as typed entry reads a
+    /// cell — `50%`, `$1,000`, `1/1/2026` — or `None` when it is not one (a
+    /// formula such as `TODAY()`, a reference, text).
+    ///
+    /// Excel's Data Validation dialog takes its bounds the way a cell takes an
+    /// entry and stores a date bound as its serial, so a rule written here
+    /// should too: an operand left as `1/1/2026` is one the rule cannot compare
+    /// against, and a rule that cannot compare refuses nothing.
+    #[must_use]
+    pub fn operand_number(&self, text: &str) -> Option<f64> {
+        let trimmed = text.trim();
+        if let Some(entry) = entry::parse(trimmed, self.config.environment.now) {
+            return entry.boolean.is_none().then_some(entry.number);
+        }
+        if let Some((serial, _)) = casual_calc_io::parse_iso_datetime(trimmed) {
+            return Some(serial);
+        }
+        trimmed.parse::<f64>().ok().filter(|n| n.is_finite())
     }
 
     pub fn edit(&mut self, op: Operation) -> Result<(), SdkError> {
@@ -1525,6 +1619,53 @@ impl WorkbookSession {
     /// mark meaningless (an undo or redo since), in which case nothing changes.
     pub fn group_undo_since(&mut self, mark: u64) -> bool {
         self.history.group_since(mark)
+    }
+
+    /// Bound how far back undo reaches on a session that already exists
+    /// (`PIPE-02`). The same bound as
+    /// [`SessionConfig::with_undo_depth`], for a host that is handed sessions
+    /// from many constructors and wants one rule for all of them; entries past
+    /// the new bound are dropped at once, oldest first.
+    pub fn set_undo_depth(&mut self, depth: Option<usize>) {
+        self.config.undo_depth = depth;
+        self.history.set_depth(depth);
+    }
+
+    /// Make `index` the sheet the workbook is saved open on — OOXML's
+    /// `tabSelected`, and the `activeTab` the writer derives from it
+    /// (`PIPE-05`). Returns whether anything changed.
+    ///
+    /// **Not an edit**, deliberately, in every sense the session tracks:
+    ///
+    /// - not an undo step — Ctrl+Z after looking at another sheet takes back
+    ///   the last change to the document, not the click on a tab, as in Excel;
+    /// - not unsaved work — looking through a workbook does not make closing
+    ///   it ask to save;
+    /// - not sent to collaborators — which sheet each participant has open is
+    ///   their own;
+    /// - and not the end of the untouched original. An opened file that was
+    ///   only looked through still saves back byte for byte (`SAVE-14`), its
+    ///   digital signature included, and so opens where it was opened. Losing
+    ///   the signature, or re-serializing a file this engine does not fully
+    ///   model, to record a tab would be a poor trade.
+    ///
+    /// Refuses an index past the end and a hidden sheet, whose tab is not
+    /// shown and so cannot be the one a file opens on.
+    pub fn set_active_sheet(&mut self, index: usize) -> bool {
+        let sheets = &mut self.workbook.sheets;
+        match sheets.get(index) {
+            Some(s) if s.visibility == casual_calc_model::SheetVisibility::Visible => {}
+            _ => return false,
+        }
+        let mut changed = false;
+        for (i, sheet) in sheets.iter_mut().enumerate() {
+            let on = i == index;
+            if sheet.view.tab_selected != on {
+                sheet.view.tab_selected = on;
+                changed = true;
+            }
+        }
+        changed
     }
 
     /// What undo would reverse, for a menu label.
@@ -3128,9 +3269,28 @@ fn recalc_plan(op: &Operation) -> RecalcPlan {
     }
 }
 
+pub mod autofilter;
 pub mod views;
 
-mod entry;
+/// What typed text means, before anything is interned: the decision
+/// [`WorkbookSession::input_edit`] acts on and [`WorkbookSession::typed_number`]
+/// reads.
+enum Typed<'i> {
+    /// An empty entry clears the cell.
+    Clear,
+    /// `'…`: the rest, as text, with the quote-prefix marker.
+    Quoted(&'i str),
+    /// `=…` that parses.
+    Formula(casual_calc_formula::Expr),
+    /// A value the entry parser recognised (`XL-FEAT-001`).
+    Entry(entry::Entry),
+    /// An ISO date or date-time, with the format it implies.
+    Iso(f64, &'static str),
+    /// A plain number the entry parser did not claim.
+    Number(f64),
+    /// Text, stored as typed.
+    Text,
+}
 mod what_if;
 
 pub use casual_calc_eval::goal_seek::{GoalSeekOptions, GoalSeekResult};

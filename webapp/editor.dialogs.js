@@ -72,6 +72,7 @@ import {
   selRect,
   select,
   setNumberFormat,
+  resolveSortTarget,
   sortRange,
   sortTarget,
   state,
@@ -88,7 +89,7 @@ import {
   wasm,
   wrap,
 } from "./editor.core.js";
-import { syncVolatileClock } from "./editor.selection.js";
+import { editBands, selectedBands, syncVolatileClock } from "./editor.selection.js";
 import { followHyperlink, safeLinkUrl } from "./editor.selection.js";
 
 export function manageCfRules() {
@@ -734,8 +735,11 @@ export function customFormatDialog() {
   input.select();
 }
 
-export function sortDialog() {
-  const s = sortTarget();
+// The region comes from `resolveSortTarget`, so the dialog asks Excel's Sort
+// Warning first and opens on the block the answer chose (XL-UX-175).
+export async function sortDialog() {
+  const s = await resolveSortTarget();
+  if (!s) return;
   const modal = byId("oc-modal");
   const body = byId("oc-modal-body");
   byId("oc-modal-title").textContent = "Sort range";
@@ -2564,6 +2568,8 @@ const MSGBOX_BUTTONS = {
   retryCancel: [["retry", "Retry"], ["cancel", "Cancel"]],
   yesNo: [["yes", "Yes"], ["no", "No"]],
   yesNoCancel: [["yes", "Yes"], ["no", "No"], ["cancel", "Cancel"]],
+  // The Sort Warning's (XL-UX-175).
+  sortCancel: [["sort", "Sort"], ["cancel", "Cancel"]],
 };
 
 /// Raise Excel's message box: the title bar (our name where Excel says
@@ -2582,8 +2588,15 @@ const MSGBOX_BUTTONS = {
 ///
 /// Every message a dialog gives about its own input goes through here; no
 /// dialog shows one inline (`editor.message-box` checks each site).
+///
+/// `choices` (`[[value, label], ...]`) adds Excel's radio group under the
+/// message — the Sort Warning's *Expand the selection* / *Continue with the
+/// current selection* — with `choice` checked (the first otherwise). The
+/// arrow keys move between the choices while one has the focus. With
+/// choices, the box resolves to `{ answer, choice }` instead of the answer.
 export function messageBox(message, {
   icon = "warning", field = null, title = "", buttons = "ok", defaultButton = "",
+  choices = null, choice = "",
 } = {}) {
   if (msgBoxOpen) msgBoxOpen.dismiss();
   const root = msgBoxRoot();
@@ -2603,6 +2616,25 @@ export function messageBox(message, {
   const first = btns.find((b) => b.dataset.answer === defaultButton) ?? btns[0];
   first.classList.add("primary");
   actions.replaceChildren(...btns);
+  let group = root.querySelector(".oc-msgbox-choices");
+  if (!group) {
+    group = el("div", "oc-radio-group oc-msgbox-choices");
+    group.setAttribute("role", "radiogroup");
+    actions.before(group);
+  }
+  const radios = (choices || []).map(([value, label], i) => {
+    const row = el("label", "oc-radio");
+    const input = document.createElement("input");
+    input.type = "radio";
+    input.name = "oc-msgbox-choice";
+    input.value = value;
+    input.checked = choice ? value === choice : i === 0;
+    row.append(input, document.createTextNode(label));
+    return { row, input };
+  });
+  group.replaceChildren(...radios.map((r) => r.row));
+  group.hidden = radios.length === 0;
+  const inputs = radios.map((r) => r.input);
   const active = (root.getRootNode() ?? document).activeElement;
   const back = field || (active instanceof HTMLElement ? active : null);
   root.hidden = false;
@@ -2610,9 +2642,30 @@ export function messageBox(message, {
   const escape = set.some(([a]) => a === "cancel") ? "cancel" : set.length === 1 ? set[0][0] : null;
   return new Promise((resolve) => {
     const focused = () => btns.indexOf((root.getRootNode() ?? document).activeElement);
+    const onRadio = () => inputs.indexOf((root.getRootNode() ?? document).activeElement);
     const onKey = (e) => {
       // Modal: nothing behind the box takes a key while it is up.
       e.stopImmediatePropagation();
+      const at = onRadio();
+      if (at >= 0 && ["ArrowDown", "ArrowUp", "ArrowRight", "ArrowLeft", " "].includes(e.key)) {
+        // A choice has the focus: the arrows pick the next one, as a Windows
+        // radio group does, and Space checks the focused one.
+        e.preventDefault();
+        const step = e.key === " " ? 0 : (e.key === "ArrowUp" || e.key === "ArrowLeft") ? -1 : 1;
+        const to = inputs[(at + step + inputs.length) % inputs.length];
+        to.checked = true;
+        to.focus();
+        return;
+      }
+      if (e.key === "Tab" && inputs.length) {
+        // Tab walks the choices and the buttons together.
+        e.preventDefault();
+        const stops = [inputs.find((i) => i.checked) ?? inputs[0], ...btns];
+        const now = stops.indexOf((root.getRootNode() ?? document).activeElement);
+        const from = now < 0 ? (at >= 0 ? 0 : -1) : now;
+        stops[(from + (e.shiftKey ? stops.length - 1 : 1)) % stops.length].focus();
+        return;
+      }
       if (e.key === "Enter" || e.key === " ") {
         e.preventDefault();
         dismiss(btns[Math.max(0, focused())]?.dataset.answer ?? first.dataset.answer);
@@ -2653,7 +2706,11 @@ export function messageBox(message, {
       } else {
         back.focus();
       }
-      resolve(answer);
+      if (inputs.length) {
+        resolve({ answer, choice: (inputs.find((i) => i.checked) ?? inputs[0]).value });
+      } else {
+        resolve(answer);
+      }
     }
     msgBoxOpen = { dismiss };
     window.addEventListener("keydown", onKey, true);
@@ -3403,9 +3460,15 @@ export function headerMenu(axis, x, y, fromKeyboard = false) {
     menu.appendChild(b);
   };
   const sep = () => menu.appendChild(el("div", "menu-sep"));
-  const span = () => {
+  // Every selected band, not only the active one (PIPE-08): a header
+  // right-click keeps a Ctrl+click selection of several bands, and a verb that
+  // acted on the active band alone would hit a band other than the one the
+  // user right-clicked.
+  const bands = () => {
+    const found = selectedBands(axis);
+    if (found) return found;
     const r = effectiveRange();
-    return { r, n: isCol ? r.c1 - r.c0 + 1 : r.r1 - r.r0 + 1 };
+    return [isCol ? [r.c0, r.c1] : [r.r0, r.r1]];
   };
   const what = isCol ? "column" : "row";
   const plural = (n) => (n === 1 ? what : `${what}s`);
@@ -3414,24 +3477,21 @@ export function headerMenu(axis, x, y, fromKeyboard = false) {
   item("Copy", false, () => doCopy());
   item("Paste", false, () => doPaste());
   sep();
-  const { n } = span();
+  const n = bands().reduce((t, [lo, hi]) => t + hi - lo + 1, 0);
   item(isCol ? `Insert ${n} ${plural(n)} left` : `Insert ${n} ${plural(n)} above`, false, () => {
-    const { r, n: count } = span();
-    tryEdit(() => (isCol
-      ? wasm.session_insert_columns(state.sheet, r.c0, count)
-      : wasm.session_insert_rows(state.sheet, r.r0, count)));
+    editBands(bands(), (lo, hi) => (isCol
+      ? wasm.session_insert_columns(state.sheet, lo, hi - lo + 1)
+      : wasm.session_insert_rows(state.sheet, lo, hi - lo + 1)));
   });
   item(isCol ? `Insert ${n} ${plural(n)} right` : `Insert ${n} ${plural(n)} below`, false, () => {
-    const { r, n: count } = span();
-    tryEdit(() => (isCol
-      ? wasm.session_insert_columns(state.sheet, r.c1 + 1, count)
-      : wasm.session_insert_rows(state.sheet, r.r1 + 1, count)));
+    editBands(bands(), (lo, hi) => (isCol
+      ? wasm.session_insert_columns(state.sheet, hi + 1, hi - lo + 1)
+      : wasm.session_insert_rows(state.sheet, hi + 1, hi - lo + 1)));
   });
   item(`Delete ${n} ${plural(n)}`, true, () => {
-    const { r, n: count } = span();
-    tryEdit(() => (isCol
-      ? wasm.session_delete_columns(state.sheet, r.c0, count)
-      : wasm.session_delete_rows(state.sheet, r.r0, count)));
+    editBands(bands(), (lo, hi) => (isCol
+      ? wasm.session_delete_columns(state.sheet, lo, hi - lo + 1)
+      : wasm.session_delete_rows(state.sheet, lo, hi - lo + 1)));
   });
   item("Clear contents", false, () => clearSelection());
   sep();
@@ -3440,22 +3500,20 @@ export function headerMenu(axis, x, y, fromKeyboard = false) {
     sizeDialog(axis, isCol ? r.c0 : r.r0);
   });
   item(isCol ? "Autofit width" : "Autofit height", false, () => {
-    const r = selRect();
-    if (isCol) for (let c = r.c0; c <= r.c1; c += 1) autofitColumn(c);
-    else for (let row = r.r0; row <= r.r1; row += 1) autofitRow(row);
+    for (const [lo, hi] of bands()) {
+      for (let i = lo; i <= hi; i += 1) (isCol ? autofitColumn : autofitRow)(i);
+    }
   });
   sep();
   item(`Hide ${plural(n)}`, false, () => {
-    const { r } = span();
-    tryEdit(() => (isCol
-      ? wasm.session_hide_cols(state.sheet, r.c0, r.c1)
-      : wasm.session_hide_rows(state.sheet, r.r0, r.r1)));
+    editBands(bands(), (lo, hi) => (isCol
+      ? wasm.session_hide_cols(state.sheet, lo, hi)
+      : wasm.session_hide_rows(state.sheet, lo, hi)));
   });
   item("Unhide", false, () => {
-    const { r } = span();
-    tryEdit(() => (isCol
-      ? wasm.session_unhide_cols(state.sheet, r.c0, r.c1)
-      : wasm.session_unhide_rows(state.sheet, r.r0, r.r1)));
+    editBands(bands(), (lo, hi) => (isCol
+      ? wasm.session_unhide_cols(state.sheet, lo, hi)
+      : wasm.session_unhide_rows(state.sheet, lo, hi)));
   });
   positionMenu(menu, x, y);
   menuKeyboard(menu, fromKeyboard);

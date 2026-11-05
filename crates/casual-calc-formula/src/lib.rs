@@ -40,7 +40,10 @@ pub use parse::parse;
 pub use print::print_at;
 pub use reference::{CellReference, MAX_COL, MAX_ROW, column_to_letters, parse_a1, parse_a1_axis};
 pub use refscan::{RefSpan, reference_spans};
-pub use rewrite::{rename_name_references, rename_sheet_references, restore_at, shrink_3d_span};
+pub use rewrite::{
+    break_sheet_references, rename_name_references, rename_sheet_references, restore_at,
+    shrink_3d_span,
+};
 
 #[cfg(test)]
 mod tests;

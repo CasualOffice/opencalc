@@ -121,7 +121,9 @@ pub(crate) fn criterion_matches(cell: &Value, op: CritOp, operand: &str) -> bool
         };
     }
 
-    let operand_num = operand.trim().parse::<f64>().ok();
+    // The criterion is text, read as typing it would be: `">=12/31/2026"`
+    // means the date and `"1,234"` the number (`XL-FEAT-019`).
+    let operand_num = crate::value::text_to_number(operand);
     let cell_num = match cell {
         Value::Number(n) => Some(*n),
         Value::Bool(b) => Some(if *b { 1.0 } else { 0.0 }),
@@ -129,7 +131,8 @@ pub(crate) fn criterion_matches(cell: &Value, op: CritOp, operand: &str) -> bool
         _ => None,
     };
     let ordering = match (cell_num, operand_num) {
-        (Some(a), Some(b)) => a.partial_cmp(&b),
+        // The same equality `=` uses (`XL-FEAT-011`).
+        (Some(a), Some(b)) => crate::approx::approx_cmp(a, b),
         _ => {
             let a = cell.as_text().unwrap_or_default().to_uppercase();
             // Unescape `~*`/`~?`/`~~` so a criterion can match a literal wildcard.

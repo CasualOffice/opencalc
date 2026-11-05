@@ -37,8 +37,13 @@ pub fn session_load_snapshot(bytes: &[u8]) -> Result<(), JsError> {
     // natively: constructing the `JsError` that failure returns panics off
     // wasm, and a test that cannot run is worse than one that is missing.)
     let workbook = Workbook::from_snapshot(bytes).map_err(js)?;
+    // Installed directly, not through `set_session`, so the undo bound that
+    // function applies to every other session is applied here by hand
+    // (`PIPE-02`).
+    let mut session = WorkbookSession::from_workbook(workbook);
+    session.set_undo_depth(Some(crate::EDITOR_UNDO_DEPTH));
     SESSION.with(|cell| {
-        *cell.borrow_mut() = Some(WorkbookSession::from_workbook(workbook));
+        *cell.borrow_mut() = Some(session);
     });
     Ok(())
 }

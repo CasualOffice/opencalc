@@ -64,7 +64,28 @@
 //! asserted by `transform_tests::tp1_holds_for_insert_and_delete_cells`, which
 //! fails on any answered pair that does not converge.
 //!
-//! All three return [`TransformError::Unsupported`] rather than an answer. Returning
+//! **An operation carrying a reference that may name a concurrently removed
+//! sheet** — a formula, a names list, a metadata bundle's rules and chart
+//! series, or an inserted sheet's cells, rules and charts (a duplicated
+//! sheet), against a [`Operation::RemoveSheet`] (`PIPE-01`). The removal
+//! writes `#REF!` into every such reference, the inserted sheet's included once
+//! it is there, and the operation carries only an index, so which name it
+//! removed cannot be told from here.
+//!
+//! **That over-refuses, and the two sides can decide it differently.** A
+//! carried reference is answered only when the sheet it names sits at some
+//! position *other* than the removed index in the sheet list the caller
+//! passes. A client passes the list from before the removal; the server
+//! passes it from after, where the sheet that *followed* the removed one has
+//! slid into the removed index. So `[Jan, Feb, Mar]`, `Feb` removed, a formula
+//! naming `Mar`: the client answers it and the server refuses it, and the
+//! submitter is told `CannotMerge` for an edit nothing removed. Loud rather
+//! than divergent, and an edit lost. Closing it needs the removal to say which
+//! sheet it removed — by id or name on the wire, or the caller saying which
+//! side of the removal its list was read on — which is a protocol decision, not
+//! a fix here.
+//!
+//! All of these return [`TransformError::Unsupported`] rather than an answer. Returning
 //! the untransformed op would be silently wrong, and silently wrong is the one
 //! outcome this layer must not produce: the two clients would diverge and
 //! nothing would say so.
@@ -292,6 +313,17 @@ pub trait FormulaTable {
         handle: FormulaHandle,
         rewrite: &dyn Fn(&Expr) -> Expr,
     ) -> Option<FormulaHandle>;
+
+    /// Read the tree behind `handle` without interning anything — for a
+    /// rebase that only has to know what a carried formula names.
+    ///
+    /// `None` when this table cannot, which the caller treats exactly as it
+    /// treats a refused [`Self::rebase`]. Defaulted so a table written before
+    /// this existed still compiles, and refuses rather than guesses.
+    fn tree(&self, handle: FormulaHandle) -> Option<&Expr> {
+        let _ = handle;
+        None
+    }
 }
 
 /// A [`FormulaTable`] that holds nothing, so every rebase of a carried formula
@@ -316,6 +348,10 @@ impl FormulaTable for casual_calc_model::Workbook {
     ) -> Option<FormulaHandle> {
         let expr = self.formula(handle)?.clone();
         Some(self.store_formula(rewrite(&expr)))
+    }
+
+    fn tree(&self, handle: FormulaHandle) -> Option<&Expr> {
+        self.formula(handle)
     }
 }
 
@@ -406,7 +442,7 @@ fn transform_inner(
     // Sheet-level operations renumber every `sheet` index in the workbook, which
     // is a second transform axis on top of the row/column one.
     if renumbers_sheets(against) {
-        return rebase_across_sheets(subject, against, side);
+        return rebase_across_sheets(subject, against, side, sheets, &*formulas);
     }
     // A sheet-level operation being rebased across a *cell-level* one needs
     // nothing: adding or removing a sheet is unaffected by what is in the cells.
@@ -565,7 +601,30 @@ fn rebase_across_sheets(
     subject: &Operation,
     against: &Operation,
     side: Side,
+    sheets: &SheetNames,
+    formulas: &dyn FormulaTable,
 ) -> Result<Operation, TransformError> {
+    // **A removal rewrites formulas on every other sheet** (`PIPE-01`): each
+    // reference to the removed sheet becomes `#REF!`, and a name scoped to it
+    // goes. An operation carrying such a reference — a typed formula, a names
+    // list, a rule or a chart series in a metadata bundle — that is applied
+    // *after* the removal keeps the name the replica that applied it first
+    // broke. So the pair is answered only when nothing carried can name the
+    // removed sheet, and refused otherwise.
+    //
+    // Refused rather than rewritten because `RemoveSheet` carries an index and
+    // not a name, and `sheets` does not say which side of the removal it was
+    // taken on: on one side `sheets[index]` *is* the removed sheet, and on the
+    // other it is the next one along, which must not be broken. The rename
+    // arm has the same unknowable fact and can detect it; this one cannot, and
+    // so it also refuses a reference to that next sheet whenever `sheets` was
+    // read after the removal — the over-refusal the module docs name.
+    if let Operation::RemoveSheet { index } = *against
+        && sheet_of(subject) != Some(index)
+        && !survives_removal(subject, index, sheets, formulas)
+    {
+        return Err(unsupported(subject, against));
+    }
     // Two sheet-level operations meeting is the subtle corner — concurrent
     // reordering especially — and it is rare enough that refusing beats
     // guessing. The common case, and the one that matters, is an ordinary edit
@@ -631,6 +690,139 @@ fn rebase_across_sheets(
     // only question left is contention — and two operations on what is now the
     // same sheet can still contend, e.g. two renames of it.
     Ok(resolve_contention(&rebased, against, side))
+}
+
+/// Whether `op` carries nothing a removal of sheet `index` would rewrite.
+///
+/// Every sheet `op` names must be one `sheets` holds at some *other* position,
+/// which is the removed sheet on neither reading of `sheets` — before the
+/// removal it sits at `index`, after it is not there at all. A name `sheets`
+/// does not hold, or holds at `index`, could be the removed sheet and answers
+/// `false`; so does a carried formula the table cannot read. On the
+/// after-removal reading the sheet at `index` is the one that followed the
+/// removed sheet, which survives and is refused anyway: see the module docs.
+fn survives_removal(
+    op: &Operation,
+    index: usize,
+    sheets: &SheetNames,
+    formulas: &dyn FormulaTable,
+) -> bool {
+    let elsewhere = |name: &str| {
+        sheets
+            .iter()
+            .position(|(n, _)| n.eq_ignore_ascii_case(name))
+            .is_some_and(|at| at != index)
+    };
+    let expr_ok = |expr: &Expr| {
+        let mut named = Vec::new();
+        sheets_named(expr, &mut named);
+        named.iter().all(|name| elsewhere(name))
+    };
+    // A rule's or a series' text; text that does not parse names nothing a
+    // removal could rewrite either.
+    let text_ok = |text: &str| casual_calc_formula::parse(text).map_or(true, |e| expr_ok(&e));
+    match op {
+        Operation::SetCell {
+            cell: Some(cell), ..
+        } => match cell.formula {
+            Some(handle) => formulas.tree(handle).is_some_and(expr_ok),
+            None => true,
+        },
+        Operation::SetDefinedNames(names) => names.iter().all(|name| {
+            let scope_ok = name.sheet.is_none_or(|id| {
+                sheets
+                    .iter()
+                    .position(|(_, s)| *s == id)
+                    .is_some_and(|at| at != index)
+            });
+            scope_ok && expr_ok(&name.formula)
+        }),
+        Operation::SetSheetMetadata { data, .. } => rules_survive(
+            &data.conditional_formats,
+            &data.validations,
+            &data.charts,
+            &text_ok,
+        ),
+        // **A sheet that arrives carrying formulas** — a duplicated sheet is
+        // the everyday one. Once inserted it is one of the sheets a removal
+        // walks, so the order that inserts first breaks its `T!` references
+        // and the order that removes first keeps them (`PIPE-01`). Everything
+        // on it the removal would rewrite is checked: cell formulas, rules,
+        // chart series.
+        //
+        // A reference to the arriving sheet itself names no removed sheet —
+        // it is not in `sheets` on either reading, and no removal written
+        // against the shared state could have removed it — so it is not what
+        // refuses a self-referencing copy.
+        Operation::InsertSheet { sheet, .. } => {
+            let own = |name: &str| name.eq_ignore_ascii_case(&sheet.name);
+            let expr_ok = |expr: &Expr| {
+                let mut named = Vec::new();
+                sheets_named(expr, &mut named);
+                named.iter().all(|name| own(name) || elsewhere(name))
+            };
+            let text_ok =
+                |text: &str| casual_calc_formula::parse(text).map_or(true, |e| expr_ok(&e));
+            sheet.cells.iter().all(|(_, cell)| {
+                cell.formula
+                    .is_none_or(|handle| formulas.tree(handle).is_some_and(expr_ok))
+            }) && rules_survive(
+                &sheet.conditional_formats,
+                &sheet.validations,
+                &sheet.charts,
+                &text_ok,
+            )
+        }
+        _ => true,
+    }
+}
+
+/// Whether every conditional-format expression, validation formula and chart
+/// series text in a sheet's worth of metadata passes `text_ok` — the parts of
+/// a sheet a removal rewrites besides its cells (`PIPE-01`).
+fn rules_survive(
+    conditional_formats: &[casual_calc_model::ConditionalFormat],
+    validations: &[casual_calc_model::DataValidation],
+    charts: &[casual_calc_model::ChartView],
+    text_ok: &dyn Fn(&str) -> bool,
+) -> bool {
+    conditional_formats.iter().all(|f| match &f.rule {
+        casual_calc_model::CfRule::Expression(text) => text_ok(text),
+        _ => true,
+    }) && validations
+        .iter()
+        .all(|v| text_ok(&v.formula1) && text_ok(&v.formula2))
+        && charts.iter().all(|chart| {
+            chart.series.iter().all(|series| {
+                text_ok(&series.values) && series.categories.as_deref().is_none_or(text_ok)
+            })
+        })
+}
+
+/// Every sheet name `expr` qualifies a reference with, 3-D endpoints included.
+fn sheets_named<'e>(expr: &'e Expr, out: &mut Vec<&'e str>) {
+    match expr {
+        Expr::Reference(r) => out.extend(r.sheet.as_deref()),
+        Expr::Range(a, b) => {
+            out.extend(a.sheet.as_deref());
+            out.extend(b.sheet.as_deref());
+        }
+        Expr::Reference3d(r) => {
+            out.push(&r.first);
+            out.push(&r.last);
+        }
+        Expr::Unary { operand, .. } => sheets_named(operand, out),
+        Expr::Binary { left, right, .. } => {
+            sheets_named(left, out);
+            sheets_named(right, out);
+        }
+        Expr::Function { args, .. } => args.iter().for_each(|a| sheets_named(a, out)),
+        Expr::Call { callee, args } => {
+            sheets_named(callee, out);
+            args.iter().for_each(|a| sheets_named(a, out));
+        }
+        _ => {}
+    }
 }
 
 /// The `sheet` field of an operation that has one.

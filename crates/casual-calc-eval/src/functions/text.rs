@@ -147,9 +147,10 @@ pub(crate) fn eval_value(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) ->
         Ok(s) => s,
         Err(e) => return Value::Error(e),
     };
-    match text.trim().parse::<f64>() {
-        Ok(n) => Value::Number(n),
-        Err(_) => Value::Error(ErrorValue::Value),
+    // What typing the text into a cell would store (`XL-FEAT-019`).
+    match crate::value::text_to_number(&text) {
+        Some(n) => Value::Number(n),
+        None => Value::Error(ErrorValue::Value),
     }
 }
 

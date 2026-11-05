@@ -122,7 +122,10 @@ mapping under edits. Small; depends on `-model` + `-transaction`.
 
 **`casual-calc-eval`** — the calc engine: the dependency graph over the model's
 reserved edges, incremental recalculation, cycle/iterative handling, volatility,
-spill, and the function library. Depends on `-model` + `-formula`. **Nothing
+spill, and the function library. Depends on `-model` + `-formula`, and
+downward on `-layout` (the number-format engine `TEXT` shares with the display)
+and `-io` (typed entry's text reader, which `VALUE` and coercion share,
+`XL-FEAT-019`). **Nothing
 depends on `-eval` except the SDK/wasm bridges** — so the entire stack below
 builds, tests, and ships in Phases 0–1E without it. See
 [40](40-FORMULA-AND-CALC-ENGINE-ARCHITECTURE.md).

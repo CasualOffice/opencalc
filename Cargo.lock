@@ -294,6 +294,7 @@ version = "0.0.0"
 dependencies = [
  "casual-calc-formula",
  "casual-calc-import",
+ "casual-calc-io",
  "casual-calc-layout",
  "casual-calc-model",
 ]

@@ -260,8 +260,21 @@ thread_local! {
     pub(crate) static HOST_READ_ONLY: core::cell::Cell<bool> = const { core::cell::Cell::new(false) };
 }
 
+/// How many steps undo reaches back in the editor: Excel's default, "a default
+/// undo/redo maximum of 100 actions" (support.microsoft.com, "Undo, redo, or
+/// repeat an action"). `PIPE-02`: the editor never set one, so every session
+/// it installed kept every inverse — and a metadata edit's inverse is a
+/// snapshot of the sheet's metadata — for the life of the tab.
+pub(crate) const EDITOR_UNDO_DEPTH: usize = 100;
+
+/// Install a session for the editor, under the host's settings: its clock, its
+/// read-only flag and the editor's undo bound.
 pub(crate) fn set_session(session: WorkbookSession) {
     let mut session = session;
+    // On the session rather than through `SessionConfig`: sessions reach here
+    // from a dozen constructors, several of which take no config at all, and a
+    // bound set at each would be missing from the one somebody adds next.
+    session.set_undo_depth(Some(EDITOR_UNDO_DEPTH));
     let (now, seed) = VOLATILE.with(core::cell::Cell::get);
     if now != 0.0 {
         // Through the SDK, never `workbook_mut()`: the clock is configuration,
@@ -2787,5 +2800,63 @@ mod column_stats_tests {
             elapsed < std::time::Duration::from_millis(250),
             "A:A took {elapsed:?} — that is a rectangle scan, not a data scan"
         );
+    }
+}
+
+#[cfg(test)]
+mod typed_validation_tests {
+    use super::{session_new, session_set_validation, session_validation_error};
+
+    /// A rule over A1:A10 on the first sheet.
+    fn rule(kind: &str, op: &str, f1: &str, f2: &str) {
+        session_new();
+        session_set_validation(0, 0, 0, 9, 0, kind, op, f1, f2, true, "").unwrap();
+    }
+
+    fn accepted(input: &str) -> bool {
+        session_validation_error(0, 0, 0, input).is_empty()
+    }
+
+    /// **A rule judges the value an entry becomes, not the text typed**
+    /// (`XL-FEAT-127`).
+    ///
+    /// `50%` is how anyone types a half into a rate column, and Excel stores
+    /// it as 0.5 — which a decimal rule between 0 and 1 accepts. Checking the
+    /// raw text read `50%` as not-a-number and refused it, so the only way past
+    /// the rule was to type the decimal the percent format exists to spare
+    /// people from typing.
+    #[test]
+    fn a_percent_is_judged_as_the_fraction_it_stores() {
+        rule("decimal", "between", "0", "1");
+        assert!(accepted("50%"), "50% is 0.5, inside 0..1");
+        assert!(accepted("0.5"));
+        assert!(!accepted("150%"), "150% is 1.5, outside it");
+        assert!(!accepted("abc"), "text is still not a number");
+    }
+
+    /// Currency and thousands separators are numbers on entry too.
+    #[test]
+    fn currency_and_thousands_separators_are_judged_as_numbers() {
+        rule("whole", "between", "1000", "5000");
+        assert!(accepted("1,200"));
+        assert!(accepted("$1,200"));
+        assert!(!accepted("(1,200)"), "(1,200) is -1200, below the bound");
+        assert!(
+            !accepted("$1,200.50"),
+            "a whole-number rule refuses a fraction"
+        );
+    }
+
+    /// A date rule compares serials, and both the entry and the bounds are
+    /// read the way a cell reads a date.
+    #[test]
+    fn a_date_is_judged_against_a_date_rule() {
+        // Typed as anyone types them into the dialog, and stored as Excel
+        // stores them: as serials.
+        rule("date", "between", "1/1/2026", "12/31/2026");
+        assert!(accepted("3/15/2026"));
+        assert!(accepted("2026-06-30"), "an ISO date is a date too");
+        assert!(!accepted("3/15/2027"), "outside the year");
+        assert!(!accepted("someday"));
     }
 }

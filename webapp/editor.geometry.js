@@ -328,6 +328,26 @@ export function edgeVelocity() {
   return { sx, sy, cx, cy };
 }
 
+/// Where a fill-handle or reference drag is pointing, for `cellAt`.
+///
+/// The edge clamp in `edgeVelocity` maps a pointer over a header, or past the
+/// grid, to the nearest *scrolling* cell — which is what extending into a
+/// scrolling body wants. A pointer over a frozen row or column is already over
+/// a cell, and clamping it below or right of the frozen band moved the target
+/// to a cell the user never reached: a fill from A1 to A2 over three frozen
+/// rows overwrote A3:A4, and with the body scrolled it filled to the first
+/// visible body row. So inside a frozen band the pointer is taken as it is.
+export function dragTargetXY() {
+  const { cx, cy } = edgeVelocity();
+  if (!dragPos) return { cx, cy };
+  const f = state.freeze || { bodyX0: HW, bodyY0: HH };
+  const { px, py } = dragPos;
+  return {
+    cx: px > HW && px < f.bodyX0 ? px : cx,
+    cy: py > HH && py < f.bodyY0 ? py : cy,
+  };
+}
+
 export function fzOffset(_line, columns, count) {
   if (count <= 0) return 0;
   return columns

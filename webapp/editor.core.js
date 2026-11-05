@@ -155,6 +155,7 @@ import {
   clampScroll,
   colAtX,
   colWidthOf,
+  dragTargetXY,
   edgeVelocity,
   effectiveRange,
   ensureVisible,
@@ -251,6 +252,7 @@ import {
   textY,
   tintColor,
   wrapLines,
+  fitGeneral,
 } from "./editor.paint.js";
 import {
   applyPivot,
@@ -358,6 +360,7 @@ import {
   scrollStateForTest,
   seed,
   selectAll,
+  selectedBands,
   selectColsSpan,
   selectColumn,
   selectForTest,
@@ -365,6 +368,7 @@ import {
   selectRowsSpan,
   cellBoxForTest,
   selectionRectForTest,
+  resolveSortTarget,
   sortRange,
   sortTarget,
   startInline,
@@ -820,6 +824,7 @@ export {
   selectRowsSpan,
   cellBoxForTest,
   selectionRectForTest,
+  resolveSortTarget,
   sortRange,
   sortTarget,
   startInline,
@@ -3228,7 +3233,19 @@ export function draw() {
     // cell with "#" instead, because a number cut off mid-digits still reads as
     // a real — and wrong — value. This holds under "clip" too, for the same
     // reason.
-    if (it.n && tw > w - 8) {
+    //
+    // Except under General (`gv` carries the raw value only then): Excel
+    // rounds a General number's decimals or switches it to scientific to fit
+    // (`XL-UX-152`) — a shortened General number is the same value at lower
+    // precision, not a truncation — and hashes only one that cannot be
+    // shortened at all. Shrink-to-fit keeps its existing path.
+    const fitted = it.n && it.gv !== undefined && !it.shrink && tw > w - 8
+      ? fitGeneral(ctx.font, it.gv, text, w - 8)
+      : null;
+    if (fitted !== null) {
+      text = fitted;
+      tw = textWidth(ctx.font, text);
+    } else if (it.n && tw > w - 8) {
       const hashW = textWidth(ctx.font, "#") || 1;
       text = "#".repeat(Math.max(1, Math.floor((w - 8) / hashW)));
       tw = textWidth(ctx.font, text);
@@ -3910,6 +3927,11 @@ export function holdBlock(b) {
   navBlock = { r0: b.r0, c0: b.c0, r1: b.r1, c1: b.c1 };
 }
 
+/// Let go of a held block, so the selection is anchor+sel again.
+export function releaseBlock() {
+  navBlock = null;
+}
+
 // The block Enter/Tab should walk, or null for a single cell.
 
 // Step the active cell within `b`, wrapping at the edges. `axis` is "row" for
@@ -4245,9 +4267,30 @@ export function touchHandlesForTest() {
 // like every real spreadsheet. Runs on rAF until the pointer leaves the band
 // or the drag ends.
 export const AUTOSCROLL_EDGE = 28;
+
+/// Whether a pointer gesture that should scroll at the edge is live: a
+/// selection or header drag, a fill-handle drag, or a formula's reference drag
+/// (`PIPE-04` — the last two were never wired, so a fill or a SUM range stopped
+/// at the edge of the window).
+function edgeScrollingDrag() {
+  return state.dragging || !!state.fill || !!formulaRefDrag;
+}
+
+/// The reference a formula's drag has reached at (px, py): the anchor cell to
+/// the one under the pointer, written over the text the drag inserted.
+function updateRefDrag(px, py) {
+  const hit = cellAt(px, py);
+  if (!hit) return;
+  const a = formulaRefDrag.anchor;
+  const r0 = Math.min(a.row, hit.row), r1 = Math.max(a.row, hit.row);
+  const c0 = Math.min(a.col, hit.col), c1 = Math.max(a.col, hit.col);
+  const ref = (r0 === r1 && c0 === c1) ? A1(r0, c0) : `${A1(r0, c0)}:${A1(r1, c1)}`;
+  insertRef(ref);
+}
+
 function autoScrollTick() {
   autoRaf = 0;
-  if (!state.dragging || !dragPos) return;
+  if (!edgeScrollingDrag() || !dragPos) return;
   const { sx, sy, cx, cy } = edgeVelocity();
   if (sx === 0 && sy === 0) return; // pointer back inside — stop
   const SPEED = 0.5;
@@ -4259,6 +4302,8 @@ function autoScrollTick() {
   if (state.scrollX === x0 && state.scrollY === y0) return;
   if (state.headerDrag === "col") selectColumn(colAtX(cx), true);
   else if (state.headerDrag === "row") selectRow(rowAtY(cy), true);
+  else if (state.fill) { const t = dragTargetXY(); updateFill(t.cx, t.cy); }
+  else if (formulaRefDrag) { const t = dragTargetXY(); updateRefDrag(t.cx, t.cy); }
   else if (handleDrag) {
     // A touch handle moves `anchor`, not `sel` — the active cell is the corner
     // the finger is *not* holding. Sharing this loop with the mouse and writing
@@ -4275,7 +4320,7 @@ function autoScrollTick() {
 }
 function maybeAutoScroll() {
   const { sx, sy } = edgeVelocity();
-  if (state.dragging && dragPos && (sx !== 0 || sy !== 0)) {
+  if (edgeScrollingDrag() && dragPos && (sx !== 0 || sy !== 0)) {
     if (!autoRaf) autoRaf = requestAnimationFrame(autoScrollTick);
   } else {
     stopAutoScroll();
@@ -4592,10 +4637,9 @@ export function setPainter(next) {
 
 
 // Sort the current selection's rows by the active cell's column. A single-cell
-// selection sorts the whole used data region (rows 1..end, keeping a header row
-// out only if the caller selected a body range). Ascending unless `desc`.
-// The block a sort should act on: the selection, or — for a lone cell — the
-// whole used area, which is Excel's "sort this column" gesture.
+// selection sorts its current region, and a selection with data beside it asks
+// Excel's Sort Warning first (`resolveSortTarget`, XL-UX-175). Ascending
+// unless `desc`.
 
 // Whether a range's first row looks like column headings, by Excel's rule of
 // thumb: a heading is text sitting over data that is not. Getting this wrong in
@@ -7627,12 +7671,63 @@ export let acEl;
 // The function-name token being typed just before the caret, if the caret sits
 // somewhere a function name is valid (after =, an operator, "(", or ",").
 
+/// The defined names and tables a formula on `home` can use, as AutoComplete
+/// entries `{n, sig, kind}` (`PIPE-10`). Excel lists them beside the functions,
+/// each with its own icon.
+///
+/// Scope is the sheet being *edited*, not the one on screen: picking a
+/// reference on another sheet does not move the formula, and a name scoped to
+/// that other sheet would not resolve where it is written. A name scoped to
+/// the home sheet shadows a workbook name of the same spelling, so only one is
+/// listed. Hidden names are add-in and macro plumbing, left out as the Name Box
+/// leaves them out. Tables are workbook-wide, so every sheet's are offered.
+function nameEntries(home) {
+  const out = [];
+  const seen = new Set();
+  let names = [];
+  try { names = JSON.parse(wasm.session_names()); } catch {}
+  names.sort((a, b) => (b.sheet === home) - (a.sheet === home));
+  for (const n of names) {
+    if (n.hidden || !n.name) continue;
+    if (n.sheet !== -1 && n.sheet !== home) continue;
+    const key = n.name.toUpperCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push({ n: n.name, sig: n.refersTo ? `=${n.refersTo}` : "", kind: "name" });
+  }
+  let count = 0;
+  try { count = JSON.parse(wasm.session_sheet_names()).length; } catch {}
+  for (let i = 0; i < count; i++) {
+    let tables = [];
+    try { tables = JSON.parse(wasm.session_tables(i)); } catch {}
+    for (const t of tables) {
+      const key = t.name.toUpperCase();
+      if (!t.name || seen.has(key)) continue;
+      seen.add(key);
+      out.push({ n: t.name, sig: "", kind: "table" });
+    }
+  }
+  return out;
+}
+
 function showAutocomplete() {
   const tok = currentFnToken();
   if (!tok) { hideAutocomplete(); return; }
   if (!fnCatalog) { try { fnCatalog = JSON.parse(wasm.function_catalog()); } catch { fnCatalog = []; } }
   const up = tok.text.toUpperCase();
-  const matches = withCustomFns(fnCatalog).filter((f) => f.n.startsWith(up)).slice(0, 8);
+  const fns = withCustomFns(fnCatalog).filter((f) => f.n.startsWith(up)).map((f) => ({ ...f, kind: "function" }));
+  const named = nameEntries(editHome ? editHome.sheet : state.sheet).filter((f) => f.n.toUpperCase().startsWith(up));
+  // One alphabetical list, as Excel's is, rather than functions and then
+  // names: a name sorted after every function of its prefix would sit below
+  // the fold. A tie (a name `Rate` beside RATE) lists the function first.
+  const order = { function: 0, name: 1, table: 2 };
+  const matches = [...fns, ...named]
+    .sort((a, b) => {
+      const x = a.n.toUpperCase(), y = b.n.toUpperCase();
+      return x < y ? -1 : x > y ? 1 : order[a.kind] - order[b.kind];
+    })
+    // The list scrolls; this only bounds the DOM built per keystroke.
+    .slice(0, 50);
   if (!matches.length) { hideAutocomplete(); return; }
   acState = { matches, idx: 0, start: tok.start };
   renderAutocomplete();
@@ -7721,6 +7816,12 @@ export function renderTabs() {
     const firstVisible = names.findIndex((_, i) => (vis[i] || "visible") === "visible");
     if (firstVisible >= 0) state.sheet = firstVisible;
   }
+  // The sheet on screen is the one a saved file opens on (`PIPE-05`). Here,
+  // after the clamping above, because every path that changes the sheet — a
+  // tab click, Ctrl+PgDn, a move, a delete, a hide — ends by redrawing the
+  // strip, and recording it in each of them is how one gets missed. Not an
+  // edit: no undo step and no unsaved-work signal, as in Excel.
+  try { wasm.session_set_active_sheet(state.sheet); } catch {}
   tabsEl.textContent = "";
   names.forEach((name, i) => {
     // Hidden sheets keep their index (everything addresses sheets by it) but
@@ -8229,6 +8330,12 @@ function wireEvents() {
     const fnew = freezeHandleAt(px, py);
     if (fnew) { endInline(); state.freezeDrag = { axis: fnew.axis, px, py }; return; }
     if (px < HW && py < HH) { selectAll(); canvas.focus(); return; }
+    // Header presses with any button but the primary one are left to the
+    // `contextmenu` handler, as cell presses are below (PIPE-08): the right
+    // button's `mousedown` comes first, and selecting the column here
+    // collapsed a multi-band selection before the menu could keep it.
+    if (py < HH && px >= HW && e.button !== 0) return;
+    if (px < HW && py >= HH && e.button !== 0) return;
     if (py < HH && px >= HW) {
       endInline();
       const c = colAtX(px);
@@ -8298,7 +8405,9 @@ function wireEvents() {
     // other than the primary one are left to it.
     if (hit && e.button === 0) {
       endInline();
-      if ((e.metaKey || e.ctrlKey) && !e.shiftKey) { addRange(hit.row, hit.col); state.dragging = true; }
+      // `addRange` answers false when the click *deselected* a cell (PIPE-08):
+      // a drag from there would grow a range back over the cell just removed.
+      if ((e.metaKey || e.ctrlKey) && !e.shiftKey) { if (addRange(hit.row, hit.col)) state.dragging = true; }
       else if (e.shiftKey) extend(hit.row, hit.col);
       else { select(hit.row, hit.col); state.dragging = true; }
       canvas.focus();
@@ -8338,16 +8447,17 @@ function wireEvents() {
       return;
     }
     if (state.resize) { updateResize(px, py); return; }
-    if (state.fill) { updateFill(px, py); return; }
-    if (formulaRefDrag) {
-      const hit = cellAt(px, py);
-      if (hit) {
-        const a = formulaRefDrag.anchor;
-        const r0 = Math.min(a.row, hit.row), r1 = Math.max(a.row, hit.row);
-        const c0 = Math.min(a.col, hit.col), c1 = Math.max(a.col, hit.col);
-        const ref = (r0 === r1 && c0 === c1) ? A1(r0, c0) : `${A1(r0, c0)}:${A1(r1, c1)}`;
-        insertRef(ref);
-      }
+    // A fill drag and a formula's reference drag scroll at the edge too, as a
+    // selection drag does (`PIPE-04`): filling down past the last visible row,
+    // or pointing a SUM at a range taller than the window, is the ordinary case.
+    // A pointer over a header still maps to a cell rather than to nothing; one
+    // over a frozen cell maps to that cell (`dragTargetXY`).
+    if (state.fill || formulaRefDrag) {
+      dragPos = { px, py };
+      const { cx, cy } = dragTargetXY();
+      if (state.fill) updateFill(cx, cy);
+      else updateRefDrag(cx, cy);
+      maybeAutoScroll();
       return;
     }
     if (state.dragging && state.headerDrag) {
@@ -8546,6 +8656,10 @@ function wireEvents() {
     if (formulaRefDrag) {
       const caret = formulaRefDrag.end;
       formulaRefDrag = null;
+      // This branch returns before the shared clean-up below, so the edge
+      // scroll it may have started is stopped here.
+      dragPos = null;
+      stopAutoScroll();
       const surface = editSurface ?? inline;
       surface.focus();
       surface.setSelectionRange(caret, caret);
@@ -8724,16 +8838,16 @@ function wireEvents() {
     // acted on the wrong target, including Delete.
     if (HH && py < HH && px >= HW) {
       const col = colAtX(px);
-      const r = selRect();
-      const covered = state.selKind === "cols" && col >= r.c0 && col <= r.c1;
+      // Any selected band, banked ones included (PIPE-08): asking only the
+      // active one collapsed a Ctrl+click column selection on a right-click.
+      const covered = (selectedBands("col") ?? []).some(([lo, hi]) => col >= lo && col <= hi);
       if (!covered) selectColumn(col, false);
       headerMenu("col", e.clientX, e.clientY);
       return;
     }
     if (HW && px < HW && py >= HH) {
       const row = rowAtY(py);
-      const r = selRect();
-      const covered = state.selKind === "rows" && row >= r.r0 && row <= r.r1;
+      const covered = (selectedBands("row") ?? []).some(([lo, hi]) => row >= lo && row <= hi);
       if (!covered) selectRow(row, false);
       headerMenu("row", e.clientX, e.clientY);
       return;
@@ -8741,8 +8855,12 @@ function wireEvents() {
     if (HW && HH && px < HW && py < HH) { selectAll(); cellMenu(e.clientX, e.clientY); return; }
     const hit = cellAt(px, py);
     if (hit && state.selKind === "cells") {
-      const r = selRect();
-      const inside = hit.row >= r.r0 && hit.row <= r.r1 && hit.col >= r.c0 && hit.col <= r.c1;
+      // Inside *any* of the selected ranges (PIPE-08). Asking only the active
+      // one (`selRect`) read a right-click on a range banked by an earlier
+      // Ctrl+click as "outside", collapsed the multi-range to one cell, and the
+      // menu's verbs then acted on that cell.
+      const inside = allRanges().some(
+        (r) => hit.row >= r.r0 && hit.row <= r.r1 && hit.col >= r.c0 && hit.col <= r.c1);
       if (!inside) select(hit.row, hit.col);
     }
     cellMenu(e.clientX, e.clientY);

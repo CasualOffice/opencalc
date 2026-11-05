@@ -59,7 +59,8 @@ pub(crate) fn eval_switch(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -
 /// Excel equality for SWITCH: numeric when both numeric, else case-insensitive text.
 pub(crate) fn values_equal(a: &Value, b: &Value) -> bool {
     match (a, b) {
-        (Value::Number(x), Value::Number(y)) => x == y,
+        // The same equality `=` uses (`XL-FEAT-011`).
+        (Value::Number(x), Value::Number(y)) => crate::approx::approx_eq(*x, *y),
         _ => a
             .as_text()
             .unwrap_or_default()
@@ -69,13 +70,7 @@ pub(crate) fn values_equal(a: &Value, b: &Value) -> bool {
 
 /// IFNA(value, value_if_na): substitute only on #N/A.
 pub(crate) fn eval_ifna(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -> Value {
-    if args.len() != 2 {
-        return Value::Error(ErrorValue::Value);
-    }
-    match ev.eval_expr(sheet, &args[0]) {
-        Value::Error(ErrorValue::Na) => ev.eval_expr(sheet, &args[1]),
-        v => v,
-    }
+    replace_errors(ev, sheet, args, |e| e == ErrorValue::Na)
 }
 
 /// Which aggregate a `*IFS` call computes over the matched positions.

@@ -836,6 +836,21 @@ fn cells_in_bands(sheet: usize, row_bands: &[(u32, u32)], col_bands: &[(u32, u32
             // wide to be shown safely, not for text that can simply spill.
             if matches!(cell.value, CellValue::Number(_)) && !sheet.view.show_formulas {
                 extra.push_str(",\"n\":1");
+                // **General shortens before it fills** (`XL-UX-152`). Under
+                // General, Excel rounds decimals or goes scientific to fit
+                // the column, and only a number that cannot be shortened at
+                // all becomes `#####`; a fixed format keeps `#####`. Only the
+                // host can measure the column, so it gets the raw value to
+                // shorten (`general_fit`) — `{:?}` is a round-trip and valid
+                // JSON (`1e300`, `0.1`), which the display text is not.
+                if let CellValue::Number(v) = cell.value
+                    && v.is_finite()
+                    && !text.is_empty()
+                    && casual_calc_layout::cell_number_format(wb, cell)
+                        .is_none_or(|c| c.trim().is_empty() || c.eq_ignore_ascii_case("General"))
+                {
+                    extra.push_str(&format!(",\"gv\":{v:?}"));
+                }
             }
             // Flagged rather than inferred from the text: a *text* cell may
             // legitimately contain "#VALUE!", and marking that as an error
@@ -1397,43 +1412,10 @@ pub fn session_outline(sheet: usize, first: u32, count: u32, columns: bool) -> S
 /// reports truncation rather than silently returning a short list.
 pub(crate) const MAX_FILTER_VALUES: usize = 10_000;
 
-/// A cell's display text and numeric value, for filter matching.
-pub(crate) fn filter_operands(
-    wb: &Workbook,
-    sheet: &Sheet,
-    row: u32,
-    col: u32,
-) -> (String, Option<f64>) {
-    match sheet.cells.get(CellRef::new(row, col)) {
-        Some(cell) => {
-            let num = match cell.value {
-                CellValue::Number(n) => Some(n),
-                _ => None,
-            };
-            (casual_calc_layout::display_text(wb, cell), num)
-        }
-        None => (String::new(), None),
-    }
-}
-
-/// Whether `row` passes every column rule except `skip` (used to build a
-/// checklist that reflects what the *other* columns have already narrowed to).
-pub(crate) fn row_passes(
-    wb: &Workbook,
-    sheet: &Sheet,
-    filter: &AutoFilter,
-    row: u32,
-    skip: Option<u32>,
-) -> bool {
-    filter.rules.iter().all(|(&off, rule)| {
-        if Some(off) == skip {
-            return true;
-        }
-        let col = filter.range.start.col.saturating_add(off);
-        let (text, num) = filter_operands(wb, sheet, row, col);
-        rule.matches(&text, num)
-    })
-}
+// Matching a row against the rules is the SDK's, so that opening a file can
+// derive the filtered rows before its first recalculation (`XL-FEAT-136`); the
+// checklist and the filter commands here match with the same functions.
+pub(crate) use casual_calc_sdk::autofilter::{filter_operands, row_passes};
 
 /// Every filter on a sheet: its own, then each table's, in table order.
 ///
@@ -1474,18 +1456,7 @@ pub(crate) fn filter_at_col(sheet: &Sheet, col: u32) -> Option<(FilterSite, &Aut
 
 /// The rows every filter on the sheet hides, recomputed from their rules.
 pub(crate) fn recompute_filter_hidden(wb: &Workbook, sheet: &Sheet) -> BTreeSet<u32> {
-    let mut hidden = BTreeSet::new();
-    for (_, filter) in sheet_filters(sheet) {
-        if !filter.is_active() {
-            continue;
-        }
-        for row in filter.body_start()..=filter.range.end.row {
-            if !row_passes(wb, sheet, filter, row, None) {
-                hidden.insert(row);
-            }
-        }
-    }
-    hidden
+    casual_calc_sdk::autofilter::filter_hidden_rows(wb, sheet)
 }
 
 /// Install `filter` on a sheet and hide the rows it excludes, as one undoable
@@ -1864,5 +1835,34 @@ mod frame_fetch_tests {
             got, expected,
             "the bands must be the bounding box's cells in them, in its order"
         );
+    }
+}
+
+/// `XL-UX-152`: the host shortens a General number to fit its column, so a
+/// General number carries its raw value (`gv`) and nothing else does — a fixed
+/// format keeps `#####` in Excel, and must not be shortened by the host.
+#[cfg(test)]
+mod general_fit_payload_tests {
+    use super::session_cells;
+    use crate::{session_new, session_set_cell, session_set_number_format};
+
+    #[test]
+    fn only_a_general_number_carries_its_raw_value() {
+        session_new();
+        session_set_cell(0, 0, 0, "3.14159265").unwrap();
+        session_set_cell(0, 1, 0, "3.14159265").unwrap();
+        session_set_number_format(0, 1, 0, 1, 0, "0.000000").unwrap();
+        session_set_cell(0, 2, 0, "words").unwrap();
+        // Typed `1e300` would get a scientific format; a formula stays General.
+        session_set_cell(0, 3, 0, "=10^300").unwrap();
+        let general = session_cells(0, 0, 0, 0, 0);
+        assert!(general.contains("\"gv\":3.14159265"), "{general}");
+        let fixed = session_cells(0, 1, 0, 1, 0);
+        assert!(!fixed.contains("\"gv\""), "{fixed}");
+        let text = session_cells(0, 2, 0, 2, 0);
+        assert!(!text.contains("\"gv\""), "{text}");
+        // Valid JSON however large: `{:?}` prints `1e300`, not 301 digits.
+        let huge = session_cells(0, 3, 0, 3, 0);
+        assert!(huge.contains("\"gv\":1e300"), "{huge}");
     }
 }

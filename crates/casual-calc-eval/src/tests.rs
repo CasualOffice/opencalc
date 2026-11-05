@@ -1077,6 +1077,23 @@ fn text_function_formats_via_the_display_engine() {
     assert_eq!(text_at(&wb, 3, 1), "5.000");
 }
 
+/// `XL-FEAT-021`: TEXT with a fraction code. This printed `1  / ` for a half —
+/// the numeric path read `# ?/?` as an integer with literal padding.
+#[test]
+fn text_function_lays_out_fractions() {
+    let mut b = Builder::new();
+    b.formula((0, 0), "TEXT(0.5,\"# ?/?\")");
+    b.formula((1, 0), "TEXT(1.75,\"# ?/?\")");
+    b.formula((2, 0), "TEXT(1.5,\"?/?\")");
+    b.formula((3, 0), "TEXT(0.25,\"# ?/8\")");
+    let mut wb = b.build();
+    recalculate(&mut wb);
+    assert_eq!(text_at(&wb, 0, 0), "1/2");
+    assert_eq!(text_at(&wb, 1, 0), "1 3/4");
+    assert_eq!(text_at(&wb, 2, 0), "3/2");
+    assert_eq!(text_at(&wb, 3, 0), "2/8");
+}
+
 /// Evaluate a single formula and return its value.
 fn eval1(text: &str) -> CellValue {
     let mut b = Builder::new();
@@ -1349,6 +1366,34 @@ fn structured_references_resolve_to_the_data_body() {
     // #All spans header and totals too; the header is text so it contributes
     // nothing, but the totals cell (itself 300) does.
     assert_eq!(value_at(&wb, 6, 0), CellValue::Number(600.0));
+}
+
+/// XL-FEAT-137: a structured reference is its range in an array context, so a
+/// function that lifts over a range lifts over `Sales[Amount]` too, and an
+/// operator applied to one is applied to each cell. Both were `#VALUE!`.
+#[test]
+fn a_structured_reference_lifts_like_the_range_it_names() {
+    let mut wb = table_workbook();
+    for (row, text) in [
+        (10, "ROUND(Sales[Amount]/3,0)"),
+        (13, "Sales[Amount]*2"),
+        (16, "SUM(ROUND(Sales[Amount]/3,1))"),
+        (17, "IFERROR(Sales[Amount]/0,-1)"),
+    ] {
+        let expr = parse(text).unwrap();
+        let handle = wb.store_formula_at(expr, Origin::at(row, 5));
+        let mut cell = Cell::value(CellValue::Empty);
+        cell.formula = Some(handle);
+        wb.sheets[0].cells.set(CellRef::new(row, 5), cell);
+    }
+    recalculate(&mut wb);
+    assert_eq!(value_at(&wb, 10, 5), CellValue::Number(33.0));
+    assert_eq!(value_at(&wb, 11, 5), CellValue::Number(67.0));
+    assert_eq!(value_at(&wb, 13, 5), CellValue::Number(200.0));
+    assert_eq!(value_at(&wb, 14, 5), CellValue::Number(400.0));
+    assert_eq!(value_at(&wb, 16, 5), CellValue::Number(100.0));
+    assert_eq!(value_at(&wb, 17, 5), CellValue::Number(-1.0));
+    assert_eq!(value_at(&wb, 18, 5), CellValue::Number(-1.0));
 }
 
 #[test]
@@ -2858,11 +2903,12 @@ fn volatile_functions_read_the_supplied_clock_and_seed() {
     assert_ne!(n(&wb, 2), first.0);
 }
 
-/// `DATEVALUE` takes the unambiguous forms and refuses the rest. `03/04/2024`
-/// is 3 April in most of the world and 4 March in the United States; with no
-/// locale to decide, guessing is wrong a third of the time.
+/// `DATEVALUE` reads a slash date the way typing it does — en-US, the
+/// product's one locale, month first (`XL-FEAT-019`). It used to refuse
+/// `03/04/2024` as ambiguous while the same text typed into a cell became
+/// 4 March, so the function and the cell beside it disagreed about one date.
 #[test]
-fn datevalue_refuses_ambiguous_text() {
+fn datevalue_reads_text_as_typed_entry_does() {
     let mut b = Builder::new();
     b.formula((0, 0), "DATEVALUE(\"2024-05-17\")");
     b.formula((1, 0), "DATEVALUE(\"17-May-2024\")");
@@ -2880,8 +2926,8 @@ fn datevalue_refuses_ambiguous_text() {
     assert_eq!(value_at(&wb, 2, 0), same, "and MMM D, YYYY");
     assert_eq!(
         value_at(&wb, 3, 0),
-        CellValue::Error(casual_calc_model::ErrorValue::Value),
-        "ambiguous slash form is refused, not guessed"
+        CellValue::Number(45355.0),
+        "03/04/2024 is 4 March 2024, as typed entry reads it"
     );
     assert_eq!(
         value_at(&wb, 4, 0),

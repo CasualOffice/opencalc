@@ -68,6 +68,16 @@ pub struct LambdaValue {
     pub captured: Vec<(String, Value)>,
 }
 
+/// Text read as a number, the way typing it into a cell would read it:
+/// `1,234`, `$5.00`, `50%`, `(5)`, `12/31/2026`, `1:30 PM` (`XL-FEAT-019`).
+///
+/// The one reader typed entry uses, not a copy of it — see
+/// [`casual_calc_io::entry::value_of`]. No clock: a year-less date (`1/2`)
+/// stays text here rather than taking a year the formula never named.
+pub(crate) fn text_to_number(text: &str) -> Option<f64> {
+    casual_calc_io::entry::value_of(text, 0.0).map(|(n, _)| n)
+}
+
 /// Format a number the way the engine stringifies it (used by `&` and text ops).
 pub fn number_to_text(n: f64) -> String {
     format!("{n}")
@@ -88,7 +98,7 @@ impl Value {
             Value::Empty => Ok(0.0),
             Value::Number(n) => Ok(*n),
             Value::Bool(b) => Ok(if *b { 1.0 } else { 0.0 }),
-            Value::Text(s) => s.trim().parse::<f64>().map_err(|_| ErrorValue::Value),
+            Value::Text(s) => text_to_number(s).ok_or(ErrorValue::Value),
             Value::Error(e) => Err(*e),
         }
     }
