@@ -348,6 +348,10 @@ const observe = (page) => page.evaluate(() => {
     a.session_cell_format(0, 2, 2),
     [...document.querySelectorAll(".popmenu")].filter((e) => !e.hidden).map((e) => e.id).join(","),
     cells,
+    // Copy and Cut change no cell and, like Excel's, write no status line
+    // (`XL-UX-032`): their effect is the armed clipboard behind the marching
+    // ants. Each round's Escape clears it, so a set flag is this chord's own.
+    String(a.session_clip_has()),
   ].join(" | ");
 });
 

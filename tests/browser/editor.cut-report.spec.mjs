@@ -79,6 +79,11 @@ test("a working clipboard still reports plainly", async ({ page }) => {
     window.opencalcEditor.selectForTest(8, 0);
   });
   await page.evaluate(() => window.opencalcEditor.doCut());
-  // The ordinary path must not grow a caveat nobody needs to read.
-  await expect(page.locator("#tb-status")).toHaveText("cut");
+  // The ordinary path must not grow a caveat nobody needs to read — nor, since
+  // `XL-UX-032`, echo the command: the marching ants are the signal, and Excel
+  // writes no "cut" line. The cut is armed all the same.
+  await expect
+    .poll(() => page.evaluate(() => window.opencalcEditor.wasmApi().session_clip_has()))
+    .toBe(true);
+  await expect(page.locator("#tb-status")).toHaveText("");
 });

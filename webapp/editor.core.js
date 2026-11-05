@@ -438,6 +438,8 @@ import {
 // how one stops without anybody noticing.
 import { initDrafts } from "./editor.drafts.js";
 import { forgetVersions, loadVersions, persistVersions } from "./editor.versions.js";
+import { dropStaleStatusMessage, holdStatus, wireStatusBar } from "./editor.statusbar.js";
+export { holdStatus } from "./editor.statusbar.js";
 
 /// Re-read this document's versions from storage (`HIST-03`).
 ///
@@ -2529,9 +2531,12 @@ function updateScrollbars(v) {
   vthumb.style.top = Math.min(vSpan, (state.scrollY / maxScrollY) * vSpan) + "px";
   hthumb.style.width = thumbW + "px";
   hthumb.style.left = Math.min(hSpan, (state.scrollX / maxScrollX) * hSpan) + "px";
-  // Hide a scrollbar when there's nothing to scroll on that axis.
+  // Hide the vertical bar when there's nothing to scroll. The horizontal one is
+  // a fixture of the sheet-tab row (`XL-UX-052`) and is always drawn there, as
+  // Excel's is: hiding it would hand its width to nobody and leave the row
+  // looking broken.
   vscroll.style.display = contentH > viewH + 1 ? "block" : "none";
-  hscroll.style.display = contentW > viewW + 1 ? "block" : "none";
+  hscroll.style.display = "block";
   scrollMeta = { maxScrollY, maxScrollX, vSpan, hSpan };
 }
 
@@ -3846,6 +3851,7 @@ export function draw() {
   scheduleA11yGrid();
   updateGridCounts();
   updateCellMode();
+  dropStaleStatusMessage();
   updateScrollbars(v);
   updateStats();
   announceCollabSelection();
@@ -8900,7 +8906,8 @@ function wireEvents() {
           else if (r.scope === "band") wasm.session_set_row_height_range(state.sheet, r.b0, r.b1, px);
           else wasm.session_set_row_height(state.sheet, r.index, px);
         }
-        status.textContent = r.scope === "one" ? "resized" : "resized all";
+        // No "resized" (`XL-UX-032`): the edge the user just let go of is the
+        // report, and Excel's bar says nothing here.
       } catch (e) { statusError(errText(e)); }
       draw();
     }
@@ -8915,7 +8922,7 @@ function wireEvents() {
         try {
           wasm.session_fill_mode(state.sheet, f.src.r0, f.src.c0, f.src.r1, f.src.c1,
                                  d.r0, d.c0, d.r1, d.c1, mode);
-          status.textContent = "filled";
+          // No "filled" — the cells are the report (`XL-UX-032`).
         } catch (err) { statusError(errText(err)); }
         state.anchor = { row: d.r0, col: d.c0 };
         state.sel = { row: d.r1, col: d.c1 };
@@ -11941,7 +11948,7 @@ export async function collaborate({ url, token, document: documentKey, onStatus,
         // `onDocument` below replaces it with the specific sentence in the same
         // tick. Written rather than skipped so a `lost` that somehow arrives
         // without its document event still says something.
-        status.textContent = lostNotice(null);
+        holdStatus(lostNotice(null));
       } else if (event.state === "desynced") {
         // `COL-57`: there was no branch here at all, so between the desync and
         // the welcome — a few hundred milliseconds — the bar went on reading
@@ -11950,18 +11957,20 @@ export async function collaborate({ url, token, document: documentKey, onStatus,
         // sticky `lost` path afterwards, but that is the state after the window
         // rather than during it, and a host reading the transport's status got
         // nothing for it.
-        status.textContent = "recovering the shared history…";
+        holdStatus("recovering the shared history…");
       } else if (event.state === "live") {
         collabLostUnsent = false;
-        status.textContent = "collaborating";
+        holdStatus("collaborating");
       } else if (collabLostUnsent) {
         // Held. Anything else this transport wants to say can wait: the
         // transport does not send "live" again until an edit made *after* the
         // loss has been acknowledged, so this clears when editing demonstrably
         // works, not merely when the socket comes back.
-      } else if (event.state === "reconnecting") status.textContent = "reconnecting…";
-      else if (event.state === "refused") status.textContent = `not saved: ${event.detail}`;
-      else if (event.state === "stopped") status.textContent = `disconnected: ${event.detail}`;
+      } else if (event.state === "reconnecting") holdStatus("reconnecting…");
+      // These are states of the connection, not messages: `holdStatus` keeps
+      // them through a selection change (`XL-UX-032`).
+      else if (event.state === "refused") holdStatus(`not saved: ${event.detail}`);
+      else if (event.state === "stopped") holdStatus(`disconnected: ${event.detail}`);
 
       // **A session the transport has finished with is finished here too.**
       //
@@ -11990,7 +11999,7 @@ export async function collaborate({ url, token, document: documentKey, onStatus,
       // the same tick as the `lost` status above, so the neutral sentence
       // written there is replaced before a frame is painted — nobody sees two.
       if (event.reason === "lost" && collabLostUnsent) {
-        status.textContent = lostNotice(event.why ?? null);
+        holdStatus(lostNotice(event.why ?? null));
       }
       adoptCollabDocument(event);
       onDocument?.(event);
@@ -12372,6 +12381,9 @@ async function main() {
   // The status bar's zoom controls. After `resize()`, so the first readout is
   // drawn from the zoom the grid is actually laid out at.
   wireZoom();
+  // Customize Status Bar, the lock indicators, message expiry and the tab-row
+  // splitter (`XL-UX-030`, `032`, `033`).
+  wireStatusBar();
   // The mode's commands, once the menus exist and the toolbar has reflowed —
   // both are built by `wireEvents()` above, and `applyCommandRules()` reads the
   // live DOM rather than the `MENUS` literal (`TAURI-004`).

@@ -134,15 +134,19 @@ export async function doCopy() {
   const outline = grid
     ? { r0: grid.rows[0], c0: grid.cols[0], r1: grid.rows[grid.rows.length - 1], c1: grid.cols[grid.cols.length - 1] }
     : effectiveRange();
+  // Nothing on success (`XL-UX-032`): the marching ants are the signal. Excel
+  // also prompts "Select destination and press ENTER or choose Paste", which
+  // would be false here until Enter pastes a marquee. A refusal is said, and
+  // ends with the next selection change like any other message.
   status.textContent = (await clipToOS(outline, false, grid))
-    ? "copied"
+    ? ""
     : `copied here — ${OS_CLIPBOARD_REFUSED}`;
 }
 
 export async function doCut() {
   if (state.ranges.length) { messageBox(MULTIPLE_SELECTIONS); return; }
   status.textContent = (await clipToOS(effectiveRange(), true))
-    ? "cut"
+    ? ""
     : `cut here — ${OS_CLIPBOARD_REFUSED}`;
 }
 
@@ -152,7 +156,8 @@ export function doPasteMode(mode) {
     wasm.session_clip_paste_mode(state.sheet, state.sel.row, state.sel.col, mode);
     if (!wasm.session_clip_has()) stopMarch(); // a cut was consumed
     draw();
-    status.textContent = `pasted ${mode}`;
+    // The pasted cells are the report (`XL-UX-032`).
+    status.textContent = "";
   } catch { status.textContent = "paste blocked"; }
 }
 
@@ -199,7 +204,7 @@ export async function doPaste(event) {
     }
     if (!wasm.session_clip_has()) stopMarch(); // a cut was consumed
     draw();
-    status.textContent = "pasted";
+    status.textContent = "";
   } catch { status.textContent = "paste blocked"; }
 }
 
