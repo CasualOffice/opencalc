@@ -4707,6 +4707,7 @@ fn a_new_sheet_with_a_deleted_sheets_name_does_not_revive_its_formulas() {
         "#REF!",
         "and the new sheet is not read"
     );
+}
 
 /// Switching sheets is what a saved file opens on, and nothing more (`PIPE-05`):
 /// not an undo step, not unsaved work, and not the end of the untouched

@@ -547,15 +547,16 @@ fn time(text: &str) -> Option<Clock> {
 
 /// The format Excel applies to a typed time.
 ///
-/// **Fractional seconds: `h:mm:ss.0` is this product's choice, not a verified
-/// Excel one.** Excel appears to apply `mm:ss.0` (built-in format 47), which
-/// hides the hour; until that is checked against Excel the hour stays on
-/// screen. The value is exact either way.
+/// **Fractional seconds take Excel's built-in format 47, `mm:ss.0`**, which
+/// hides the hour on screen (`13:30:15.5` shows `30:15.5`); the formula bar and
+/// the value keep the whole time. Decided 2026-11-05 under the owner's
+/// delegation. With `AM`/`PM` the hour is kept (`h:mm:ss.0 AM/PM`): what Excel
+/// applies there is unverified.
 fn time_format(clock: &Clock) -> &'static str {
     match (clock.seconds, clock.tenths, clock.twelve_hour) {
         (false, _, false) => "h:mm",
         (true, false, false) => "h:mm:ss",
-        (true, true, false) => "h:mm:ss.0",
+        (true, true, false) => "mm:ss.0",
         (false, _, true) => "h:mm AM/PM",
         (true, false, true) => "h:mm:ss AM/PM",
         (true, true, true) => "h:mm:ss.0 AM/PM",
@@ -746,7 +747,9 @@ mod tests {
     fn typing_reads_fractional_seconds() {
         let e = parse("13:30:15.5", 0.0).expect("13:30:15.5 is a time");
         assert_eq!(e.number, (13.0 * 3600.0 + 30.0 * 60.0 + 15.5) / 86400.0);
-        assert_eq!(e.format.as_deref(), Some("h:mm:ss.0"));
+        // Excel applies built-in format 47, `mm:ss.0`, to a typed time with
+        // tenths: the cell shows `30:15.5` and the formula bar the full time.
+        assert_eq!(e.format.as_deref(), Some("mm:ss.0"));
         for text in ["13:30:15.", "13:30:15.5.5", "13:30.5", "13:30:59.99999x"] {
             assert_eq!(parse(text, 0.0), None, "{text:?}");
         }
