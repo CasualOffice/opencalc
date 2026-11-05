@@ -231,13 +231,34 @@
 .oc-chrome-ribbon .oc-ribbon.rb-simplified .rb-l .rb-ico { width: 18px; height: 18px; }
 .oc-chrome-ribbon .oc-ribbon.rb-simplified .rb-folded .rb-ico { width: 18px; height: 18px; }
 
-/* KeyTips */
-.oc-chrome-ribbon .rb-tip {
-  position: absolute; left: 50%; bottom: -6px; transform: translateX(-50%);
-  min-width: 16px; padding: 1px 4px; border-radius: 3px; z-index: 2;
-  background: var(--oc-text-color); color: var(--oc-background-color);
-  font-size: 11px; font-weight: 600; line-height: 14px; text-align: center;
+/* KeyTips (XL-UX-009). Drawn on one layer over the whole window rather than
+ * inside each control: inside, the band's `overflow: hidden` clipped the badges
+ * of a bottom-row button, and the letter became part of the button's text.
+ * The ribbon positions each badge at its control's bottom centre. */
+.oc-chrome-ribbon .rb-keytip-layer {
+  position: fixed; inset: 0; z-index: 90; pointer-events: none;
 }
+.oc-chrome-ribbon .rb-tip {
+  position: absolute; transform: translateX(-50%);
+  min-width: 16px; padding: 1px 4px; border-radius: 3px; box-sizing: border-box;
+  background: var(--oc-text-color); color: var(--oc-background-color);
+  font-size: 11px; font-weight: 600; line-height: 14px; text-align: center; white-space: nowrap;
+}
+/* A disabled control keeps its KeyTip, dimmed, as in Excel. */
+.oc-chrome-ribbon .rb-tip.is-off { opacity: 0.5; }
+
+/* ScreenTips (XL-UX-008): Excel's card, not the browser's bubble. The name and
+ * shortcut in bold, the description under it. Appended to the popover layer,
+ * so it is not under `.oc-ribbon`. */
+.rb-screentip {
+  position: fixed; z-index: 95; max-width: 300px; box-sizing: border-box;
+  padding: 8px 10px; border: 1px solid var(--oc-border-color); border-radius: 4px;
+  background: var(--oc-background-color); color: var(--oc-text-color); box-shadow: var(--oc-popover-shadow);
+  font-size: 12px; line-height: 16px; pointer-events: none;
+}
+.rb-screentip[hidden] { display: none; }
+.rb-screentip-title { font-weight: 700; }
+.rb-screentip-desc { margin-top: 6px; }
 
 /* ── Popovers (dropdowns, combos, search results) ─────────────────────── */
 
