@@ -680,29 +680,90 @@ fn the_refusal_surface_is_exactly_these_cases() {
     };
     let naming_removed = typed(&mut base, "T!A1*2");
     let naming_survivor = typed(&mut base, "S!A1*2");
-    let cases: Vec<(&str, Operation, Operation)> = vec![
+    // A sheet arriving with a formula, against the same removal: the
+    // duplicated sheet. Once inserted it is one of the sheets the removal
+    // rewrites, so it is refused on the same test as a typed formula.
+    let arriving = |base: &mut Workbook, text: &str| {
+        let mut cell = Cell::value(CellValue::Empty);
+        cell.formula = Some(
+            base.store_formula_at(casual_calc_formula::parse(text).unwrap(), Origin::at(0, 0)),
+        );
+        let mut sheet = Sheet::new(SheetId(Id::from_parts(2, 11)), "copied");
+        sheet.cells.set(CellRef::new(0, 0), cell);
+        Operation::InsertSheet {
+            index: 2,
+            sheet: Box::new(sheet),
+        }
+    };
+    let sheet_naming_removed = arriving(&mut base, "T!A1*2");
+    let sheet_naming_survivor = arriving(&mut base, "S!A1*2");
+    // **The over-refusal, pinned.** `[S, T, U]`, `T` removed, a formula naming
+    // `U`. `U` survives either way — but `RemoveSheet` carries an index, and
+    // the server reads the sheet list *after* the removal, where `U` has
+    // slid into index 1, the removed index. From there it is
+    // indistinguishable from the removed sheet, so it is refused; a client
+    // reading the list before the removal answers the same pair. Loud (the
+    // server answers `CannotMerge`), but an edit lost that the base answered.
+    let naming_follower = typed(&mut base, "U!A1*2");
+    let follower = (String::from("U"), SheetId(Id::from_parts(2, 3)));
+    let before_removal: Vec<(String, SheetId)> =
+        names.iter().cloned().chain([follower.clone()]).collect();
+    let after_removal: Vec<(String, SheetId)> = vec![names[0].clone(), follower];
+    let cases: Vec<(&str, Operation, Operation, &crate::transform::SheetNames)> = vec![
         (
             "formula naming the removed sheet/remove sheet",
             naming_removed,
             Operation::RemoveSheet { index: 1 },
+            &names,
         ),
         (
             "formula naming a surviving sheet/remove sheet",
             naming_survivor,
             Operation::RemoveSheet { index: 1 },
+            &names,
         ),
-        ("move/move identical", mc(2, 1, 6), mc(2, 1, 6)),
-        ("move/move disjoint", mc(2, 1, 6), mc(10, 1, 14)),
-        ("move/move same source", mc(2, 1, 6), mc(2, 1, 9)),
-        ("move/move same target", mc(2, 1, 6), mc(3, 1, 6)),
-        ("move/move overlapping bands", mc(2, 3, 9), mc(3, 3, 12)),
-        ("move/move nested bands", mc(2, 4, 10), mc(3, 1, 11)),
-        ("move/move crossing", mc(2, 2, 8), mc(7, 2, 1)),
-        ("move/move adjacent", mc(2, 1, 3), mc(3, 1, 4)),
+        (
+            "sheet with a formula naming the removed sheet/remove sheet",
+            sheet_naming_removed,
+            Operation::RemoveSheet { index: 1 },
+            &names,
+        ),
+        (
+            "sheet with a formula naming a surviving sheet/remove sheet",
+            sheet_naming_survivor,
+            Operation::RemoveSheet { index: 1 },
+            &names,
+        ),
+        (
+            "formula naming the sheet after the removed one, read before/remove sheet",
+            naming_follower.clone(),
+            Operation::RemoveSheet { index: 1 },
+            &before_removal,
+        ),
+        (
+            "formula naming the sheet after the removed one, read after/remove sheet",
+            naming_follower,
+            Operation::RemoveSheet { index: 1 },
+            &after_removal,
+        ),
+        ("move/move identical", mc(2, 1, 6), mc(2, 1, 6), &names),
+        ("move/move disjoint", mc(2, 1, 6), mc(10, 1, 14), &names),
+        ("move/move same source", mc(2, 1, 6), mc(2, 1, 9), &names),
+        ("move/move same target", mc(2, 1, 6), mc(3, 1, 6), &names),
+        (
+            "move/move overlapping bands",
+            mc(2, 3, 9),
+            mc(3, 3, 12),
+            &names,
+        ),
+        ("move/move nested bands", mc(2, 4, 10), mc(3, 1, 11), &names),
+        ("move/move crossing", mc(2, 2, 8), mc(7, 2, 1), &names),
+        ("move/move adjacent", mc(2, 1, 3), mc(3, 1, 4), &names),
         (
             "sheet move/sheet move",
             Operation::MoveSheet { from: 0, to: 1 },
             Operation::MoveSheet { from: 1, to: 0 },
+            &names,
         ),
         (
             "move/insert columns",
@@ -712,6 +773,7 @@ fn the_refusal_surface_is_exactly_these_cases() {
                 at: 3,
                 count: 1,
             },
+            &names,
         ),
         (
             "move/delete columns",
@@ -721,14 +783,15 @@ fn the_refusal_surface_is_exactly_these_cases() {
                 at: 3,
                 count: 1,
             },
+            &names,
         ),
     ];
 
     let mut refused: Vec<String> = Vec::new();
-    for (name, subject, against) in &cases {
+    for (name, subject, against, sheets) in &cases {
         for side in [Side::Earlier, Side::Later] {
             if let Err(TransformError::Unsupported { .. }) =
-                transform_with_formulas(subject, against, side, &names, &mut base)
+                transform_with_formulas(subject, against, side, sheets, &mut base)
             {
                 refused.push(format!("{name} ({side:?})"));
             }
@@ -741,12 +804,16 @@ fn the_refusal_surface_is_exactly_these_cases() {
     let expected = vec![
         "formula naming the removed sheet/remove sheet (Earlier)",
         "formula naming the removed sheet/remove sheet (Later)",
+        "formula naming the sheet after the removed one, read after/remove sheet (Earlier)",
+        "formula naming the sheet after the removed one, read after/remove sheet (Later)",
         "move/move nested bands (Earlier)",
         "move/move nested bands (Later)",
         "move/move overlapping bands (Earlier)",
         "move/move overlapping bands (Later)",
         "sheet move/sheet move (Earlier)",
         "sheet move/sheet move (Later)",
+        "sheet with a formula naming the removed sheet/remove sheet (Earlier)",
+        "sheet with a formula naming the removed sheet/remove sheet (Later)",
     ];
     assert_eq!(
         refused, expected,

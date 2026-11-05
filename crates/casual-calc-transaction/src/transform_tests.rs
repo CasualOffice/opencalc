@@ -557,6 +557,149 @@ fn tp1_holds_for_every_supported_pair() {
     println!("TP1: {checked} pairs checked, {skipped} refused, {diverged} diverged (COL-50)");
 }
 
+/// A sheet called `copied`, arriving at the end of the seed's `[S, T]`, that
+/// names `target` from one of the places a sheet removal rewrites — a cell
+/// formula, a conditional-format expression, a validation formula or a chart
+/// series (`PIPE-01`).
+fn arriving_sheet_naming(base: &mut Workbook, place: &str, target: &str) -> Operation {
+    let mut copied = Sheet::new(SheetId(Id::from_parts(2, 11)), "copied");
+    let reference = format!("{target}!$A$1");
+    match place {
+        "cell" => {
+            let handle = base.store_formula_at(
+                casual_calc_formula::parse(&format!("{target}!A1*2")).expect("parses"),
+                Origin::at(0, 0),
+            );
+            let mut cell = Cell::value(CellValue::Number(2002.0));
+            cell.formula = Some(handle);
+            copied.cells.set(CellRef::new(0, 0), cell);
+        }
+        "conditional format" => {
+            copied
+                .conditional_formats
+                .push(casual_calc_model::ConditionalFormat {
+                    range: casual_calc_model::CellRange::new(
+                        CellRef::new(0, 0),
+                        CellRef::new(3, 0),
+                    ),
+                    rule: casual_calc_model::CfRule::Expression(format!("{reference}>0")),
+                    fill: "FF0000".to_owned(),
+                    font_color: None,
+                    bold: false,
+                    priority: 1,
+                    stop_if_true: false,
+                });
+        }
+        "validation" => copied.validations.push(casual_calc_model::DataValidation {
+            range: casual_calc_model::CellRange::new(CellRef::new(0, 0), CellRef::new(3, 0)),
+            values: Vec::new(),
+            kind: casual_calc_model::DvKind::List,
+            operator: Default::default(),
+            formula1: format!("{target}!$A$1:$A$3"),
+            formula2: String::new(),
+            allow_blank: true,
+            error_style: None,
+            hide_dropdown: false,
+            ime_mode: None,
+            error_title: String::new(),
+            error_text: String::new(),
+            prompt_title: String::new(),
+            prompt_text: String::new(),
+        }),
+        "chart" => {
+            let mut chart = casual_calc_model::ChartView::new(
+                casual_calc_model::CellRange::new(CellRef::new(0, 0), CellRef::new(9, 5)),
+                casual_calc_model::ChartKind::Column,
+            );
+            chart.series.push(casual_calc_model::ChartSeries {
+                name: "Copied".to_owned(),
+                values: format!("{target}!$B$1:$B$3"),
+                ..casual_calc_model::ChartSeries::default()
+            });
+            copied.charts.push(chart);
+        }
+        other => panic!("no such place {other}"),
+    }
+    Operation::InsertSheet {
+        index: 2,
+        sheet: Box::new(copied),
+    }
+}
+
+/// **A duplicated sheet meeting a concurrent removal converges, or is refused.**
+///
+/// `apply` breaks every reference to a removed sheet in the whole workbook, so
+/// a sheet inserted *before* the removal has its `T!` references turned into
+/// `#REF!` and one inserted after keeps them — `T!A1*2` on one replica and
+/// `#REF!*2` on the other, the revivable reference `PIPE-01` exists to remove,
+/// and silent. The TP1 property above could not see it: every sheet it
+/// inserts is empty.
+///
+/// Both orders, both readings of the sheet list (a client reads it before the
+/// removal, the server after), and every place on a sheet the removal
+/// rewrites. A reference to the surviving `S` and one to the arriving sheet
+/// itself must still be answered — refusing those would refuse every
+/// duplicate made while anyone deletes a tab.
+#[test]
+fn a_sheet_inserted_against_a_concurrent_removal_converges_or_is_refused() {
+    let mut base = seed();
+    let remove = Operation::RemoveSheet { index: 1 };
+    let before = sheet_names(&base);
+    let after: Vec<(String, SheetId)> = before
+        .iter()
+        .enumerate()
+        .filter(|(at, _)| *at != 1)
+        .map(|(_, entry)| entry.clone())
+        .collect();
+    // Everything a removal rewrites on a sheet, which `observe` does not print.
+    let rules = |wb: &Workbook| -> String {
+        wb.sheets
+            .iter()
+            .map(|sheet| {
+                format!(
+                    "{}:{:?}/{:?}/{:?}",
+                    sheet.name, sheet.conditional_formats, sheet.validations, sheet.charts
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("|")
+    };
+
+    for place in ["cell", "conditional format", "validation", "chart"] {
+        for (target, must_answer) in [("T", false), ("S", true), ("copied", true)] {
+            let insert = arriving_sheet_naming(&mut base, place, target);
+            for (reading, sheets) in [("before", &before), ("after", &after)] {
+                let mut left = base.clone();
+                apply(&mut left, remove.clone()).unwrap();
+                let insert_after_remove =
+                    transform_with_formulas(&insert, &remove, Side::Later, sheets, &mut left);
+                let mut right = base.clone();
+                apply(&mut right, insert.clone()).unwrap();
+                let remove_after_insert =
+                    transform_with_formulas(&remove, &insert, Side::Earlier, sheets, &mut right);
+                let (Ok(insert_after_remove), Ok(remove_after_insert)) =
+                    (insert_after_remove, remove_after_insert)
+                else {
+                    assert!(
+                        !must_answer,
+                        "{place} naming {target}, sheets read {reading} the removal: \
+                         refused, but nothing it names can be the removed sheet"
+                    );
+                    continue;
+                };
+                apply(&mut left, insert_after_remove).unwrap();
+                apply(&mut right, remove_after_insert).unwrap();
+                assert_eq!(
+                    (observe(&left), rules(&left)),
+                    (observe(&right), rules(&right)),
+                    "{place} naming {target}, sheets read {reading} the removal: \
+                     answered, and the two orders disagree"
+                );
+            }
+        }
+    }
+}
+
 #[test]
 fn operations_on_different_sheets_are_left_alone() {
     let a = Operation::DeleteRows {
