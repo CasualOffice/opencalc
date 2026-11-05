@@ -874,7 +874,12 @@ fn closest_fraction(x: f64, max_den: u64) -> (u64, u64) {
         if q2 > max_den {
             break;
         }
-        let p2 = a.saturating_mul(p1).saturating_add(p0);
+        // An improper fraction's numerator is about x times its denominator,
+        // which can pass u64 before the denominator reaches its cap; a
+        // saturated numerator would be a wrong fraction, so stop instead.
+        let Some(p2) = a.checked_mul(p1).and_then(|v| v.checked_add(p0)) else {
+            break;
+        };
         (p0, q0, p1, q1) = (p1, q1, p2, q2);
         if frac < 1e-10 {
             return (p1, q1);
@@ -886,8 +891,16 @@ fn closest_fraction(x: f64, max_den: u64) -> (u64, u64) {
         return (x.round() as u64, 1);
     }
     let k = (max_den - q0) / q1;
-    let (sp, sq) = (p0 + k * p1, q0 + k * q1);
     let err = |p: u64, q: u64| (x - p as f64 / q as f64).abs();
+    // Same bound for the semiconvergent: if it does not fit, the convergent
+    // stands (`=TEXT(1E12+0.3,"?????????/?????????")` reaches here).
+    let semi = k
+        .checked_mul(p1)
+        .and_then(|v| v.checked_add(p0))
+        .zip(k.checked_mul(q1).and_then(|v| v.checked_add(q0)));
+    let Some((sp, sq)) = semi else {
+        return (p1, q1);
+    };
     // On a tie the convergent wins: it has the smaller denominator.
     if err(sp, sq) < err(p1, q1) {
         (sp, sq)
@@ -2230,6 +2243,24 @@ mod fraction_tests {
         assert_eq!(format_number(2.0, "?/?"), "2/1");
         assert_eq!(format_number(0.999, "?/?"), "1/1");
         assert_eq!(format_number(0.0, "?/?"), "0/1");
+    }
+
+    #[test]
+    fn a_large_improper_fraction_does_not_overflow() {
+        // No integer part, so the numerator is about value x denominator: with
+        // nine-digit denominators a 1e12 value walks the semiconvergent past
+        // u64. It must fall back to the convergent, not panic (overflow checks
+        // are on in release, so this would abort a recalc).
+        // The f64 is exactly 1000000000000.300048828125 = 4096000000001229/4096.
+        assert_eq!(
+            format_number(1e12 + 0.3, "?????????/?????????"),
+            "4096000000001229/4096     "
+        );
+        // Every width up to the cap stays total.
+        for n in 1..=9 {
+            let q = "?".repeat(n);
+            let _ = format_number(9.99e14 + 0.7, &format!("{q}/{q}"));
+        }
     }
 
     #[test]
