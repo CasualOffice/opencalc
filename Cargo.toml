@@ -43,7 +43,7 @@ exclude = ["fuzz", "desktop"]
 edition = "2024"
 license = "Apache-2.0"
 repository = "https://github.com/CasualOffice/opencalc"
-rust-version = "1.88.0"          # MSRV — ADR-pending, see docs/08-ADR-REGISTER.md
+rust-version = "1.88.0"          # MSRV — ADR-030
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

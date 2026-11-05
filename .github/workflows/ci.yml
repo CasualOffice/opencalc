@@ -964,7 +964,7 @@ jobs:
           - os: windows-latest
             toolchain: "1.96.0"
           - os: ubuntu-latest
-            toolchain: "1.88.0"   # MSRV check (ADR-pending)
+            toolchain: "1.88.0"   # MSRV check (ADR-030)
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4

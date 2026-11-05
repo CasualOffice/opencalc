@@ -45,10 +45,9 @@ the tool with `--write`.
 
 | St | P0 | P1 | P2 | P3 | Total |
 | --- | --- | --- | --- | --- | --- |
-| Open | 0 | 51 | 129 | 86 | 266 |
+| Open | 0 | 51 | 130 | 86 | 267 |
 | WIP | 0 | 2 | 0 | 0 | 2 |
 | Partial | 0 | 1 | 0 | 1 | 2 |
-| Blocked | 0 | 0 | 1 | 0 | 1 |
 | Done | 20 | 45 | 8 | 1 | 74 |
 | Dropped | 0 | 1 | 0 | 2 | 3 |
 
@@ -116,7 +115,7 @@ the tool with `--write`.
 | XL-UX-154 | Open | P3 | A typed literal error (`#N/A`) carries the green error flag |
 | XL-UX-155 | Open | P3 | No "inconsistent formula" error check |
 | XL-UX-156 | Open | P3 | After an auto-widened entry, Undo is labelled "column width" |
-| XL-UX-157 | Blocked | P2 | Cross-check ribbon command coverage against the reviewed project's parity checklists |
+| XL-UX-157 | Open | P2 | Cross-check ribbon command coverage against the reviewed project's parity checklists |
 | XL-UX-158 | Open | P3 | Insert Function's descriptions are paraphrased, not Excel's text; no User Defined category or per-function help |
 | XL-UX-159 | Open | P2 | Renaming a sheet checks only exact duplicates |
 | XL-UX-160 | Open | P3 | Ctrl+H puts the caret in "Replace with"; desktop Excel may focus "Find what" |
@@ -183,8 +182,30 @@ rare or power-user.
 
 - ~~Icon-only ribbon versus Excel's labelled ribbon~~ — **decided 2026-10-14**: group names
   on, button labels off (docs/95 rule 1); XL-UX-006/007/010 done, 093 done.
-- **Panels versus Excel's dialogs.** Conditional Formatting, Data Validation, Page Setup and
-  Find & Replace are side panels or bars here, and dialogs in Excel (XL-UX rows).
+- ~~Panels versus Excel's dialogs~~ — **decided 2026-11-05** (owner delegated: *"do an analysis
+  with Excel and take decisions; no decision is pending from me"*). The rule is Excel's own:
+  **where Excel uses a modal dialog, so do we; where Excel uses a task pane, so do we.**
+  Conditional Formatting (New Formatting Rule, Edit Formatting Rule, Rules Manager), Data
+  Validation (Settings / Input Message / Error Alert) and Page Setup (Page / Margins /
+  Header/Footer / Sheet) become dialogs: `XL-UX-073`, `089`, `086`. Find & Replace already is
+  one (`XL-UX-024`). Comments, Version History, PivotTable Fields and chart formatting are task
+  panes in Excel and stay panes, which closes the general complaint of `XL-UX-106`.
+
+**Decided 2026-11-05, the same way** — each against Excel for Microsoft 365 on Windows and
+[95](95-EXCEL-SHELL-TARGET.md) rule 9 (a difference stays only for a browser limit or an own
+asset). Each decision is written into its tracker row.
+
+| Question | Decision | Why |
+| --- | --- | --- |
+| Ribbon default (`ADR-026`, `XL-UX-177`) | **Classic ribbon, large-button labels on**; Simplified is the persisted opt-in. Developer tab **hidden** by default (File ▸ Options ▸ Customize Ribbon shows it); macros stay reachable from View ▸ Macros and Alt+F8. Arrow keys move within the band; Full-screen mode is added. | Windows Excel's defaults. Grid height is not a browser limit. |
+| File page and Print (`XL-UX-028`, `029`, `UX-RIB-07`) | Build Excel's **full-window backstage**: Home, New, Open, Info, Save As, Print (live preview from the existing page layout, with printer-independent settings), Export, Options. | Excel's backstage; the page-layout engine already exists. |
+| A PivotTable made here (`PIV-02`, `XL-FEAT-031`) | **Write a live pivot** (cache definition, records and pivot table parts), not values. | Excel opens a pivot as a pivot; values are silent loss of the pivot. |
+| Version history across machines (`XL-FEAT-076`) | History lives **with the save target** (`SAVE-05`): a server or host target keeps its history there; a local or download target keeps it in the browser, keyed by the document id in the file (`XL-FEAT-113`). | Excel's history is the file's, where the file lives. |
+| Macro memory bound (`MACRO-06`) | Keep a bound and make it real: a **budget on what a macro can make the workbook API allocate** (cells written, text bytes, array sizes), enforced inside the API objects, with the worker terminated on overrun. The contract names that bound precisely instead of a heap limit a browser cannot set. | Recorded here because it changes a promise; the alternative was a limit nothing enforces. |
+| Two embeds on one page (`UX-SHELL-24`) | [100](100-MULTI-EMBED.md)'s recommendation: a refusing guard now, `mount="frame"` for multiple elements in the alpha, one editor instance per module as the end state. | The only option where the defect class is impossible, not merely fixed. |
+| Kubernetes chart with no cluster (`DEP-08`) | **Unblocked**: CI runs a `kind` cluster, installs the chart with `helm`, and restarts a pod. A `kind` cluster is a real cluster, so the row's gate is met as written. | The block was tooling on the machines used, not a decision. |
+| Cross-check against another project's list (`XL-UX-157`) | **Unblocked**: check against **Microsoft's own** command list (Customize the Ribbon ▸ All Commands, and Microsoft's published Excel shortcut and ribbon references) instead of a repository we cannot reach. | An independent list, from the source. |
+| Designs waiting for acceptance (`SAVE-05`, `TAURI-006`, `UX-RIB-01`..`13`) | **Accepted as written** ([83](83-SAVE-AUTOSAVE-AND-VERSION-HISTORY.md), [86](86-DESKTOP-RELEASE-IDENTITY-SETTINGS-AND-UPDATES.md), [91](91-EXCEL-RIBBON-CHROME-DESIGN.md) with `ADR-026`'s amendment). | Each already answers its own open questions; nothing in them conflicts with rule 9. |
 
 ## Feature parity by area
 
