@@ -193,6 +193,229 @@ export const TABS = [
   ] },
 ];
 
+/* ── KeyTips (XL-UX-009) ──────────────────────────────────────────────────
+ *
+ * Excel's second level: after Alt and a tab's letter, every control on the tab
+ * carries one of these, and typing it runs the control. Excel's own letters for
+ * every control Excel has. Microsoft's "Keyboard shortcuts in Excel" documents
+ * the tab letters and Alt H B (Borders), Alt H H (Fill Color), Alt H A C
+ * (Center), Alt H D (Delete), Alt M M (Define Name), Alt A T (Filter); the
+ * rest are the letters Excel for Microsoft 365 on Windows draws, [unverified]
+ * from memory. A control Excel does not have (Strikethrough on Home, Column
+ * Statistics, Convert Text to Numbers…) gets a free letter that cannot clash.
+ *
+ * Per tab, no KeyTip may be the start of another: "F" beside "FC" could never
+ * be typed, since the first letter would wait for a second. A group's `group:`
+ * KeyTip is the one its folded button carries when the window is too narrow
+ * for it (Excel's Z… letters); `launcher:` is its dialog launcher.
+ * The gate is `editor.ribbon-keytips.spec.mjs`. */
+const KEYTIPS = {
+  home: {
+    "group:Clipboard": "ZC", "launcher:Clipboard": "FO",
+    "edit.paste": "V", "edit.cut": "X", "edit.copy": "C", "toolbar.painter": "FP",
+    "group:Font": "ZF", "launcher:Font": "FN",
+    "toolbar.font": "FF", "toolbar.size": "FS", "toolbar.size-up": "FG", "toolbar.size-down": "FK",
+    "toolbar.bold": "1", "toolbar.italic": "2", "toolbar.underline": "3", "toolbar.strike": "4",
+    "toolbar.border": "B", "toolbar.fillcolor": "H", "toolbar.fontcolor": "FC",
+    "group:Alignment": "ZA", "launcher:Alignment": "FA",
+    "format.alignment.top": "AT", "format.alignment.middle": "AM", "format.alignment.bottom": "AB",
+    "toolbar.rotate": "FQ", "format.text-overflow.wrap": "W",
+    "format.alignment.left": "AL", "format.alignment.center": "AC", "format.alignment.right": "AR",
+    "toolbar.indent-less": "5", "toolbar.indent-more": "6", "toolbar.merge": "M",
+    "group:Number": "ZN", "launcher:Number": "FM",
+    "toolbar.numfmt": "N", "toolbar.currency": "AN", "toolbar.percent": "P", "toolbar.comma": "K",
+    "toolbar.inc-dec": "0", "toolbar.dec-dec": "9",
+    "group:Styles": "ZS", "format.conditional-formatting": "L", "insert.table": "T", "format.cell-styles": "J",
+    "group:Cells": "ZE", "cells.insert": "I", "cells.delete": "D", "cells.format": "O",
+    "group:Editing": "ZD", "formulas.autosum": "U", "edit.fill": "FI", "edit.clear": "E",
+    "data.sort-range": "S", "edit.find-replace": "FD",
+  },
+  insert: {
+    "group:Tables": "ZT", "insert.pivottable": "V", "insert.table": "T",
+    "group:Charts": "ZC", "insert.chart.column": "C1", "insert.chart.line": "N1", "insert.chart.pie": "Q", "insert.chart.scatter": "D",
+    "group:Links": "ZL", "insert.hyperlink": "I",
+    "group:Comments": "ZM", "insert.note": "NT",
+  },
+  pagelayout: {
+    "group:Page Setup": "ZP", "file.page-setup": "SP", "file.page-break-here": "B", "file.print": "PR",
+    "group:Sheet Options": "ZO", "view.gridlines": "VG", "view.cell-markings": "VH",
+  },
+  formulas: {
+    "group:Function Library": "ZF", "formulas.insert-function": "F", "formulas.autosum": "U",
+    "group:Defined Names": "ZN", "tools.name-manager": "N", "formulas.define-name": "M",
+    "group:Formula Auditing": "ZA", "format.trace.trace-precedents": "P", "format.trace.trace-dependents": "D",
+    "format.trace.clear-trace-arrows": "A", "view.formulas-instead-of-results": "H",
+    "group:Calculation": "ZC", "tools.calculation": "X", "tools.calculation.calculate-now": "B",
+  },
+  data: {
+    "group:Queries & Connections": "ZQ", "data.refresh-all-pivots": "R",
+    "group:Sort & Filter": "ZS", "data.sort-range.a-z": "SA", "data.sort-range.z-a": "SD",
+    "data.sort-range.custom-sort": "SS", "data.filter": "T", "data.clear-all-filters": "C",
+    "group:Data Tools": "ZD", "data.text-to-columns": "E", "data.remove-duplicates": "M",
+    "data.data-validation": "V", "data.convert-text-to-numbers": "K",
+    "group:Forecast": "ZF", "data.goal-seek": "W",
+    "group:Outline": "ZO", "data.group": "G", "data.ungroup": "U", "data.group.expand-all": "J", "data.group.collapse-all": "H",
+    "group:Analysis": "ZA", "data.column-stats": "X",
+  },
+  review: {
+    "group:Notes": "ZN", "insert.note": "T",
+    "group:Protect": "ZP", "format.protection.protect-this-sheet": "PS", "format.protection.locked": "L", "format.protection.hide-formula": "HF",
+  },
+  view: {
+    "group:Sheet View": "ZS", "data.clear-my-view": "K",
+    "group:Show": "ZH", "view.gridlines": "VG", "view.cell-markings": "VH", "view.zero-values": "VZ",
+    "group:Zoom": "ZZ", "view.zoom": "Q", "view.zoom.100": "J",
+    "group:Window": "ZW", "view.freeze": "F",
+    "group:Collaboration": "ZC", "file.version-history": "H",
+    "group:Macros": "ZM", "view.macros": "M",
+  },
+  developer: {
+    "group:Code": "ZC", "developer.visual-basic": "V", "developer.macros": "PM",
+  },
+  help: {
+    "group:Help": "ZH", "help.keyboard-shortcuts": "K", "help.about-opencalc": "A",
+  },
+};
+
+/// The first level's digits for the Quick Access Toolbar, in its order (Save,
+/// Undo, Redo), as Excel numbers its QAT.
+export const QAT_KEYTIPS = ["1", "2", "3"];
+/// The first level's other KeyTips beside File and the tabs: Search (Alt Q,
+/// documented) and Share ([unverified] from memory).
+export const TOP_KEYTIPS = { search: "Q", share: "ZS" };
+
+// Written onto the model once, so the ribbon and the gate read one table.
+for (const tab of TABS) {
+  const keys = KEYTIPS[tab.id] || {};
+  const walk = (it) => {
+    if (it.kind === "rows") { it.rows.forEach((r) => r.forEach(walk)); return; }
+    if (keys[it.id]) it.tip = keys[it.id];
+  };
+  for (const g of tab.groups) {
+    g.items.forEach(walk);
+    if (keys[`group:${g.label}`]) g.tip = keys[`group:${g.label}`];
+    if (g.launcher && keys[`launcher:${g.label}`]) g.launcherTip = keys[`launcher:${g.label}`];
+  }
+}
+
+/* ── ScreenTip descriptions (XL-UX-008) ────────────────────────────────────
+ *
+ * The second line of a ScreenTip: what the command does, in one sentence. The
+ * wording is Excel's own ScreenTip text where this build's command is Excel's
+ * ([unverified] from memory: Microsoft publishes no list of them); a command
+ * Excel does not have is described plainly. Keyed by command id, since a
+ * command reads the same wherever it sits; a registered command's own
+ * `description` wins over this table. */
+export const DESCRIPTIONS = {
+  // Home
+  "edit.paste": "Add content on the Clipboard to your document.",
+  "edit.cut": "Remove the selection and put it on the Clipboard so you can paste it somewhere else.",
+  "edit.copy": "Put a copy of the selection on the Clipboard so you can paste it somewhere else.",
+  "toolbar.painter": "Like the look of a particular selection? You can apply that look to other content in the workbook.",
+  "toolbar.font": "Pick a new font for your text.",
+  "toolbar.size": "Change the size of your text.",
+  "toolbar.size-up": "Make your text a bit bigger.",
+  "toolbar.size-down": "Make your text a bit smaller.",
+  "toolbar.bold": "Make your text bold.",
+  "toolbar.italic": "Italicize your text.",
+  "toolbar.underline": "Underline your text.",
+  "toolbar.strike": "Cross something out by drawing a line through it.",
+  "toolbar.border": "Apply borders to the currently selected cells.",
+  "toolbar.fillcolor": "Color the background of cells to make them stand out.",
+  "toolbar.fontcolor": "Change the color of your text.",
+  "format.alignment.top": "Align text to the top.",
+  "format.alignment.middle": "Align text so that it is centered between the top and bottom of the cell.",
+  "format.alignment.bottom": "Align text to the bottom.",
+  "toolbar.rotate": "Rotate your text diagonally or vertically. This is a great way to label narrow columns.",
+  "format.text-overflow.wrap": "Wrap extra-long text into multiple lines so you can see all of it.",
+  "format.alignment.left": "Align your content to the left.",
+  "format.alignment.center": "Center your content.",
+  "format.alignment.right": "Align your content to the right.",
+  "toolbar.indent-less": "Move your content closer to the cell border.",
+  "toolbar.indent-more": "Move your content farther away from the cell border.",
+  "toolbar.merge": "Combine and center the contents of the selected cells in a new larger cell.",
+  "toolbar.numfmt": "Choose the format for your cells, such as percentage, currency, date or time.",
+  "toolbar.currency": "Format the selected cells as currency.",
+  "toolbar.percent": "Format as a percent.",
+  "toolbar.comma": "Format with a thousands separator.",
+  "toolbar.inc-dec": "Show more decimal places for a more precise value.",
+  "toolbar.dec-dec": "Show fewer decimal places.",
+  "format.conditional-formatting": "Easily spot trends and patterns in your data using bars, colors and icons to visually highlight important values.",
+  "insert.table": "Create a table to organize and analyze related data.",
+  "format.cell-styles": "A colorful style is a great way to make important data stand out on the sheet.",
+  "cells.insert": "Add cells, rows, columns or sheets to your workbook.",
+  "cells.delete": "Delete cells, rows, columns or sheets from your workbook.",
+  "cells.format": "Change the row height or column width, organize sheets, or protect or hide cells.",
+  "formulas.autosum": "Automatically add it up. Your total will appear after the selected cells.",
+  "edit.fill": "Continue a pattern into one or more adjacent cells.",
+  "edit.clear": "Delete everything in the cell, or remove just the formatting or the contents.",
+  "data.sort-range": "Organize your data so it's easier to analyze.",
+  "edit.find-replace": "Find and select specific text, formatting or type of information within the workbook.",
+  // Insert
+  "insert.pivottable": "Easily arrange and summarize complex data in a PivotTable.",
+  "insert.chart.column": "Use this chart type to visually compare values across a few categories.",
+  "insert.chart.line": "Use this chart type to show trends over time (years, months and days) or categories.",
+  "insert.chart.pie": "Use this chart type to show proportions of a whole.",
+  "insert.chart.scatter": "Use this chart type to show the relationship between sets of values.",
+  "insert.hyperlink": "Create a link in your document for quick access to webpages and files.",
+  "insert.note": "Add a note about the selected cell.",
+  // Page Layout
+  "file.page-setup": "Set margins, orientation, scaling and print titles for the sheet.",
+  "file.page-break-here": "Start a new page above and to the left of the selected cell.",
+  "file.print": "Print the active sheet.",
+  "view.gridlines": "Show the lines between rows and columns in the sheet to make editing and reading easier.",
+  "view.cell-markings": "Show row and column headings: the row numbers to the side of the sheet and the column letters above it.",
+  // Formulas
+  "formulas.insert-function": "Work with the formula in the current cell. You can easily pick functions to use and get help on how to fill out the input values.",
+  "tools.name-manager": "Create, edit, delete and find all the names used in the workbook.",
+  "formulas.define-name": "Define and apply names.",
+  "format.trace.trace-precedents": "Show arrows that indicate which cells affect the value of the selected cell.",
+  "format.trace.trace-dependents": "Show arrows that indicate which cells are affected by the value of the selected cell.",
+  "format.trace.clear-trace-arrows": "Remove the arrows drawn by Trace Precedents or Trace Dependents.",
+  "view.formulas-instead-of-results": "Display the formula in each cell instead of the resulting value.",
+  "tools.calculation": "Choose to calculate formulas automatically or manually.",
+  "tools.calculation.calculate-now": "Calculate the entire workbook now. You only need to do this if automatic calculation has been turned off.",
+  // Data
+  "data.refresh-all-pivots": "Get the latest data by refreshing all the PivotTables in the workbook.",
+  "data.sort-range.a-z": "Sort from lowest to highest.",
+  "data.sort-range.z-a": "Sort from highest to lowest.",
+  "data.sort-range.custom-sort": "Find values quickly by sorting your data.",
+  "data.filter": "Turn on filtering for the selected cells. Then, click the arrow in the column header to narrow down the data.",
+  "data.clear-all-filters": "Clear the filter and sort state for the current range of data.",
+  "data.text-to-columns": "Split a single column of text into multiple columns.",
+  "data.remove-duplicates": "Delete duplicate rows from a sheet.",
+  "data.data-validation": "Pick from a list of rules to limit the type of data that can be entered in a cell.",
+  "data.convert-text-to-numbers": "Turn numbers stored as text in the selected cells into numbers.",
+  "data.goal-seek": "Find the input value a formula needs to reach the result you want.",
+  "data.group": "Tie a range of cells together so that they can be collapsed or expanded.",
+  "data.ungroup": "Ungroup a range of cells that were previously grouped.",
+  "data.group.expand-all": "Expand every collapsed group of cells.",
+  "data.group.collapse-all": "Collapse every group of cells.",
+  "data.column-stats": "See the count, totals and distribution of values in the selected column.",
+  // Review
+  "format.protection.protect-this-sheet": "Prevent unwanted changes from others by limiting their ability to edit.",
+  "format.protection.locked": "Lock the selected cells so they cannot be changed while the sheet is protected.",
+  "format.protection.hide-formula": "Hide the formulas of the selected cells while the sheet is protected.",
+  // View
+  "data.clear-my-view": "Leave your sheet view and go back to the default view of the sheet.",
+  "view.zero-values": "Show a zero in cells that have a zero value.",
+  "view.zoom": "Zoom in or out of the sheet.",
+  "view.zoom.100": "Zoom the sheet to 100% of the normal size.",
+  "view.freeze": "Keep a portion of the sheet visible while the rest of the sheet scrolls.",
+  "file.version-history": "See earlier versions of this workbook and restore one.",
+  "view.macros": "View the list of macros you can work with.",
+  // Developer
+  "developer.visual-basic": "View the workbook's Visual Basic for Applications code.",
+  "developer.macros": "View the list of macros you can work with.",
+  // Help
+  "help.keyboard-shortcuts": "See the keyboard shortcuts you can use in the workbook.",
+  "help.about-opencalc": "See which version of the app this is.",
+  // Quick Access Toolbar
+  "file.save": "Save your workbook.",
+  "edit.undo": "Undo your last action.",
+  "edit.redo": "Redo the last action you undid.",
+};
+
 /// The File page, in Excel's order. Each page is a list of sections; an item
 /// names a command, its icon, and one line saying what it does — Excel's File
 /// page describes its choices rather than listing bare links. `new` draws
