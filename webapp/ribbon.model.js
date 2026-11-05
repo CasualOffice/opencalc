@@ -12,6 +12,8 @@
 /// Shapes:
 ///   L(id, icon, label, {menu?, launcher?})  a large button: 24px icon, 72px column
 ///   S(id, icon, label, {menu?})             a small button: 16px icon, 24px row
+/// `split: true` with a `menu` is Excel's split button (AutoSum): the face
+/// runs the command, the arrow drops the menu.
 ///   C(id, width, label)                     a combo (font, size, number format)
 ///   R([[S…], [S…], …])                      a column of up to three rows
 ///   X(id, label, title)                     a check box (Sheet Options, Show)
@@ -112,7 +114,7 @@ export const TABS = [
     ] },
     { label: "Editing", fold: 3, icon: "search", items: [
       R([
-        [S("formulas.autosum", "autosum", "AutoSum (Alt+=)", { menu: AUTOSUM })],
+        [S("formulas.autosum", "autosum", "AutoSum (Alt+=)", { menu: AUTOSUM, split: true })],
         [S("edit.fill", "arrow_down", "Fill", { menu: ["edit.fill.fill-down", "edit.fill.fill-right", "edit.fill.fill-series", "edit.fill.growth-series", "edit.fill.copy-cells", "edit.fill.formatting-only", "edit.fill.without-formatting"] })],
         [S("edit.clear", "eraser", "Clear", { menu: ["edit.clear.all", "edit.clear.formatting", "edit.clear.values"] })],
       ]),
@@ -164,7 +166,7 @@ export const TABS = [
     // no Cube: the engine implements none of the cube functions.
     { label: "Function Library", fold: 5, icon: "math_formula", items: [
       L("formulas.insert-function", "math_formula", "Insert Function (Shift+F3)"),
-      L("formulas.autosum", "autosum", "AutoSum (Alt+=)", { menu: AUTOSUM }),
+      L("formulas.autosum", "autosum", "AutoSum (Alt+=)", { menu: AUTOSUM, split: true }),
       FN("recently-used", "clock", "Recently Used"),
       FN("financial", "money", "Financial"),
       FN("logical", "checkbox_checked", "Logical"),

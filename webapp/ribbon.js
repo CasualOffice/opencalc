@@ -373,7 +373,15 @@ function createShell({ root, host, editor }) {
     if (menu) place(menu, owner);
   }
 
+  /// Hand the keyboard back to the grid after a ribbon command — unless the
+  /// command opened a dialog. Greater Than…, Zoom… and the rest focus their own
+  /// field as Excel does; taking it back put typed digits into a cell edit
+  /// under the modal and arrow keys onto the selection (XL-UX-037/043).
   function refocusGrid() {
+    const active = root.activeElement || document.activeElement;
+    if (active?.closest?.('[aria-modal="true"]')) return;
+    const modal = byId("oc-modal");
+    if (modal && !modal.hidden) return;
     byId("grid")?.focus({ preventScroll: true });
   }
 
@@ -381,7 +389,36 @@ function createShell({ root, host, editor }) {
 
   const sync = new Set();   // functions that refresh a control's state
 
+  /// Excel's split button (AutoSum): the face runs the command in one click,
+  /// the arrow beside it — under it, on a large button, with the label — drops
+  /// the menu. The face is an ordinary button for the command, so it is what
+  /// `[data-oc-proxy]` finds and it keeps the command's hidden/enabled rules;
+  /// the arrow follows it (XL-UX-041).
+  function splitButton(spec, size) {
+    const wrap = h("div", `rb-split rb-split-${size}`);
+    const face = button({ ...spec, menu: undefined, split: false }, size);
+    const drop = h("button", `rb-btn rb-split-drop`);
+    drop.type = "button";
+    drop.dataset.splitOf = spec.id;
+    drop.title = `${shortLabel(spec.label)} options`;
+    drop.setAttribute("aria-label", `${shortLabel(spec.label)} options`);
+    drop.setAttribute("aria-haspopup", "true");
+    drop.setAttribute("aria-expanded", "false");
+    const label = face.querySelector(".rb-label");
+    if (label) drop.appendChild(label);
+    drop.appendChild(caret());
+    drop.addEventListener("click", (e) => { e.stopPropagation(); commandMenu(drop, spec.menu); });
+    wrap.append(face, drop);
+    sync.add(() => {
+      const hide = face.hidden || !spec.menu.some(present);
+      if (wrap.hidden !== hide) wrap.hidden = hide;
+      if (drop.disabled !== face.disabled) drop.disabled = face.disabled;
+    });
+    return wrap;
+  }
+
   function button(spec, size) {
+    if (spec.split && spec.menu) return splitButton(spec, size);
     const b = h("button", `rb-btn rb-${size}`);
     b.type = "button";
     b.dataset.cmd = spec.id;

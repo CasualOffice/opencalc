@@ -133,7 +133,7 @@ test("the Formulas tab has Excel's Function Library, and a function opens Functi
   await boot(page);
   await tab(page, "Formulas");
   const group = page.locator('.rb-panel:not([hidden]) .rb-group[aria-label="Function Library"]');
-  const buttons = await group.locator(".rb-items > .rb-btn").evaluateAll((bs) => bs.filter((b) => !b.hidden).map((b) => b.getAttribute("aria-label")));
+  const buttons = await group.locator(".rb-items > .rb-btn, .rb-items > .rb-split > .rb-btn[data-oc-proxy]").evaluateAll((bs) => bs.filter((b) => !b.hidden).map((b) => b.getAttribute("aria-label")));
   expect(buttons).toEqual(["Insert Function", "AutoSum", "Recently Used", "Financial", "Logical", "Text",
     "Date & Time", "Lookup & Reference", "Math & Trig", "More Functions"]);
   await ribbonButton(page, "formulas.library.financial").click();
@@ -160,8 +160,7 @@ test("AutoSum › Average writes AVERAGE over the run above", async ({ page }) =
   await boot(page, [[0, 0, "2"], [1, 0, "4"]]);
   await page.evaluate(() => window.opencalcEditor.selectForTest(2, 0));
   await tab(page, "Formulas");
-  await ribbonButton(page, "formulas.autosum").click();
-  expect(await labels(pop(page))).toEqual(["Sum", "Average", "Count Numbers", "Max", "Min", "-", "More Functions…"]);
+  await page.locator('.oc-ribbon .rb-panel:not([hidden]) [data-split-of="formulas.autosum"]').first().click();
   await item(page, "formulas.autosum.average").click();
   expect(await api(page, "session_cell_input", 0, 2, 0)).toBe("=AVERAGE(A1:A2)");
 });
@@ -268,4 +267,82 @@ test("a read-only workbook keeps View's own controls and loses the ones that wri
   await expect(ribbonButton(page, "page.orientation"), "a page-setup write").toBeHidden();
   await tab(page, "Formulas");
   await expect(ribbonButton(page, "formulas.library.financial"), "a function writes into a cell").toBeHidden();
+});
+
+// A dialog the ribbon opens keeps the keyboard. The ribbon hands focus back to
+// the grid after a command — right for Bold, wrong for Greater Than…, whose
+// value box Excel focuses: typed digits went into a cell edit under the modal.
+// `fill()` and `check()` focus the field themselves, so only real typing and
+// arrow keys show it.
+test("a dialog opened from the ribbon keeps the focus: typing goes into its value box", async ({ page }) => {
+  await boot(page, [[0, 0, "150"]]);
+  await tab(page, "Home");
+  await ribbonButton(page, "format.conditional-formatting").click();
+  await sub(page, "Highlight Cells Rules").hover();
+  await item(page, "format.cf.greater-than").click();
+  await expect(page.locator("#oc-cfq-a")).toBeFocused();
+  await page.keyboard.type("100");
+  await expect(page.locator("#oc-cfq-a")).toHaveValue("100");
+  await page.keyboard.press("Escape");
+  await expect(page.locator("#oc-modal")).toBeHidden();
+  expect(await api(page, "session_cell_input", 0, 0, 0), "nothing was typed into the cell").toBe("150");
+  await tab(page, "View");
+  await ribbonButton(page, "view.zoom.dialog").click();
+  await expect(page.locator("#oc-modal-title")).toHaveText("Zoom");
+  expect(await page.evaluate(() => document.getElementById("oc-modal").contains(document.activeElement)),
+    "Zoom… has the focus, so the arrow keys move its options, not the selection").toBe(true);
+});
+
+// A combo's command run with no value — from command search ("Width" sits next
+// to Column Width…) or the SDK's runCommand — is a no-op, as the font, size and
+// number-format combos are. It was setFit(axis, 0): Automatic, written
+// silently over the page setup.
+test("a Scale to Fit box run with no value changes nothing", async ({ page }) => {
+  await boot(page);
+  await tab(page, "Page Layout");
+  await page.locator('.oc-ribbon [data-oc-proxy="page.fit.width"]').click();
+  await page.locator(".rb-combo-list .rb-pop-item", { hasText: /^2 pages$/ }).click();
+  await page.locator('.oc-ribbon [data-oc-proxy="page.fit.height"]').click();
+  await page.locator(".rb-combo-list .rb-pop-item", { hasText: /^3 pages$/ }).click();
+  const before = await json(page, "session_page_setup", 0);
+  expect([before["page.fitToWidth"], before["page.fitToHeight"]]).toEqual(["2", "3"]);
+  const errBefore = await page.locator("#tb-status .err").count();
+  for (const id of ["page.fit.width", "page.fit.height", "page.fit.scale"]) {
+    await page.evaluate((id) => window.opencalcEditor.runCommand(id), id);
+  }
+  expect(await json(page, "session_page_setup", 0)).toEqual(before);
+  expect(await page.locator("#tb-status .err").count(), "Scale with no value is not an error either").toBe(errBefore);
+});
+
+// Excel's AutoSum is a split button: the face inserts SUM in one click, the
+// arrow drops Sum, Average, Count Numbers, Max, Min, More Functions….
+for (const [tabName, label] of [["Formulas", "Formulas"], ["Home", "Home ▸ Editing"]]) {
+  test(`${label}: AutoSum's face sums in one click, its arrow drops the list`, async ({ page }) => {
+    await boot(page, [[0, 0, "2"], [1, 0, "4"]]);
+    await page.evaluate(() => window.opencalcEditor.selectForTest(2, 0));
+    await tab(page, tabName);
+    await ribbonButton(page, "formulas.autosum").click();
+    await expect(pop(page), "the face runs; it does not open the list").toHaveCount(0);
+    expect(await api(page, "session_cell_input", 0, 2, 0)).toBe("=SUM(A1:A2)");
+    await page.locator('.oc-ribbon .rb-panel:not([hidden]) [data-split-of="formulas.autosum"]').first().click();
+    expect(await labels(pop(page))).toEqual(["Sum", "Average", "Count Numbers", "Max", "Min", "-", "More Functions…"]);
+  });
+}
+
+// Clear Rules from Selected Cells drops a rule whole, even the part outside the
+// selection (Excel trims the rule's range instead — tracked separately). Until
+// it trims, the status bar names what went, so the wider loss is not silent.
+test("Clear Rules from Selected Cells names every rule it removed and its whole range", async ({ page }) => {
+  await boot(page, [[0, 0, "1"]]);
+  await selectRange(page, 0, 0, 99, 0);
+  await tab(page, "Home");
+  await ribbonButton(page, "format.conditional-formatting").click();
+  await sub(page, "Data Bars").hover();
+  await item(page, "format.cf.data-bar.green").click();
+  await page.evaluate(() => window.opencalcEditor.selectForTest(0, 0));
+  await ribbonButton(page, "format.conditional-formatting").click();
+  await sub(page, "Clear Rules").hover();
+  await item(page, "format.cf.clear-selected").click();
+  expect(await json(page, "session_cf_rules", 0)).toEqual([]);
+  await expect(page.locator("#tb-status")).toHaveText("removed 1 rule, on A1:A100");
 });

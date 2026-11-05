@@ -172,6 +172,20 @@
 .rb-ico { display: block; flex: none; fill: currentColor; }
 .rb-caret { display: block; flex: none; fill: currentColor; color: var(--oc-muted-text-color); }
 
+/* Split buttons (AutoSum): the face and the arrow are two targets, as Excel's.
+   Large: icon on top, label and arrow under it. Small: icon, then the arrow. */
+.oc-chrome-ribbon .rb-split { display: inline-flex; border-radius: 4px; }
+.oc-chrome-ribbon .rb-split[hidden] { display: none; }
+.oc-chrome-ribbon .rb-split-l { flex-direction: column; align-items: stretch; max-width: 72px; height: 72px; }
+.oc-chrome-ribbon .rb-split-l > .rb-l { justify-content: flex-end; height: 40px; min-width: 40px; border-radius: 4px 4px 0 0; }
+.oc-chrome-ribbon .rb-split-l > .rb-split-drop {
+  flex-direction: column; justify-content: flex-start; gap: 2px; height: 32px; padding: 4px 4px 0; border-radius: 0 0 4px 4px;
+}
+.oc-chrome-ribbon .oc-ribbon.rb-labels-full .rb-split-drop .rb-label { display: block; }
+.oc-chrome-ribbon .rb-split-s > .rb-s { border-radius: 4px 0 0 4px; }
+.oc-chrome-ribbon .rb-split-s > .rb-split-drop { height: 24px; min-width: 14px; padding: 0 2px; border-radius: 0 4px 4px 0; }
+.oc-chrome-ribbon .rb-split:hover > .rb-btn:not(:disabled) { box-shadow: inset 0 0 0 1px var(--oc-border-color); }
+
 /* Combos: font, size, number format */
 .oc-chrome-ribbon .rb-combo {
   display: inline-flex; align-items: center; height: 24px; box-sizing: border-box;

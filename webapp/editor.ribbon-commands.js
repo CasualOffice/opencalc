@@ -414,10 +414,20 @@ export function registerRibbonCommands(R) {
   }
   // Clear Rules ›. "Selected Cells" removes every rule that touches the
   // selection — the engine's clear, which drops a rule whole rather than
-  // trimming its range to the cells outside the selection as Excel does.
+  // trimming its range to the cells outside the selection as Excel does. A
+  // rule holds one rectangle, so trimming needs a multi-area range in the
+  // model first. Until then the status bar names each rule's whole range, so
+  // losing the part outside the selection is said, not silent (Ctrl+Z undoes).
   R("format.cf.clear-selected", { label: "Clear Rules from Selected Cells", run: () => {
     const s = effectiveRange();
+    const rules = () => { try { return JSON.parse(wasm.session_cf_rules(state.sheet)); } catch { return []; } };
+    const before = rules();
     tryEdit(() => wasm.session_clear_cf(state.sheet, s.r0, s.c0, s.r1, s.c1));
+    const left = new Set(rules().map((r) => `${r.range}\u0000${r.desc}`));
+    const gone = before.filter((r) => !left.has(`${r.range}\u0000${r.desc}`));
+    if (!gone.length) { status.textContent = "no rules on the selected cells"; return; }
+    const ranges = [...new Set(gone.map((r) => r.range))].join(", ");
+    status.textContent = `removed ${gone.length} ${gone.length === 1 ? "rule" : "rules"}, on ${ranges}`;
   } });
   R("format.cf.clear-sheet", { label: "Clear Rules from Entire Sheet", run: () => {
     tryEdit(() => wasm.session_clear_cf(state.sheet, 0, 0, 1048575, 16383));
@@ -515,7 +525,10 @@ export function registerRibbonCommands(R) {
       readOnly: true,
       values: () => FIT_VALUES,
       current: () => fitLabel(fitValue(axis)),
-      run: (v) => setFit(axis, Math.max(0, parseInt(v, 10) || 0)),
+      // No value — command search, the SDK's runCommand — is a no-op, as the
+      // font, size and number-format combos are; it would otherwise read as 0,
+      // Automatic, and rewrite the page setup unasked.
+      run: (v) => { if (v === undefined) return; setFit(axis, Math.max(0, parseInt(v, 10) || 0)); },
     });
   }
   R("page.fit.scale", {
@@ -525,6 +538,7 @@ export function registerRibbonCommands(R) {
     // Excel greys Scale out while Width or Height fits the page.
     enabled: () => !fitValue("Width") && !fitValue("Height"),
     run: (v) => {
+      if (v === undefined) return;
       const n = parseInt(String(v).replace("%", ""), 10);
       if (!Number.isInteger(n) || n < 10 || n > 400) { statusError("enter a scale from 10% to 400%"); return; }
       setPage({ "page.scale": String(n), "setupPr.fitToPage": "" });
