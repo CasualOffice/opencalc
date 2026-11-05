@@ -464,8 +464,8 @@ fn textsplit(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -> Result<Bloc
 /// `if_not_found`. An **empty** delimiter matches at once — at the start
 /// searching forwards, at the end searching backwards — so TEXTBEFORE gives
 /// `""` / the whole text and TEXTAFTER the reverse. `match_end` counts the
-/// text's own edge as one more delimiter: its end for TEXTBEFORE, its start
-/// for TEXTAFTER (as LibreOffice, the independent implementation, reads it).
+/// text's own edge as one more delimiter: the edge the search runs towards,
+/// its end for a positive instance and its start for a negative one.
 fn text_around(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr], before: bool) -> Value {
     if args.len() < 2 || args.len() > 6 {
         return Value::Error(ErrorValue::Value);
@@ -503,8 +503,13 @@ fn text_around(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr], before: bool
         return cut(edge, edge);
     }
     let mut found = find_all(&text, &delims, fold);
+    // The edge counted is the one the search runs towards — the end for a
+    // positive instance, the start for a negative one — for both functions
+    // (XL-FEAT-159). Tying it to the function instead made
+    // `TEXTAFTER("abc","x",,,1)` return the whole text where Excel and
+    // LibreOffice 26.2 return "".
     if match_end {
-        if before {
+        if instance > 0.0 {
             found.push((text.len(), text.len()));
         } else {
             found.insert(0, (0, 0));
