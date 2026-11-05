@@ -36,7 +36,13 @@ Ordering is **by type first, then within type**:
     number  <  text  <  FALSE  <  TRUE
 
 - All numbers sort before all text. All text sorts before all logicals.
-- Two numbers compare numerically.
+- Two numbers compare numerically, **equal to 15 significant digits**
+  (`XL-FEAT-011`): `=0.1+0.2=0.3` is `TRUE`, as in Excel. The tolerance is
+  LibreOffice's `rtl::math::approxEqual` — equal within 2⁻⁴⁸ of each, except
+  that two whole numbers compare exactly — in `casual-calc-eval/src/approx.rs`.
+  The criteria matcher, `MATCH`/`VLOOKUP`/`XLOOKUP`/`XMATCH` and `SWITCH` use
+  the same equality. Sorting (`SORT`, `SORTBY`, `LARGE`…) does not: a tolerance
+  is not transitive, and a sort needs an order that is.
 - Two pieces of text compare **case-insensitively**.
 - Two logicals compare with `FALSE < TRUE`.
 - Values of different types are never equal, and their order is the type order

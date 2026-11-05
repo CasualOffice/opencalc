@@ -2886,11 +2886,12 @@ fn volatile_functions_read_the_supplied_clock_and_seed() {
     assert_ne!(n(&wb, 2), first.0);
 }
 
-/// `DATEVALUE` takes the unambiguous forms and refuses the rest. `03/04/2024`
-/// is 3 April in most of the world and 4 March in the United States; with no
-/// locale to decide, guessing is wrong a third of the time.
+/// `DATEVALUE` reads a slash date the way typing it does — en-US, the
+/// product's one locale, month first (`XL-FEAT-019`). It used to refuse
+/// `03/04/2024` as ambiguous while the same text typed into a cell became
+/// 4 March, so the function and the cell beside it disagreed about one date.
 #[test]
-fn datevalue_refuses_ambiguous_text() {
+fn datevalue_reads_text_as_typed_entry_does() {
     let mut b = Builder::new();
     b.formula((0, 0), "DATEVALUE(\"2024-05-17\")");
     b.formula((1, 0), "DATEVALUE(\"17-May-2024\")");
@@ -2908,8 +2909,8 @@ fn datevalue_refuses_ambiguous_text() {
     assert_eq!(value_at(&wb, 2, 0), same, "and MMM D, YYYY");
     assert_eq!(
         value_at(&wb, 3, 0),
-        CellValue::Error(casual_calc_model::ErrorValue::Value),
-        "ambiguous slash form is refused, not guessed"
+        CellValue::Number(45355.0),
+        "03/04/2024 is 4 March 2024, as typed entry reads it"
     );
     assert_eq!(
         value_at(&wb, 4, 0),

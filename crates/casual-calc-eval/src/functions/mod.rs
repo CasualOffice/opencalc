@@ -2024,7 +2024,7 @@ pub(crate) fn flatten_numbers(
                     Value::Bool(b) => out.push(if b { 1.0 } else { 0.0 }),
                     Value::Empty => {}
                     Value::Text(t) => {
-                        out.push(t.trim().parse::<f64>().map_err(|_| ErrorValue::Value)?)
+                        out.push(crate::value::text_to_number(&t).ok_or(ErrorValue::Value)?)
                     }
                     Value::Error(e) => return Err(e),
                     Value::Lambda(_) => return Err(ErrorValue::Value),

@@ -169,7 +169,18 @@ impl<'a> Evaluator<'a> {
                 Some(expr) => {
                     let previous = self.current;
                     self.current = Some((sheet_index, at));
-                    let value = self.eval_expr_array(sheet_index, expr);
+                    let value = match expr {
+                        // The formula's own last step is a sum or a difference:
+                        // the one place Excel snaps a near-zero result to zero
+                        // (`XL-FEAT-011`). `=1*(0.5-0.4-0.1)` keeps its residue
+                        // in Excel too, so this is not done at every `+`.
+                        Expr::Binary {
+                            op: op @ (BinaryOp::Add | BinaryOp::Subtract),
+                            left,
+                            right,
+                        } => self.eval_binary(sheet_index, *op, left, right, true),
+                        _ => self.eval_expr_array(sheet_index, expr),
+                    };
                     self.current = previous;
                     value
                 }
@@ -418,7 +429,9 @@ impl<'a> Evaluator<'a> {
                 }
             }
             Expr::Unary { op, operand } => self.eval_unary(sheet_index, *op, operand),
-            Expr::Binary { op, left, right } => self.eval_binary(sheet_index, *op, left, right),
+            Expr::Binary { op, left, right } => {
+                self.eval_binary(sheet_index, *op, left, right, false)
+            }
             Expr::Function { name, args } if name == "LET" => self.eval_let(sheet_index, args),
             // `A1#` and `@x` (XL-FEAT-015), stored as these two calls because
             // that is how the file stores them.
@@ -1046,7 +1059,7 @@ impl<'a> Evaluator<'a> {
             | BinaryOp::Subtract
             | BinaryOp::Multiply
             | BinaryOp::Divide
-            | BinaryOp::Power => arithmetic(op, lv, rv),
+            | BinaryOp::Power => arithmetic(op, lv, rv, false),
             BinaryOp::Concat => match (lv.as_text(), rv.as_text()) {
                 (Ok(a), Ok(b)) => Value::Text(a + &b),
                 (Err(e), _) | (_, Err(e)) => Value::Error(e),
@@ -1055,12 +1068,15 @@ impl<'a> Evaluator<'a> {
         }
     }
 
+    /// `snap` is set only for a cell formula's outermost operator — see
+    /// [`arithmetic`].
     fn eval_binary(
         &mut self,
         sheet_index: usize,
         op: BinaryOp,
         left: &Expr,
         right: &Expr,
+        snap: bool,
     ) -> Value {
         // Arrays stay whole here. `B1:B4>4` has to compare element by element
         // — that is how `FILTER(data, B1:B4>4)` is written, and collapsing to
@@ -1078,7 +1094,7 @@ impl<'a> Evaluator<'a> {
             | BinaryOp::Subtract
             | BinaryOp::Multiply
             | BinaryOp::Divide
-            | BinaryOp::Power => arithmetic(op, &lv, &rv),
+            | BinaryOp::Power => arithmetic(op, &lv, &rv, snap),
             BinaryOp::Concat => match (lv.as_text(), rv.as_text()) {
                 (Ok(a), Ok(b)) => Value::Text(a + &b),
                 (Err(e), _) | (_, Err(e)) => Value::Error(e),
@@ -1194,7 +1210,12 @@ fn accepts_3d(name: &str) -> bool {
     THREE_D_FUNCTIONS.binary_search(&name).is_ok()
 }
 
-fn arithmetic(op: BinaryOp, lv: &Value, rv: &Value) -> Value {
+/// One arithmetic operator on two scalars.
+///
+/// `snap` compensates a sum or difference that cancels to within the last
+/// bits of its operands to exactly zero, which Excel does for the final
+/// operation of a formula (`XL-FEAT-011`, [`crate::approx::snapped_add`]).
+fn arithmetic(op: BinaryOp, lv: &Value, rv: &Value, snap: bool) -> Value {
     let a = match lv.as_number() {
         Ok(n) => n,
         Err(e) => return Value::Error(e),
@@ -1204,6 +1225,8 @@ fn arithmetic(op: BinaryOp, lv: &Value, rv: &Value) -> Value {
         Err(e) => return Value::Error(e),
     };
     let result = match op {
+        BinaryOp::Add if snap => crate::approx::snapped_add(a, b),
+        BinaryOp::Subtract if snap => crate::approx::snapped_sub(a, b),
         BinaryOp::Add => a + b,
         BinaryOp::Subtract => a - b,
         BinaryOp::Multiply => a * b,
@@ -1283,7 +1306,9 @@ fn compare_values(lv: &Value, rv: &Value) -> Option<std::cmp::Ordering> {
 
     match type_rank(&l).cmp(&type_rank(&r)) {
         Ordering::Equal => match (&l, &r) {
-            (Value::Number(a), Value::Number(b)) => a.partial_cmp(b),
+            // Equal to 15 significant digits, as Excel compares
+            // (`XL-FEAT-011`): `=0.1+0.2=0.3` is TRUE.
+            (Value::Number(a), Value::Number(b)) => crate::approx::approx_cmp(*a, *b),
             // Case-insensitive, which is Excel's rule and already what
             // `loose_cmp` and the criteria matcher do. ASCII folding, not
             // locale collation — named as a limit in docs/70 rather than left

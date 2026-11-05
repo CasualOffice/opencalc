@@ -12,6 +12,8 @@ use casual_calc_export::{ExportError, PackageKind, write_workbook_as};
 use casual_calc_formula::parse;
 use casual_calc_formula::stored::Origin;
 use casual_calc_import::{ImportError, import_package_cancellable};
+// Typed entry's reader lives below the engine, which shares it (`XL-FEAT-019`).
+use casual_calc_io::entry;
 use casual_calc_io::{IoError, read_delimited, write_delimited};
 use casual_calc_layout::print::PrintContext;
 use casual_calc_layout::{DisplayList, Freeze, GridGeometry, Viewport, panes};
@@ -3139,7 +3141,6 @@ fn recalc_plan(op: &Operation) -> RecalcPlan {
 pub mod autofilter;
 pub mod views;
 
-mod entry;
 mod what_if;
 
 pub use casual_calc_eval::goal_seek::{GoalSeekOptions, GoalSeekResult};

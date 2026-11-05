@@ -13,6 +13,11 @@ casual-calc-model = { path = "../casual-calc-model" }
 # Downward edge (layout is below eval in the DAG): reuse the display's pure
 # number-format engine so the TEXT function and on-screen display never drift.
 casual-calc-layout = { path = "../casual-calc-layout" }
+# Downward edge, for the same reason: typed entry's reader (`entry`), so that
+# `VALUE("1,234")` and `="12/31/2026"+0` read text exactly as typing it into a
+# cell does (`XL-FEAT-019`). `-io` depends only on the model and layout, both
+# already beneath this crate, so this adds nothing to the build graph.
+casual-calc-io = { path = "../casual-calc-io" }
 
 [dev-dependencies]
 casual-calc-import = { path = "../casual-calc-import" }

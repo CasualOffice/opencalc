@@ -61,7 +61,8 @@ pub(crate) fn eval_range_2d(
 /// otherwise by case-insensitive text (matches the engine's comparison rules).
 pub(crate) fn loose_cmp(a: &Value, b: &Value) -> Option<Ordering> {
     match (numeric_of(a), numeric_of(b)) {
-        (Some(x), Some(y)) => x.partial_cmp(&y),
+        // The same equality `=` uses (`XL-FEAT-011`).
+        (Some(x), Some(y)) => crate::approx::approx_cmp(x, y),
         _ => {
             let sa = a.as_text().unwrap_or_default().to_uppercase();
             let sb = b.as_text().unwrap_or_default().to_uppercase();
