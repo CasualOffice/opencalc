@@ -15,6 +15,7 @@
 // the grid and hid itself whenever the sheet's data fitted), answered a right-
 // click on the bar with nothing, and left "ok" in the bar after every commit.
 
+import { fileURLToPath } from "node:url";
 import { expect, test } from "@playwright/test";
 
 async function boot(page, url = "/editor.html") {
@@ -166,6 +167,22 @@ test("a collaboration state is not a message, and survives a selection change", 
   await expect(page.locator("#tb-status")).toHaveText("reconnecting…");
 });
 
+test("the import report survives the selection moving on", async ({ page }) => {
+  // The compatibility summary is the only place an open names what it did not
+  // keep ("no silent data loss"); taking it down with the first arrow key, as
+  // the stale-message rule did to every non-error line, made a lossy open
+  // silent again one keystroke later.
+  await boot(page);
+  await page.locator("#tb-open").setInputFiles(
+    fileURLToPath(new URL("../../fixtures/corpus/StructuredReferences.xlsx", import.meta.url)));
+  await expect(page.locator("#tb-status .warn")).toHaveText(/partly read/, { timeout: 30_000 });
+  await page.locator("#grid").focus();
+  await page.keyboard.press("ArrowDown");
+  await page.keyboard.press("ArrowRight");
+  await page.evaluate(() => window.opencalcEditor.selectForTest(9, 4));
+  await expect(page.locator("#tb-status .warn")).toHaveText(/partly read/);
+});
+
 // --- XL-UX-030 — Customize Status Bar -------------------------------------------
 
 async function openCustomize(page) {
@@ -205,6 +222,33 @@ test("right-clicking the status bar opens Customize Status Bar, in Excel's order
   await expect(item(menu, "Zoom")).toContainText("100%");
   await page.keyboard.press("Escape");
   await expect(menu).toHaveCount(0);
+});
+
+test("closing Customize Status Bar gives the keyboard back to the sheet", async ({ page }) => {
+  // Excel's Escape (or a click away) returns to the worksheet. The menu took
+  // focus for its arrow keys and, on closing, dropped it on <body>, so the
+  // next entry typed went nowhere.
+  await boot(page);
+  await page.evaluate(() => window.opencalcEditor.selectForTest(1, 1));
+  await page.locator("#grid").focus();
+  const menu = await openCustomize(page);
+  await page.keyboard.press("Escape");
+  await expect(menu).toHaveCount(0);
+  await page.keyboard.type("77");
+  await page.keyboard.press("Enter");
+  await expect.poll(() => page.evaluate(() => window.opencalcEditor.wasmApi().session_cell_input(0, 1, 1))).toBe("77");
+
+  // A click away on the bar itself, which takes no focus, closes the menu the
+  // same way: the keyboard is the sheet's again.
+  await page.evaluate(() => window.opencalcEditor.selectForTest(3, 3));
+  await page.locator("#grid").focus();
+  const again = await openCustomize(page);
+  const bar = await rect(page, ".bottom-bar");
+  await page.mouse.click(bar.left + 4, bar.top + bar.height / 2);
+  await expect(again).toHaveCount(0);
+  await page.keyboard.type("88");
+  await page.keyboard.press("Enter");
+  await expect.poll(() => page.evaluate(() => window.opencalcEditor.wasmApi().session_cell_input(0, 3, 3))).toBe("88");
 });
 
 test("ticking Minimum and Maximum adds them to the summary, and the choice is kept", async ({ page }) => {

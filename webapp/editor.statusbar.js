@@ -151,14 +151,18 @@ function stamp() {
 /// When the selection moves on from the one a message was written under, the
 /// message goes (`XL-UX-032`). Errors (`.err`) have their own rule, scoped to
 /// the active cell (`UX-SHELL-03`); a file job's progress line stays while the
-/// job runs; and a held state stays until something replaces it.
+/// job runs; and a held state stays until something replaces it. A `.warn`
+/// stays too: it is the import report naming what an open did not keep
+/// (`reportImportIssues`), or the time budget's "stopped before it finished"
+/// beside its Keep waiting button — the bar is the only place either is said,
+/// and the "no silent data loss" contract does not end with an arrow key.
 export function dropStaleStatusMessage() {
   if (!status) return;
   const text = status.textContent;
   // Written since the observer last ran (it is about to): leave it to stamp.
   if (seenText === null || text !== seenText) return;
   if (!text || selectionKey() === seenAt) return;
-  if (status.querySelector(".err") || byId("file-progress")) return;
+  if (status.querySelector(".err, .warn") || byId("file-progress")) return;
   if (status.firstChild && held.has(status.firstChild)) return;
   // End mode is armed until the next arrow, which `setEndMode` clears itself.
   if (state.endMode) return;
@@ -186,17 +190,35 @@ function itemValue(key) {
   }
 }
 
-export function closeStatusMenu() {
+/// Where the keyboard was when the menu opened — the grid, nearly always.
+/// The menu takes focus for its arrow keys; closing it must hand focus back,
+/// or it falls to <body> and the next entry typed reaches nothing, where
+/// Excel's Escape returns straight to the worksheet.
+let returnFocus = null;
+
+export function closeStatusMenu({ restoreFocus = true } = {}) {
   const m = byId("status-customize");
   if (!m) return;
+  const back = returnFocus;
+  returnFocus = null;
   m.remove();
   document.removeEventListener("mousedown", onOutside, true);
   document.removeEventListener("keydown", onMenuKey, true);
+  if (restoreFocus && back && back.isConnected) back.focus({ preventScroll: true });
 }
 
 function onOutside(e) {
   const m = byId("status-customize");
-  if (m && !e.composedPath().includes(m)) closeStatusMenu();
+  // A click away lands focus where it was aimed; only an empty landing (the
+  // bar itself, which takes no focus) falls back to where the keyboard was.
+  if (m && !e.composedPath().includes(m)) {
+    const back = returnFocus;
+    closeStatusMenu({ restoreFocus: false });
+    setTimeout(() => {
+      const a = document.activeElement;
+      if ((!a || a === document.body) && back && back.isConnected) back.focus({ preventScroll: true });
+    }, 0);
+  }
 }
 
 function onMenuKey(e) {
@@ -213,7 +235,9 @@ function onMenuKey(e) {
 }
 
 export function openStatusMenu(x, y) {
-  closeStatusMenu();
+  closeStatusMenu({ restoreFocus: false });
+  const active = document.activeElement;
+  returnFocus = active && active !== document.body ? active : byId("grid");
   const menu = document.createElement("div");
   menu.className = "popmenu ctx-menu sb-menu";
   menu.id = "status-customize";
