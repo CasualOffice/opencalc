@@ -8119,10 +8119,11 @@ const PICK_LIST_SCAN = 1000;
 // in this column, offered as a list to pick from.
 //
 // Text only, and the contiguous run only — both are Excel's rules and both
-// earn their place. Numbers are excluded because a column of amounts would
-// produce a list nobody can use; formulas are excluded because picking one
-// would paste its source text, not its value. The run stops at a blank so two
-// unrelated tables stacked in one column do not offer each other's entries.
+// earn their place. Numbers, dates, times, booleans and errors are excluded
+// because a column of amounts would produce a list nobody can use; formulas
+// are excluded because picking one would paste its source text, not its
+// value. The run stops at a blank so two unrelated tables stacked in one
+// column do not offer each other's entries.
 //
 // The same entries feed AutoComplete as the user types (`completeCellValue`,
 // XL-UX-017): Excel's pick list and its AutoComplete read one list, so a value
@@ -8138,7 +8139,16 @@ export function columnEntries(sheet, row, col) {
       try { v = wasm.session_cell_input(sheet, r, col); } catch { break; }
       if (!v) break;                                   // a blank ends the run
       if (v.startsWith("=")) continue;                 // a formula, not an entry
-      if (v.trim() === "" || Number.isFinite(Number(v))) continue;
+      // Text only, judged by the stored value and not by the input string: a
+      // date, a time and TRUE all edit as text-looking input ("1/5/2026",
+      // "9:30", "TRUE"), and completing to one turned a typed 1 into a date.
+      // Microsoft: "Entries that contain only numbers, dates, or times are not
+      // completed."
+      if (wasm.session_cell_value_kind(sheet, r, col) !== "text") continue;
+      // Text that would not stay text if it were typed — "42" or "TRUE" stored
+      // as text by another program, with no apostrophe — is left out too:
+      // committing it would store the number or the boolean.
+      if (v.trim() === "" || Number.isFinite(Number(v)) || /^(true|false)$/i.test(v.trim())) continue;
       if (seen.has(v)) continue;
       seen.add(v);
       values.push(v);

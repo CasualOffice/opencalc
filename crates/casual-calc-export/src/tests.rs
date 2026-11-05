@@ -5824,3 +5824,36 @@ fn spill_and_intersection_operators_round_trip_through_xlsx() {
         assert_formula_round_trips(file, shown);
     }
 }
+
+#[test]
+fn a_note_is_written_with_excel_s_author_line() {
+    // Excel shows a note's author because the note's *text* starts with it: a
+    // bold "Name:" run, then the body on the next line. Writing the body alone
+    // gave every note made here a nameless box in Excel (XL-UX-039). The line
+    // is lifted back out on import, so the model's text stays the body.
+    use casual_calc_model::{CellComment, CellRef};
+    let mut workbook = import_package(sample_xlsx()).unwrap().workbook;
+    workbook.sheets[0].comments = vec![
+        CellComment::note(
+            CellRef::new(0, 0),
+            "check the total",
+            Some("Ada".to_owned()),
+        ),
+        CellComment::note(CellRef::new(1, 0), "unsigned", None),
+    ];
+    let written = write_workbook(&workbook).unwrap();
+    let xml = xml_of(&written, "xl/comments1.xml");
+    assert!(
+        xml.contains("<r><rPr><b/><sz val=\"9\"/><color indexed=\"81\"/><rFont val=\"Tahoma\"/><family val=\"2\"/></rPr><t>Ada:</t></r>"),
+        "the author heads the note in bold: {xml}"
+    );
+    assert!(
+        xml.contains("<t xml:space=\"preserve\">\ncheck the total</t>"),
+        "{xml}"
+    );
+    // An anonymous note has no name to head it with.
+    assert!(!xml.contains("<t>:</t>"), "{xml}");
+    let back = import_package(written).unwrap().workbook;
+    assert_eq!(back.sheets[0].comments[0].text, "check the total");
+    assert_eq!(back.sheets[0].comments[1].text, "unsigned");
+}

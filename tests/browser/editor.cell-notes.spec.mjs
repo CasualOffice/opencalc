@@ -177,3 +177,81 @@ test("Shift+F2 on a threaded comment opens its thread rather than turning it int
   await expect(page.locator(NOTE)).toBeHidden();
   expect((await thread(page, 1, 1)).created, "the thread is untouched").not.toBeNull();
 });
+
+/// A stored (uncompressed) `.xlsx` from `{ path: text }`, so the test needs no
+/// zip library and the bytes are exactly what the parts say.
+function storedZip(parts) {
+  const enc = new TextEncoder();
+  const table = Array.from({ length: 256 }, (_, n) => {
+    let c = n;
+    for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+    return c >>> 0;
+  });
+  const crc32 = (b) => {
+    let c = 0xffffffff;
+    for (const x of b) c = table[(c ^ x) & 0xff] ^ (c >>> 8);
+    return (c ^ 0xffffffff) >>> 0;
+  };
+  const u16 = (v) => [v & 0xff, (v >>> 8) & 0xff];
+  const u32 = (v) => [v & 0xff, (v >>> 8) & 0xff, (v >>> 16) & 0xff, (v >>> 24) & 0xff];
+  const local = [];
+  const central = [];
+  let offset = 0;
+  for (const [name, text] of Object.entries(parts)) {
+    const n = enc.encode(name);
+    const d = enc.encode(text);
+    const common = [...u16(20), ...u16(0), ...u16(0), ...u16(0), ...u16(0), ...u32(crc32(d)), ...u32(d.length), ...u32(d.length), ...u16(n.length), ...u16(0)];
+    const head = [...u32(0x04034b50), ...common, ...n];
+    central.push(...u32(0x02014b50), ...u16(20), ...common, ...u16(0), ...u16(0), ...u16(0), ...u32(0), ...u32(offset), ...n);
+    local.push(...head, ...d);
+    offset += head.length + d.length;
+  }
+  const count = Object.keys(parts).length;
+  return [...local, ...central, ...u32(0x06054b50), ...u16(0), ...u16(0), ...u16(count), ...u16(count), ...u32(central.length), ...u32(offset), ...u16(0)];
+}
+
+const REL = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
+const RELS = "http://schemas.openxmlformats.org/package/2006/relationships";
+const MAIN = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
+
+/// A workbook whose B2 carries a note as Excel writes one: the author's name
+/// as a bold "Grace:" run at the top of the text, the body on the next line.
+const EXCEL_NOTE = storedZip({
+  "[Content_Types].xml":
+    '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">' +
+    '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>' +
+    '<Default Extension="xml" ContentType="application/xml"/>' +
+    '<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>' +
+    '<Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>' +
+    '<Override PartName="/xl/comments1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.comments+xml"/>' +
+    "</Types>",
+  "_rels/.rels": `<Relationships xmlns="${RELS}"><Relationship Id="rId1" Type="${REL}/officeDocument" Target="xl/workbook.xml"/></Relationships>`,
+  "xl/workbook.xml": `<workbook xmlns="${MAIN}" xmlns:r="${REL}"><sheets><sheet name="Sheet1" sheetId="1" r:id="rId1"/></sheets></workbook>`,
+  "xl/_rels/workbook.xml.rels": `<Relationships xmlns="${RELS}"><Relationship Id="rId1" Type="${REL}/worksheet" Target="worksheets/sheet1.xml"/></Relationships>`,
+  "xl/worksheets/sheet1.xml": `<worksheet xmlns="${MAIN}"><sheetData><row r="2"><c r="B2"><v>7</v></c></row></sheetData></worksheet>`,
+  "xl/worksheets/_rels/sheet1.xml.rels": `<Relationships xmlns="${RELS}"><Relationship Id="rId1" Type="${REL}/comments" Target="../comments1.xml"/></Relationships>`,
+  "xl/comments1.xml":
+    `<comments xmlns="${MAIN}"><authors><author>Grace</author></authors><commentList>` +
+    '<comment ref="B2" authorId="0" shapeId="0"><text>' +
+    '<r><rPr><b/><sz val="9"/><color indexed="81"/><rFont val="Tahoma"/><family val="2"/></rPr><t>Grace:</t></r>' +
+    '<r><rPr><sz val="9"/><color indexed="81"/><rFont val="Tahoma"/><family val="2"/></rPr><t xml:space="preserve">\ncheck the total</t></r>' +
+    "</text></comment></commentList></comments>",
+});
+
+test("a note written in Excel shows its author once", async ({ page }) => {
+  // Excel keeps the author line inside the note's text; the note box heads
+  // the note with the author too. Both at once read "Grace:" then
+  // "Grace: check the total".
+  await boot(page);
+  const opened = await page.evaluate(
+    (bytes) => window.opencalcEditor.openBytes(new Uint8Array(bytes), "excel-note.xlsx"),
+    EXCEL_NOTE,
+  );
+  expect(opened, "the package opened").toBeTruthy();
+  await page.evaluate(() => window.opencalcEditor.selectForTest(1, 1));
+  await page.locator("#grid").focus();
+  await page.keyboard.press("Shift+F2");
+  await expect(page.locator(`${NOTE} .oc-note-author`)).toHaveText("Grace:");
+  await expect(page.locator(`${NOTE} textarea`), "the body is the body, without the name line")
+    .toHaveValue("check the total");
+});

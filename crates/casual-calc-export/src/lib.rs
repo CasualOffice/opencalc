@@ -683,6 +683,11 @@ fn content_types(
     s
 }
 
+/// The run properties Excel gives a note's text: Tahoma 9 in the comment-text
+/// colour (system index 81).
+const NOTE_RPR: &str =
+    "<sz val=\"9\"/><color indexed=\"81\"/><rFont val=\"Tahoma\"/><family val=\"2\"/>";
+
 /// The `xl/comments{n}.xml` part: authors + one `<comment>` per note.
 fn comments_xml(sheet: &Sheet) -> String {
     let mut authors: Vec<String> = Vec::new();
@@ -709,10 +714,29 @@ fn comments_xml(sheet: &Sheet) -> String {
             .clone()
             .unwrap_or_else(|| DEFAULT_AUTHOR.to_owned());
         let aid = authors.iter().position(|x| *x == a).unwrap_or(0);
+        // A note opens with its author in bold on a line of its own, because
+        // that is where Excel looks for the name: it shows the note's text,
+        // and draws no heading of its own from `authorId`. Without the line a
+        // note made here opens nameless in Excel. The run properties are the
+        // ones Excel writes (Tahoma 9, the comment-text colour), and the import
+        // lifts the line back out, so the model's text stays the body
+        // (XL-UX-039). A threaded comment's legacy copy is Excel's placeholder,
+        // not a note, and an anonymous note has no name to put there.
+        let body = if !c.is_threaded() && !a.is_empty() {
+            format!(
+                "<r><rPr><b/>{NOTE_RPR}</rPr><t>{}:</t></r><r><rPr>{NOTE_RPR}</rPr><t xml:space=\"preserve\">\n{}</t></r>",
+                escape_text(&a),
+                escape_text(&c.text)
+            )
+        } else {
+            format!(
+                "<r><t xml:space=\"preserve\">{}</t></r>",
+                escape_text(&c.text)
+            )
+        };
         s.push_str(&format!(
-            "<comment ref=\"{}\" authorId=\"{aid}\"><text><r><t xml:space=\"preserve\">{}</t></r></text></comment>",
+            "<comment ref=\"{}\" authorId=\"{aid}\"><text>{body}</text></comment>",
             cell_a1(c.at.row, c.at.col),
-            escape_text(&c.text)
         ));
     }
     s.push_str("</commentList></comments>");
