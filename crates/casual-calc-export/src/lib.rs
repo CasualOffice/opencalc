@@ -1406,6 +1406,42 @@ fn write_pivot_caches(s: &mut String, workbook: &Workbook, pivots: &[pivot::Shee
     s.push_str("</pivotCaches>");
 }
 
+/// The `<workbookView>`s to write: the file's own, with `activeTab` taken from
+/// the sheet whose tab is selected (`PIPE-05`).
+///
+/// The views travel verbatim, but `activeTab` is not the file's to keep — it is
+/// the sheet the workbook was left open on, and Excel opens on it. Carried
+/// through unchanged, a workbook opened on its first sheet and saved on its
+/// third still said `activeTab="0"` beside a `tabSelected` third sheet.
+///
+/// The first sheet is the schema default, so a workbook with no views of its
+/// own gets one only when another sheet is selected. `firstSheet` (the first
+/// tab scrolled into view in the strip) is pulled back to the active tab when
+/// it lies past it, so the tab the file opens on is never scrolled out of
+/// sight.
+fn book_views(workbook: &Workbook) -> Vec<BTreeMap<String, String>> {
+    let mut views = workbook.settings.views.clone();
+    let Some(active) = workbook.sheets.iter().position(|s| s.view.tab_selected) else {
+        return views;
+    };
+    if views.is_empty() {
+        if active == 0 {
+            return views;
+        }
+        views.push(BTreeMap::new());
+    }
+    let view = &mut views[0];
+    if active == 0 && !view.contains_key("activeTab") {
+        return views;
+    }
+    view.insert("activeTab".to_owned(), active.to_string());
+    let first = view.get("firstSheet").and_then(|v| v.parse::<usize>().ok());
+    if first.is_some_and(|f| f > active) {
+        view.insert("firstSheet".to_owned(), active.to_string());
+    }
+    views
+}
+
 fn workbook_xml(
     workbook: &Workbook,
     ids: &WorkbookRelIds,
@@ -1431,9 +1467,10 @@ fn workbook_xml(
     }
     write_attr_element(&mut s, "workbookPr", &workbook_pr);
     write_attr_element(&mut s, "workbookProtection", &settings.protection);
-    if !settings.views.is_empty() {
+    let views = book_views(workbook);
+    if !views.is_empty() {
         s.push_str("<bookViews>");
-        for view in &settings.views {
+        for view in &views {
             write_attr_element(&mut s, "workbookView", view);
         }
         s.push_str("</bookViews>");

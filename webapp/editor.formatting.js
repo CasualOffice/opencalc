@@ -48,8 +48,25 @@ export function mergeInSel(m) {
   return !(m.r1 < s.r0 || m.r0 > s.r1 || m.c1 < s.c0 || m.c0 > s.c1);
 }
 
+/// Run `fn` over every range of the selection as **one** undo step (`PIPE-02`).
+///
+/// Each range is its own engine call and so its own history entry; a Ctrl+click
+/// selection of three ranges made Bold three Ctrl+Zs, where Excel takes it back
+/// in one. Folded with `session_group_undo_since`, the mechanism the typed
+/// value and its column widening already share — only the local history is
+/// regrouped; each call still went to collaborators as it was. A range that
+/// fails part-way (a protected sheet) leaves the ranges before it as one step,
+/// not several.
+export function asOneUndoStep(ranges, fn) {
+  const mark = undoMark();
+  try { for (const s of ranges) fn(s); } catch (e) { statusError(errText(e)); }
+  if (mark >= 0 && ranges.length > 1) {
+    try { wasm.session_group_undo_since(mark); } catch {}
+  }
+}
+
 export function formatSel(fn) {
-  try { for (const s of allRanges()) fn(s); } catch (e) { statusError(errText(e)); }
+  asOneUndoStep(allRanges(), fn);
   draw();
 }
 
@@ -266,8 +283,7 @@ export function bdIcon(kind) {
 }
 
 export function clearFormats() {
-  try { for (const s of allRanges()) wasm.session_clear_formats(state.sheet, s.r0, s.c0, s.r1, s.c1); }
-  catch (e) { statusError(errText(e)); }
+  asOneUndoStep(allRanges(), (s) => wasm.session_clear_formats(state.sheet, s.r0, s.c0, s.r1, s.c1));
   draw();
 }
 

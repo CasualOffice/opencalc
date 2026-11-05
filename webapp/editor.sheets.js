@@ -7,6 +7,7 @@
 // without touching a single body.
 
 import { syncVolatileClock } from "./editor.selection.js";
+import { asOneUndoStep } from "./editor.formatting.js";
 import { offerAutostartMacros } from "./editor.macros-window.js";
 import { noteOpenedBytes } from "./editor.network.js";
 import { openInWorker, saveInWorker, yieldFrame } from "./editor.files.js";
@@ -517,8 +518,8 @@ export function readThread(row, col) {
 }
 
 export function clearAll() {
-  try { for (const s of allRanges()) wasm.session_clear_range(state.sheet, s.r0, s.c0, s.r1, s.c1); }
-  catch (e) { statusError(errText(e)); }
+  // One undo step however many ranges are selected (`PIPE-02`).
+  asOneUndoStep(allRanges(), (s) => wasm.session_clear_range(state.sheet, s.r0, s.c0, s.r1, s.c1));
   draw();
 }
 

@@ -1366,7 +1366,9 @@ input.tb-size::placeholder, input.tb-font::placeholder { color: var(--oc-faint-t
 .ac-menu {
   position: fixed; z-index: 70; min-width: 260px; max-width: 360px;
   background: var(--oc-background-color); border: 1px solid var(--oc-border-color); border-radius: 8px;
-  box-shadow: var(--oc-elevation-overlay); padding: 4px; overflow: hidden;
+  box-shadow: var(--oc-elevation-overlay); padding: 4px;
+  /* Eight rows, then it scrolls: functions, names and tables share one list. */
+  max-height: 232px; overflow-x: hidden; overflow-y: auto;
 }
 /* Argument hint: which parameter of the current call is being typed. */
 .sig-tip {
@@ -1381,7 +1383,10 @@ input.tb-size::placeholder, input.tb-font::placeholder { color: var(--oc-faint-t
 .sig-arg.active { color: var(--oc-text-color); font-weight: 700; text-decoration: underline; }
 .ac-item { display: flex; align-items: baseline; gap: 8px; padding: 5px 9px; border-radius: 5px; cursor: pointer; }
 .ac-item.active { background: var(--oc-accent-color); }
-.ac-item.active .ac-name, .ac-item.active .ac-sig { color: #fff; }
+.ac-item.active .ac-name, .ac-item.active .ac-sig, .ac-item.active .ac-icon { color: #fff; }
+/* Which kind of entry it is — function, defined name, table — as Excel marks it. */
+.ac-icon { flex: none; width: 16px; text-align: center; font-size: 11px; font-style: italic; color: var(--oc-muted-text-color); }
+.ac-item[data-kind="name"] .ac-icon, .ac-item[data-kind="table"] .ac-icon { font-style: normal; font-size: 13px; }
 .ac-name { font-weight: 700; font-size: 13px; color: var(--oc-text-color); font-family: inherit; }
 .ac-sig { font-size: 12px; color: var(--oc-muted-text-color); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 /* Invalid-formula editor outline + status error text. */

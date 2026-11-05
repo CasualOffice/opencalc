@@ -112,3 +112,37 @@ pub fn session_save() -> Result<Vec<u8>, JsError> {
             .map_err(js)
     })
 }
+
+#[cfg(test)]
+mod undo_depth_tests {
+    use super::*;
+
+    /// Every session the editor installs keeps Excel's hundred undo levels and
+    /// no more (`PIPE-02`). Unbounded, each formatting tweak kept an inverse
+    /// snapshot of the sheet's metadata for the life of the tab.
+    #[test]
+    fn an_installed_session_keeps_a_hundred_undo_steps() {
+        let mut wb = Workbook::new(Id::from_parts(1, 1));
+        wb.sheets
+            .push(Sheet::new(SheetId(Id::from_parts(2, 1)), "Sheet1"));
+        set_session(WorkbookSession::from_workbook(wb));
+        SESSION.with(|cell| {
+            let mut guard = cell.borrow_mut();
+            let s = guard.as_mut().unwrap();
+            for n in 0..150 {
+                s.edit(EditOperation::SetValue {
+                    sheet: 0,
+                    at: CellRef::new(n, 0),
+                    value: CellValue::Number(f64::from(n)),
+                })
+                .unwrap();
+            }
+            let mut steps = 0;
+            while s.can_undo() && steps < 1000 {
+                s.undo().unwrap();
+                steps += 1;
+            }
+            assert_eq!(steps, 100);
+        });
+    }
+}

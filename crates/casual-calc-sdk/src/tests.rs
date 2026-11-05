@@ -4591,3 +4591,96 @@ fn a_session_opened_elsewhere_is_the_session_opened_here() {
         "an untouched save is the file"
     );
 }
+
+/// Switching sheets is what a saved file opens on, and nothing more (`PIPE-05`):
+/// not an undo step, not unsaved work, and not the end of the untouched
+/// original — an opened file looked through and saved unedited is still the
+/// file it was, signature and all.
+#[test]
+fn the_active_sheet_is_saved_without_being_an_edit() {
+    use crate::SessionFormat;
+    let mut session = WorkbookSession::blank();
+    for (i, name) in ["One", "Two", "Three"].into_iter().enumerate() {
+        session
+            .workbook_mut()
+            .sheets
+            .push(Sheet::new(SheetId(Id::from_parts(9, i as u64 + 1)), name));
+    }
+    let bytes = session.save_as(SessionFormat::Xlsx).unwrap();
+    let mut opened = WorkbookSession::open(bytes).unwrap();
+    let applied = opened.edits_applied();
+
+    assert!(opened.set_active_sheet(2));
+    assert!(!opened.can_undo(), "a sheet switch is not an undo step");
+    assert_eq!(opened.edits_applied(), applied, "nor unsaved work");
+    assert!(opened.is_unmodified(), "nor the end of the original");
+    // Selecting the selected sheet changes nothing.
+    assert!(!opened.set_active_sheet(2));
+    // Out of range is refused rather than clearing every tab.
+    assert!(!opened.set_active_sheet(7));
+
+    // Once edited, the saved file opens on the sheet it was left on.
+    opened
+        .edit(EditOperation::SetValue {
+            sheet: 0,
+            at: CellRef::new(0, 0),
+            value: CellValue::Number(1.0),
+        })
+        .unwrap();
+    let back = WorkbookSession::open(opened.save_as(SessionFormat::Xlsx).unwrap()).unwrap();
+    let selected: Vec<bool> = back
+        .workbook()
+        .sheets
+        .iter()
+        .map(|s| s.view.tab_selected)
+        .collect();
+    assert_eq!(selected, [false, false, true]);
+}
+
+/// A hidden sheet cannot be the one a file opens on: its tab is not shown.
+#[test]
+fn a_hidden_sheet_is_not_made_active() {
+    let mut session = WorkbookSession::blank();
+    for (i, name) in ["One", "Two"].into_iter().enumerate() {
+        session
+            .workbook_mut()
+            .sheets
+            .push(Sheet::new(SheetId(Id::from_parts(9, i as u64 + 1)), name));
+    }
+    session.workbook_mut().sheets[1].visibility = casual_calc_model::SheetVisibility::Hidden;
+    session.workbook_mut().sheets[0].view.tab_selected = true;
+    assert!(!session.set_active_sheet(1));
+    assert!(session.workbook().sheets[0].view.tab_selected);
+}
+
+/// The bound can be set on a session that already exists, and takes effect on
+/// what it already holds — which is how the editor bounds every session it is
+/// handed, whichever constructor made it (`PIPE-02`).
+#[test]
+fn undo_depth_can_be_bounded_after_construction() {
+    let mut session = WorkbookSession::blank();
+    session
+        .workbook_mut()
+        .sheets
+        .push(Sheet::new(SheetId(Id::from_parts(9, 1)), "Sheet1"));
+    for n in 0..5 {
+        session
+            .edit(EditOperation::SetValue {
+                sheet: 0,
+                at: CellRef::new(n, 0),
+                value: CellValue::Number(f64::from(n)),
+            })
+            .unwrap();
+    }
+    session.set_undo_depth(Some(3));
+    assert_eq!(session.config().undo_depth, Some(3));
+    let mut steps = 0;
+    while session.can_undo() && steps < 10 {
+        session.undo().unwrap();
+        steps += 1;
+    }
+    assert_eq!(steps, 3);
+    // The newest three were reversed; the two before them stand.
+    assert_eq!(value(&session, CellRef::new(1, 0)), CellValue::Number(1.0));
+    assert_eq!(value(&session, CellRef::new(2, 0)), CellValue::Empty);
+}
