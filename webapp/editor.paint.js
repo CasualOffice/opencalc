@@ -644,6 +644,39 @@ export function textWidth(font, text) {
   return w;
 }
 
+/// A General number shortened to fit `room` pixels, or `null` when nothing
+/// does and the cell shows `#####` (`XL-UX-152`).
+///
+/// Excel's General rounds decimals or goes scientific to fit the column; only
+/// the number that cannot be shortened at all is hashed. The rule itself is the
+/// engine's (`general_fit`, counted in characters); this only finds the longest
+/// character budget whose result measures inside the cell. Narrow glyphs
+/// (`.`, `-`) mean a budget can fit more characters than digits, so it walks
+/// down from the full length rather than dividing by a digit width.
+///
+/// Called only for a number that already overflowed, and memoised on what
+/// decides the answer, so a column of them costs a lookup per frame.
+const GENERAL_FIT_CAP = 20_000;
+const generalFitCache = new Map();
+export function fitGeneral(font, value, text, room) {
+  if (!wasm || typeof wasm.general_fit !== "function") return null;
+  const key = font + "\u0000" + value + "\u0000" + Math.floor(room);
+  const held = generalFitCache.get(key);
+  if (held !== undefined) return held;
+  let found = null;
+  for (let n = String(text).length - 1; n >= 1; n -= 1) {
+    let s = "";
+    try { s = wasm.general_fit(value, n); } catch { break; }
+    if (!s) break;
+    if (textWidth(font, s) <= room) { found = s; break; }
+    // The engine may return something shorter than asked; skip to it.
+    n = Math.min(n, s.length);
+  }
+  if (generalFitCache.size >= GENERAL_FIT_CAP) generalFitCache.clear();
+  generalFitCache.set(key, found);
+  return found;
+}
+
 /// What the cache did, for the frame-budget gate.
 export function textWidthStatsForTest() {
   return { ...textWidthStats, size: textWidthCache.size };

@@ -251,6 +251,7 @@ import {
   textY,
   tintColor,
   wrapLines,
+  fitGeneral,
 } from "./editor.paint.js";
 import {
   applyPivot,
@@ -3228,7 +3229,19 @@ export function draw() {
     // cell with "#" instead, because a number cut off mid-digits still reads as
     // a real — and wrong — value. This holds under "clip" too, for the same
     // reason.
-    if (it.n && tw > w - 8) {
+    //
+    // Except under General (`gv` carries the raw value only then): Excel
+    // rounds a General number's decimals or switches it to scientific to fit
+    // (`XL-UX-152`) — a shortened General number is the same value at lower
+    // precision, not a truncation — and hashes only one that cannot be
+    // shortened at all. Shrink-to-fit keeps its existing path.
+    const fitted = it.n && it.gv !== undefined && !it.shrink && tw > w - 8
+      ? fitGeneral(ctx.font, it.gv, text, w - 8)
+      : null;
+    if (fitted !== null) {
+      text = fitted;
+      tw = textWidth(ctx.font, text);
+    } else if (it.n && tw > w - 8) {
       const hashW = textWidth(ctx.font, "#") || 1;
       text = "#".repeat(Math.max(1, Math.floor((w - 8) / hashW)));
       tw = textWidth(ctx.font, text);

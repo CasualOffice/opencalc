@@ -836,6 +836,21 @@ fn cells_in_bands(sheet: usize, row_bands: &[(u32, u32)], col_bands: &[(u32, u32
             // wide to be shown safely, not for text that can simply spill.
             if matches!(cell.value, CellValue::Number(_)) && !sheet.view.show_formulas {
                 extra.push_str(",\"n\":1");
+                // **General shortens before it fills** (`XL-UX-152`). Under
+                // General, Excel rounds decimals or goes scientific to fit
+                // the column, and only a number that cannot be shortened at
+                // all becomes `#####`; a fixed format keeps `#####`. Only the
+                // host can measure the column, so it gets the raw value to
+                // shorten (`general_fit`) — `{:?}` is a round-trip and valid
+                // JSON (`1e300`, `0.1`), which the display text is not.
+                if let CellValue::Number(v) = cell.value
+                    && v.is_finite()
+                    && !text.is_empty()
+                    && casual_calc_layout::cell_number_format(wb, cell)
+                        .is_none_or(|c| c.trim().is_empty() || c.eq_ignore_ascii_case("General"))
+                {
+                    extra.push_str(&format!(",\"gv\":{v:?}"));
+                }
             }
             // Flagged rather than inferred from the text: a *text* cell may
             // legitimately contain "#VALUE!", and marking that as an error
@@ -1820,5 +1835,34 @@ mod frame_fetch_tests {
             got, expected,
             "the bands must be the bounding box's cells in them, in its order"
         );
+    }
+}
+
+/// `XL-UX-152`: the host shortens a General number to fit its column, so a
+/// General number carries its raw value (`gv`) and nothing else does — a fixed
+/// format keeps `#####` in Excel, and must not be shortened by the host.
+#[cfg(test)]
+mod general_fit_payload_tests {
+    use super::session_cells;
+    use crate::{session_new, session_set_cell, session_set_number_format};
+
+    #[test]
+    fn only_a_general_number_carries_its_raw_value() {
+        session_new();
+        session_set_cell(0, 0, 0, "3.14159265").unwrap();
+        session_set_cell(0, 1, 0, "3.14159265").unwrap();
+        session_set_number_format(0, 1, 0, 1, 0, "0.000000").unwrap();
+        session_set_cell(0, 2, 0, "words").unwrap();
+        // Typed `1e300` would get a scientific format; a formula stays General.
+        session_set_cell(0, 3, 0, "=10^300").unwrap();
+        let general = session_cells(0, 0, 0, 0, 0);
+        assert!(general.contains("\"gv\":3.14159265"), "{general}");
+        let fixed = session_cells(0, 1, 0, 1, 0);
+        assert!(!fixed.contains("\"gv\""), "{fixed}");
+        let text = session_cells(0, 2, 0, 2, 0);
+        assert!(!text.contains("\"gv\""), "{text}");
+        // Valid JSON however large: `{:?}` prints `1e300`, not 301 digits.
+        let huge = session_cells(0, 3, 0, 3, 0);
+        assert!(huge.contains("\"gv\":1e300"), "{huge}");
     }
 }
