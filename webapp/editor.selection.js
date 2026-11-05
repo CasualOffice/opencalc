@@ -1028,8 +1028,82 @@ export function looksLikeHeader(s) {
   return differs;
 }
 
-export function sortRange(desc) {
-  const s = sortTarget();
+/// Excel's *current region* around a cell — the block bounded by blank rows
+/// and columns that Ctrl+A's first press selects — or null for an empty cell.
+export function currentRegion(row, col) {
+  try {
+    const j = wasm.session_block_bounds(state.sheet, row, col);
+    return j && j !== "null" ? JSON.parse(j) : null;
+  } catch { return null; }
+}
+
+/// Excel's Sort Warning text. "OpenCalc" where Excel says "Microsoft Excel".
+export const SORT_WARNING_TEXT =
+  "OpenCalc found data next to your selection. Since you have not selected this data, " +
+  "it will not be sorted.\n\nWhat do you want to do?";
+/// Excel's answer to a sort from an empty cell with no data around it.
+export const SORT_NOTHING_TEXT =
+  "This can't be applied to the selected range. Select a single cell in a range and try again.";
+
+/// What a sort acts on (XL-UX-175), asking first where Excel asks. Resolves to
+/// `{r0,c0,r1,c1}`, or null when there is nothing to sort or the user cancelled.
+///
+/// - **One cell**: its current region. The editor used to sort the whole used
+///   area from A1, so a second table across a blank column was reordered by a
+///   key column it does not have.
+/// - **A range with data beside it** (one column of a table): Excel's Sort
+///   Warning — *Expand the selection* (the default) sorts the current region,
+///   *Continue with the current selection* sorts only what is selected, Cancel
+///   sorts nothing. "Beside" is the columns either side on the selection's
+///   rows, which is where a row-wise sort would tear records apart; a range
+///   that leaves out only the header row above it is the ordinary way to sort
+///   without one, and is not asked about. [Excel's exact trigger is from
+///   memory, unverified.]
+/// - **Whole rows, columns or the sheet**: as selected, over the used extent.
+export async function resolveSortTarget() {
+  const s = effectiveRange();
+  if (state.selKind !== "cells") return s;
+  if (s.r0 === s.r1 && s.c0 === s.c1) {
+    const region = currentRegion(s.r0, s.c0);
+    if (!region) {
+      await messageBox(SORT_NOTHING_TEXT, { icon: "warning" });
+      return null;
+    }
+    return region;
+  }
+  const filledAt = (r, c) => {
+    try { return wasm.session_cell_input(state.sheet, r, c) !== ""; } catch { return false; }
+  };
+  // Bounded like `looksLikeHeader`: a selection a million rows tall is asked
+  // about its first few thousand, which is where the table it belongs to is.
+  const last = Math.min(s.r1, s.r0 + 4095);
+  let beside = null;
+  for (let r = s.r0; r <= last && !beside; r += 1) {
+    if (s.c0 > 0 && filledAt(r, s.c0 - 1)) beside = { row: r, col: s.c0 - 1 };
+    else if (s.c1 < 16383 && filledAt(r, s.c1 + 1)) beside = { row: r, col: s.c1 + 1 };
+  }
+  if (!beside) return s;
+  const reply = await messageBox(SORT_WARNING_TEXT, {
+    title: "Sort Warning",
+    buttons: "sortCancel",
+    choices: [["expand", "Expand the selection"], ["continue", "Continue with the current selection"]],
+    choice: "expand",
+  });
+  if (reply.answer !== "sort") return null;
+  if (reply.choice === "continue") return s;
+  // The region around the active cell, or — when that cell is empty — around
+  // the data found beside the selection; never smaller than the selection.
+  const region = currentRegion(state.sel.row, state.sel.col) ?? currentRegion(beside.row, beside.col);
+  if (!region) return s;
+  return {
+    r0: Math.min(region.r0, s.r0), c0: Math.min(region.c0, s.c0),
+    r1: Math.max(region.r1, s.r1), c1: Math.max(region.c1, s.c1),
+  };
+}
+
+export async function sortRange(desc) {
+  const s = await resolveSortTarget();
+  if (!s) return;
   const hasHeader = looksLikeHeader(s);
   const key = Math.min(Math.max(state.sel.col, s.c0), s.c1);
   applySort(s, [{ col: key, asc: !desc }], hasHeader);

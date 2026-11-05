@@ -72,6 +72,7 @@ import {
   selRect,
   select,
   setNumberFormat,
+  resolveSortTarget,
   sortRange,
   sortTarget,
   state,
@@ -734,8 +735,11 @@ export function customFormatDialog() {
   input.select();
 }
 
-export function sortDialog() {
-  const s = sortTarget();
+// The region comes from `resolveSortTarget`, so the dialog asks Excel's Sort
+// Warning first and opens on the block the answer chose (XL-UX-175).
+export async function sortDialog() {
+  const s = await resolveSortTarget();
+  if (!s) return;
   const modal = byId("oc-modal");
   const body = byId("oc-modal-body");
   byId("oc-modal-title").textContent = "Sort range";
@@ -2564,6 +2568,8 @@ const MSGBOX_BUTTONS = {
   retryCancel: [["retry", "Retry"], ["cancel", "Cancel"]],
   yesNo: [["yes", "Yes"], ["no", "No"]],
   yesNoCancel: [["yes", "Yes"], ["no", "No"], ["cancel", "Cancel"]],
+  // The Sort Warning's (XL-UX-175).
+  sortCancel: [["sort", "Sort"], ["cancel", "Cancel"]],
 };
 
 /// Raise Excel's message box: the title bar (our name where Excel says
@@ -2582,8 +2588,15 @@ const MSGBOX_BUTTONS = {
 ///
 /// Every message a dialog gives about its own input goes through here; no
 /// dialog shows one inline (`editor.message-box` checks each site).
+///
+/// `choices` (`[[value, label], ...]`) adds Excel's radio group under the
+/// message — the Sort Warning's *Expand the selection* / *Continue with the
+/// current selection* — with `choice` checked (the first otherwise). The
+/// arrow keys move between the choices while one has the focus. With
+/// choices, the box resolves to `{ answer, choice }` instead of the answer.
 export function messageBox(message, {
   icon = "warning", field = null, title = "", buttons = "ok", defaultButton = "",
+  choices = null, choice = "",
 } = {}) {
   if (msgBoxOpen) msgBoxOpen.dismiss();
   const root = msgBoxRoot();
@@ -2603,6 +2616,25 @@ export function messageBox(message, {
   const first = btns.find((b) => b.dataset.answer === defaultButton) ?? btns[0];
   first.classList.add("primary");
   actions.replaceChildren(...btns);
+  let group = root.querySelector(".oc-msgbox-choices");
+  if (!group) {
+    group = el("div", "oc-radio-group oc-msgbox-choices");
+    group.setAttribute("role", "radiogroup");
+    actions.before(group);
+  }
+  const radios = (choices || []).map(([value, label], i) => {
+    const row = el("label", "oc-radio");
+    const input = document.createElement("input");
+    input.type = "radio";
+    input.name = "oc-msgbox-choice";
+    input.value = value;
+    input.checked = choice ? value === choice : i === 0;
+    row.append(input, document.createTextNode(label));
+    return { row, input };
+  });
+  group.replaceChildren(...radios.map((r) => r.row));
+  group.hidden = radios.length === 0;
+  const inputs = radios.map((r) => r.input);
   const active = (root.getRootNode() ?? document).activeElement;
   const back = field || (active instanceof HTMLElement ? active : null);
   root.hidden = false;
@@ -2610,9 +2642,30 @@ export function messageBox(message, {
   const escape = set.some(([a]) => a === "cancel") ? "cancel" : set.length === 1 ? set[0][0] : null;
   return new Promise((resolve) => {
     const focused = () => btns.indexOf((root.getRootNode() ?? document).activeElement);
+    const onRadio = () => inputs.indexOf((root.getRootNode() ?? document).activeElement);
     const onKey = (e) => {
       // Modal: nothing behind the box takes a key while it is up.
       e.stopImmediatePropagation();
+      const at = onRadio();
+      if (at >= 0 && ["ArrowDown", "ArrowUp", "ArrowRight", "ArrowLeft", " "].includes(e.key)) {
+        // A choice has the focus: the arrows pick the next one, as a Windows
+        // radio group does, and Space checks the focused one.
+        e.preventDefault();
+        const step = e.key === " " ? 0 : (e.key === "ArrowUp" || e.key === "ArrowLeft") ? -1 : 1;
+        const to = inputs[(at + step + inputs.length) % inputs.length];
+        to.checked = true;
+        to.focus();
+        return;
+      }
+      if (e.key === "Tab" && inputs.length) {
+        // Tab walks the choices and the buttons together.
+        e.preventDefault();
+        const stops = [inputs.find((i) => i.checked) ?? inputs[0], ...btns];
+        const now = stops.indexOf((root.getRootNode() ?? document).activeElement);
+        const from = now < 0 ? (at >= 0 ? 0 : -1) : now;
+        stops[(from + (e.shiftKey ? stops.length - 1 : 1)) % stops.length].focus();
+        return;
+      }
       if (e.key === "Enter" || e.key === " ") {
         e.preventDefault();
         dismiss(btns[Math.max(0, focused())]?.dataset.answer ?? first.dataset.answer);
@@ -2653,7 +2706,11 @@ export function messageBox(message, {
       } else {
         back.focus();
       }
-      resolve(answer);
+      if (inputs.length) {
+        resolve({ answer, choice: (inputs.find((i) => i.checked) ?? inputs[0]).value });
+      } else {
+        resolve(answer);
+      }
     }
     msgBoxOpen = { dismiss };
     window.addEventListener("keydown", onKey, true);

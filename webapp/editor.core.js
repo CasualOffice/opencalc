@@ -365,6 +365,7 @@ import {
   selectRowsSpan,
   cellBoxForTest,
   selectionRectForTest,
+  resolveSortTarget,
   sortRange,
   sortTarget,
   startInline,
@@ -820,6 +821,7 @@ export {
   selectRowsSpan,
   cellBoxForTest,
   selectionRectForTest,
+  resolveSortTarget,
   sortRange,
   sortTarget,
   startInline,
@@ -4597,10 +4599,9 @@ export function setPainter(next) {
 
 
 // Sort the current selection's rows by the active cell's column. A single-cell
-// selection sorts the whole used data region (rows 1..end, keeping a header row
-// out only if the caller selected a body range). Ascending unless `desc`.
-// The block a sort should act on: the selection, or — for a lone cell — the
-// whole used area, which is Excel's "sort this column" gesture.
+// selection sorts its current region, and a selection with data beside it asks
+// Excel's Sort Warning first (`resolveSortTarget`, XL-UX-175). Ascending
+// unless `desc`.
 
 // Whether a range's first row looks like column headings, by Excel's rule of
 // thumb: a heading is text sitting over data that is not. Getting this wrong in

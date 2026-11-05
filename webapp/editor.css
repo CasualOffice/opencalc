@@ -2841,4 +2841,8 @@ html, .editor-body { overscroll-behavior: none; }
    name lists its reasons). */
 .oc-msgbox-text { margin: 6px 0 0; font-size: 13px; line-height: 1.45; white-space: pre-line; overflow-wrap: anywhere; }
 .oc-msgbox-actions { margin-top: 16px; }
+/* The Sort Warning's choice (XL-UX-175), indented under the message as in
+   Excel; `[hidden]` restated because `.oc-radio-group` sets a display. */
+.oc-msgbox-choices { margin: 12px 0 0 46px; }
+.oc-msgbox-choices[hidden] { display: none; }
 .oc-msgbox-actions .oc-btn { min-width: 76px; }

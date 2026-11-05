@@ -471,23 +471,43 @@ pub fn session_block_bounds(sheet: usize, row: u32, col: u32) -> String {
         if !filled(row, col) {
             return "null".to_owned();
         }
-        // Walk out along the row and column, then square the block off. A
-        // ragged region grows to its bounding box, which is what a user means
-        // by "this table" even when one corner is blank.
+        // Excel's current region (`XL-UX-175`): grow the rectangle until the
+        // row above, the row below and the columns either side — corners
+        // included — are all blank. A ragged region grows to its bounding box,
+        // which is what a user means by "this table" even when one corner is
+        // blank.
+        //
+        // Repeated until nothing moves, because growing one edge brings new
+        // cells next to the others: a single pass per direction stopped a
+        // staircase half-way down, and the corners are checked because a cell
+        // touching only diagonally is not separated by any blank row or column.
+        // The grid's own bounds cap the walk.
+        const LAST_ROW: u32 = 1_048_575;
+        const LAST_COL: u32 = 16_383;
         let (mut r0, mut r1, mut c0, mut c1) = (row, row, col, col);
-        while r0 > 0 && (c0..=c1).any(|c| filled(r0 - 1, c)) {
-            r0 -= 1;
-        }
-        while c0 > 0 && (r0..=r1).any(|r| filled(r, c0 - 1)) {
-            c0 -= 1;
-        }
-        // Bounded so a pathological sheet cannot make this walk forever.
-        let limit = 1_048_576u32;
-        while r1 + 1 < limit && (c0..=c1).any(|c| filled(r1 + 1, c)) {
-            r1 += 1;
-        }
-        while c1 + 1 < 16_384 && (r0..=r1).any(|r| filled(r, c1 + 1)) {
-            c1 += 1;
+        loop {
+            let (lc, hc) = (c0.saturating_sub(1), (c1 + 1).min(LAST_COL));
+            let (lr, hr) = (r0.saturating_sub(1), (r1 + 1).min(LAST_ROW));
+            let mut grew = false;
+            if r0 > 0 && (lc..=hc).any(|c| filled(r0 - 1, c)) {
+                r0 -= 1;
+                grew = true;
+            }
+            if r1 < LAST_ROW && (lc..=hc).any(|c| filled(r1 + 1, c)) {
+                r1 += 1;
+                grew = true;
+            }
+            if c0 > 0 && (lr..=hr).any(|r| filled(r, c0 - 1)) {
+                c0 -= 1;
+                grew = true;
+            }
+            if c1 < LAST_COL && (lr..=hr).any(|r| filled(r, c1 + 1)) {
+                c1 += 1;
+                grew = true;
+            }
+            if !grew {
+                break;
+            }
         }
         format!("{{\"r0\":{r0},\"c0\":{c0},\"r1\":{r1},\"c1\":{c1}}}")
     })
@@ -3071,5 +3091,66 @@ mod sheet_quoting_tests {
         ] {
             assert_eq!(sheet_name_quoted(name), want, "{name}");
         }
+    }
+}
+
+#[cfg(test)]
+mod current_region {
+    //! `session_block_bounds` is Excel's *current region* (`XL-UX-175`): the
+    //! rectangle bounded on every side by a blank row and a blank column. Sort
+    //! from a single cell, Ctrl+A's first press and Ctrl+T all act on it, so a
+    //! block that stops short of it sorts half a table.
+    use super::session_block_bounds;
+    use crate::{WorkbookSession, set_session};
+    use casual_calc_model::{Cell, CellRef, CellValue, Id, Sheet, SheetId, Workbook};
+
+    fn sheet_with(cells: &[(u32, u32)]) {
+        let mut workbook = Workbook::new(Id::from_parts(0x5742, 1));
+        let mut sheet = Sheet::new(SheetId(Id::from_parts(0x5348, 1)), "Sheet1");
+        for &(r, c) in cells {
+            sheet.cells.set(
+                CellRef::new(r, c),
+                Cell::value(CellValue::Number(f64::from(r * 10 + c))),
+            );
+        }
+        workbook.sheets.push(sheet);
+        set_session(WorkbookSession::from_workbook(workbook));
+    }
+
+    /// A cell touching the block only at a corner is still in it: no blank row
+    /// or column separates them.
+    #[test]
+    fn a_diagonal_neighbour_is_part_of_the_region() {
+        sheet_with(&[(0, 0), (1, 1)]);
+        assert_eq!(
+            session_block_bounds(0, 0, 0),
+            r#"{"r0":0,"c0":0,"r1":1,"c1":1}"#
+        );
+    }
+
+    /// Growing sideways can bring new rows into reach, so the walk goes on
+    /// until no edge moves — one pass per direction stops at B3 here.
+    #[test]
+    fn the_region_grows_until_every_edge_is_blank() {
+        sheet_with(&[(0, 0), (1, 0), (2, 0), (2, 1), (3, 1)]);
+        assert_eq!(
+            session_block_bounds(0, 0, 0),
+            r#"{"r0":0,"c0":0,"r1":3,"c1":1}"#
+        );
+    }
+
+    /// The gate's own shape: two blocks with a blank column between them are
+    /// two regions.
+    #[test]
+    fn a_blank_column_ends_the_region() {
+        sheet_with(&[(0, 0), (0, 1), (1, 0), (1, 1), (0, 3), (1, 3), (2, 3)]);
+        assert_eq!(
+            session_block_bounds(0, 1, 1),
+            r#"{"r0":0,"c0":0,"r1":1,"c1":1}"#
+        );
+        assert_eq!(
+            session_block_bounds(0, 2, 3),
+            r#"{"r0":0,"c0":3,"r1":2,"c1":3}"#
+        );
     }
 }
