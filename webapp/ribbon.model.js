@@ -87,7 +87,9 @@ export const TABS = [
       ]),
     ] },
     { label: "Links", fold: 3, icon: "link", items: [L("insert.hyperlink", "link", "Link (Ctrl+K)")] },
-    { label: "Comments", fold: 2, icon: "comment_add", items: [L("insert.note", "comment_add", "Note")] },
+    // Excel's Insert ▸ Comments ▸ Comment is the threaded comment; notes live
+    // under Review ▸ Notes (XL-UX-039).
+    { label: "Comments", fold: 2, icon: "comment_add", items: [L("insert.comment", "comment_add", "Comment")] },
   ] },
   { id: "pagelayout", label: "Page Layout", key: "P", groups: [
     { label: "Page Setup", fold: 4, icon: "document_one_page", items: [
@@ -149,7 +151,12 @@ export const TABS = [
     { label: "Analysis", fold: 3, icon: "data_bar_vertical", items: [L("data.column-stats", "data_bar_vertical", "Column Statistics")] },
   ] },
   { id: "review", label: "Review", key: "R", groups: [
-    { label: "Notes", fold: 3, icon: "comment_add", items: [L("insert.note", "comment_add", "New Note")] },
+    // Two groups, as in Excel: a comment is a thread in the Comments pane, a
+    // note is the sticky box typed into beside its cell (XL-UX-039). Delete,
+    // Previous/Next and Show Comments, and the Notes menu's Show/Hide and
+    // Convert to Comments, are not built and are left out, not drawn dead.
+    { label: "Comments", fold: 2, icon: "comment_add", items: [L("insert.comment", "comment_add", "New Comment")] },
+    { label: "Notes", fold: 3, icon: "comment", items: [L("insert.note", "comment", "New Note")] },
     { label: "Protect", fold: 4, icon: "lock_closed", items: [
       L("format.protection.protect-this-sheet", "lock_closed", "Protect Sheet"),
       R([[S("format.protection.locked", "lock_closed", "Lock Cell")], [S("format.protection.hide-formula", "eye", "Hide Formula")]]),

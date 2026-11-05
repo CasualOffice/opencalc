@@ -27,7 +27,7 @@ const DIALOGS = [
   // File ▸ Options ▸ Trust Center (MACRO-13).
   "file.trust-center",
 ];
-const PANELS = ["data.data-validation", "file.page-setup", "insert.note", "file.version-history", "insert.pivottable"];
+const PANELS = ["data.data-validation", "file.page-setup", "insert.comment", "file.version-history", "insert.pivottable"];
 
 const measure = (page, root) => page.evaluate((root) => {
   const box = document.querySelector(root);

@@ -30,6 +30,8 @@ import {
   colName,
   colWAt,
   colXAt,
+  completeCellValue,
+  completedValue,
   commandRules,
   confirmModal,
   messageBox,
@@ -468,6 +470,9 @@ export function addRowRange(r) {
 // It routes through `commit` first so the entry meets the same validation rule
 // and formula guard as any other typed value. A refused entry fills nothing.
 export function commitToSelection(value, validated = false) {
+  // Before `commit` sees it: every cell of the fill takes the AutoComplete
+  // entry's own case, not only the active one (XL-UX-017).
+  value = completedValue(value);
   const r = effectiveRange();
   // Captured before committing, because commit moves the selection and the
   // block being filled is the one that was selected when the user pressed.
@@ -544,6 +549,9 @@ export function commit(value, advance, source = "user", opts = {}) {
   // A message box is asking about this entry: the blur its button causes in
   // the formula bar must not commit (or ask) a second time.
   if (messageBoxUp()) return false;
+  // An AutoComplete entry is stored as the column spells it (XL-UX-017).
+  // Typed entry only: a host's or a script's write is never re-cased.
+  if (source === "user") value = completedValue(value);
   value = closeFormula(value);
   // Cancellable before it is written, and told who is writing. A host without
   // either cannot enforce its own permissions, and cannot tell its own
@@ -1705,6 +1713,10 @@ export function positionInline() {
 
 export function startInline(initial, caretAtEnd = false) {
   beginEdit(inline, initial, caretAtEnd);
+  // The opening keystroke is written by the grid, not typed into the editor,
+  // so no `input` event runs AutoComplete for it — and one letter is often
+  // enough to pick out an entry (XL-UX-017).
+  if (initial !== undefined && initial !== "") completeCellValue(inline);
 }
 
 export function endInline() {

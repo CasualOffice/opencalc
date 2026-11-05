@@ -52,7 +52,7 @@ test("a half-typed comment survives a trip to another cell", async ({ page }) =>
     const a = window.opencalcEditor.wasmApi();
     a.session_set_cell(0, 0, 0, "figure");
     window.opencalcEditor.selectForTest(0, 0);
-    window.opencalcEditor.runCommand("insert.note");
+    window.opencalcEditor.runCommand("insert.comment");
   });
   const box = page.locator("#side-panel-body textarea");
   await expect(box).toBeVisible();

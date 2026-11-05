@@ -3821,6 +3821,8 @@ export function draw() {
   // cell leaves the viewport), instead of leaving it parked mid-air.
   if (editSurface === inline) positionInline();
   else if (imeArmed) placeImeHost();
+  // An open note box rides along with its cell for the same reason.
+  placeNoteEditor();
   updateNameBox();
   updateNumberFormatReadout();
   announceCell();
@@ -5998,6 +6000,143 @@ function buildNotePanel(body) {
   setTimeout(() => ta.focus(), 0);
 }
 
+// --- Notes (XL-UX-039) -------------------------------------------------------
+//
+// Excel keeps two things on a cell. A **note** is the sticky-note box: typed
+// into in place beside its cell, the author's name at the top, no replies. A
+// **comment** is a thread, read and answered in the Comments pane above. The
+// model holds both as one `CellComment`, and tells them apart the way the file
+// format does: a note has no timestamp, no replies and is not resolved — which
+// is what keeps it in `xl/comments{n}.xml` alone on save. So a note is written
+// here with an empty `created`, and a cell that already holds a thread is
+// never edited as a note: rewriting it here would keep its replies out of
+// sight in a box that has no room for them.
+
+/// Whether a thread (as `readThread` returns it) is a threaded comment rather
+/// than a note.
+export function isThreadedComment(t) {
+  return !!t && (!!t.created || !!t.resolved || (Array.isArray(t.replies) && t.replies.length > 0));
+}
+
+/// Insert ▸ Comment / New Comment: the Comments pane on the active cell.
+export function openCommentsPane() {
+  if (activePanel !== "note") togglePanel("note");
+  else panelNote?.refresh();
+}
+
+// The open note box, if any: `{ el, ta, sheet, row, col, author, original }`.
+let noteEditor = null;
+
+/// Shift+F2, New Note, Edit Note: open the active cell's note for editing in
+/// place. A cell carrying a threaded comment opens its thread instead.
+export function editNote() {
+  if (!wasm) return;
+  const { row, col } = state.sel;
+  const t = readThread(row, col);
+  if (isThreadedComment(t)) { openCommentsPane(); return; }
+  if (readOnly()) { statusError("this workbook is open for reading only"); return; }
+  openNoteEditor(row, col, t);
+}
+
+/// Delete Note: remove the active cell's note.
+export function deleteNote() {
+  const { row, col } = state.sel;
+  if (noteEditor) closeNoteEditor(false);
+  try { wasm.session_set_comment(state.sheet, row, col, "", "", ""); }
+  catch (e) { statusError(errText(e)); return; }
+  draw();
+}
+
+function openNoteEditor(row, col, t) {
+  closeNoteEditor(true);
+  // Excel heads a new note with the user's name and keeps an existing note's
+  // writer: editing someone's note does not sign it as yours.
+  const author = t ? (t.author || "") : commentAuthor();
+  const box = el("div", "oc-note-editor");
+  const head = el("div", "oc-note-author", author ? `${author}:` : "");
+  head.hidden = !author;
+  const ta = el("textarea", "oc-note-text");
+  ta.spellcheck = false;
+  ta.setAttribute("aria-label", `Note on ${A1(row, col)}`);
+  ta.value = t ? t.text : "";
+  box.append(head, ta);
+  wrap.appendChild(box);
+  noteEditor = { el: box, ta, sheet: state.sheet, row, col, author, original: ta.value };
+  placeNoteEditor();
+  // The grid's own key handlers must not see what is typed into a note: a
+  // letter there would start a cell edit, an arrow would move the selection.
+  // Escape leaves the note, keeping what was typed — closing the box is how a
+  // note is finished, there is no Save to press [unverified: Excel from memory].
+  ta.addEventListener("keydown", (e) => {
+    e.stopPropagation();
+    if (e.key === "Escape") {
+      e.preventDefault();
+      closeNoteEditor(true);
+      canvas.focus();
+    }
+  });
+  // "Click outside the cell" is Microsoft's own last step for adding a note.
+  // Deferred so focus moving *within* the box (to the scrollbar, say) is not
+  // mistaken for leaving it.
+  ta.addEventListener("blur", () => {
+    setTimeout(() => {
+      if (noteEditor && noteEditor.ta === ta && activeEl() !== ta) closeNoteEditor(true);
+    }, 0);
+  });
+  ta.focus({ preventScroll: true });
+  ta.setSelectionRange(ta.value.length, ta.value.length);
+  commentTip.hidden = true;
+}
+
+/// Keep the note box beside its cell as the grid scrolls; hide it while the
+/// cell is off screen or another sheet is showing.
+export function placeNoteEditor() {
+  const n = noteEditor;
+  if (!n) return;
+  const x = colXAt(n.col), y = rowYAt(n.row);
+  if (n.sheet !== state.sheet || x === undefined || y === undefined) { n.el.style.visibility = "hidden"; return; }
+  const z = state.zoom || 1;
+  n.el.style.visibility = "";
+  n.el.style.left = (x + colWAt(n.col)) * z + NOTE_GAP + "px";
+  n.el.style.top = y * z + "px";
+}
+
+// How far the note box sits to the right of its cell's edge, in screen pixels.
+const NOTE_GAP = 12;
+
+/// Close the note box; with `save`, write what it holds. An emptied box
+/// removes the note, as deleting the text of a cell clears it.
+export function closeNoteEditor(save = true) {
+  const n = noteEditor;
+  if (!n) return;
+  noteEditor = null;
+  n.el.remove();
+  if (!save) return;
+  const text = n.ta.value.trim();
+  // Opening and closing a note without changing it is not an edit: it would
+  // otherwise land on the undo stack and mark the workbook changed.
+  if (text === n.original.trim()) return;
+  try { wasm.session_set_comment(n.sheet, n.row, n.col, text, n.author, ""); }
+  catch (e) { statusError(errText(e)); return; }
+  draw();
+}
+
+/// The hover box for a note: the author in bold, then the text — the note as
+/// it was written, not the thread tooltip's "author: text" line.
+function showNoteTip(row, col, t) {
+  commentTip.textContent = "";
+  commentTip.classList.add("oc-note-tip");
+  if (t.author) commentTip.appendChild(el("div", "oc-note-author", `${t.author}:`));
+  commentTip.appendChild(document.createTextNode(t.text));
+  commentTip.style.whiteSpace = "pre-wrap";
+  // Beside the cell, where the note box opens, not under the pointer: Excel
+  // shows a note where it lives.
+  const z = state.zoom || 1;
+  commentTip.style.left = (colXAt(col) + colWAt(col)) * z + NOTE_GAP + "px";
+  commentTip.style.top = rowYAt(row) * z + "px";
+  commentTip.hidden = false;
+}
+
 // Insert or edit the hyperlink on the active cell.
 //
 // Two destinations rather than one: an external address, and a location inside
@@ -6748,6 +6887,7 @@ export function beginEdit(surface, initial, caretAtEnd = false) {
   editHome = { sheet: state.sheet, row: state.sel.row, col: state.sel.col };
   editMode = initial !== undefined ? "Enter" : "Edit";
   refSpans = [];
+  valueCompletion = null;
   editOriginal = wasm.session_cell_input(state.sheet, state.sel.row, state.sel.col);
   // The idle IME host becomes the editor it already is (XL-FEAT-023).
   disarmImeHost();
@@ -7983,16 +8123,19 @@ const PICK_LIST_SCAN = 1000;
 // produce a list nobody can use; formulas are excluded because picking one
 // would paste its source text, not its value. The run stops at a blank so two
 // unrelated tables stacked in one column do not offer each other's entries.
-export function openColumnPickList() {
-  const col = state.sel.col;
+//
+// The same entries feed AutoComplete as the user types (`completeCellValue`,
+// XL-UX-017): Excel's pick list and its AutoComplete read one list, so a value
+// one of them offers and the other does not would be two rules for one column.
+export function columnEntries(sheet, row, col) {
   const seen = new Set();
   const values = [];
   const scan = (step) => {
     for (let i = 1; i <= PICK_LIST_SCAN; i += 1) {
-      const r = state.sel.row + i * step;
+      const r = row + i * step;
       if (r < 0) break;
       let v = "";
-      try { v = wasm.session_cell_input(state.sheet, r, col); } catch { break; }
+      try { v = wasm.session_cell_input(sheet, r, col); } catch { break; }
       if (!v) break;                                   // a blank ends the run
       if (v.startsWith("=")) continue;                 // a formula, not an entry
       if (v.trim() === "" || Number.isFinite(Number(v))) continue;
@@ -8003,6 +8146,59 @@ export function openColumnPickList() {
   };
   scan(-1);
   scan(1);
+  return values;
+}
+
+// The entry the open edit is being completed to, if AutoComplete offered one.
+// Kept so the commit can take the entry's spelling: matching ignores case, and
+// Excel stores "wid" + Enter as the "Widget" already in the column.
+let valueCompletion = null;
+
+/// AutoComplete for cell values (XL-UX-017), run after each typed character.
+///
+/// Excel's rules, each for a reason. Text only, and never a formula: `=` is
+/// the function list's, and a completed formula would be source text nobody
+/// typed. Only with the caret at the end: completing into the middle of an
+/// amended value would overwrite what follows it. Only when the typed
+/// characters pick out *one* entry: with two candidates either guess is wrong
+/// half the time, and a wrong guess the user has to notice and undo is worse
+/// than none. The tail is inserted *selected*, so the next keystroke replaces
+/// it and Backspace/Delete removes it — nothing is ever accepted silently.
+export function completeCellValue(surface) {
+  valueCompletion = null;
+  if (!surface || surface !== editSurface || !editHome || !wasm) return;
+  const text = surface.value;
+  if (!text || text.startsWith("=") || text.includes("\n")) return;
+  if (surface.selectionStart !== text.length || surface.selectionEnd !== text.length) return;
+  const low = text.toLowerCase();
+  // Keyed by the folded text: "widget" and "Widget" in one column are one
+  // entry to complete to, not two that make the prefix ambiguous.
+  const hits = new Map();
+  for (const v of columnEntries(editHome.sheet, editHome.row, editHome.col)) {
+    const k = v.toLowerCase();
+    if (k.startsWith(low) && !hits.has(k)) hits.set(k, v);
+  }
+  if (hits.size !== 1) return;
+  const [entry] = hits.values();
+  valueCompletion = entry;
+  if (entry.length === text.length) return;           // typed in full: only the case is left
+  surface.value = text + entry.slice(text.length);
+  surface.setSelectionRange(text.length, surface.value.length);
+  mirrorEdit();
+  if (surface === inline) positionInline();
+}
+
+/// What a commit of `value` writes: the completed entry in its own case when
+/// the text is that entry, else `value` untouched.
+export function completedValue(value) {
+  const entry = valueCompletion;
+  valueCompletion = null;
+  return entry && typeof value === "string" && value.toLowerCase() === entry.toLowerCase() ? entry : value;
+}
+
+export function openColumnPickList() {
+  const col = state.sel.col;
+  const values = columnEntries(state.sheet, state.sel.row, col);
   if (!values.length) { status.textContent = "no entries in this column to pick from"; return; }
   values.sort((a, b) => a.localeCompare(b));
   closeSheetMenu();
@@ -8408,7 +8604,13 @@ function wireEvents() {
       : "cell";
     // Comment tooltip on hover.
     const hit = !hb && py >= HH && px >= HW ? cellAt(px, py) : null;
-    if (hit && errorCells.has(hit.row + "," + hit.col)) {
+    // Every branch below writes plain text; only a note draws itself as one.
+    commentTip.classList.remove("oc-note-tip");
+    if (noteEditor) {
+      // The note being typed is already on screen; a hover copy of its last
+      // saved text beside it would be a second, stale note.
+      commentTip.hidden = true;
+    } else if (hit && errorCells.has(hit.row + "," + hit.col)) {
       // Hovering an error explains it, and names the formula that produced it —
       // the two things you need before you can fix it.
       let code = "", input = "";
@@ -8470,7 +8672,8 @@ function wireEvents() {
       // is usually the part that answers the question the cell raises, and
       // hiding it behind "open the panel" makes the indicator half-useful.
       const t = readThread(hit.row, hit.col);
-      if (t && t.text) {
+      if (t && t.text && !isThreadedComment(t)) showNoteTip(hit.row, hit.col, t);
+      else if (t && t.text) {
         const line = (e) => (e.author ? `${e.author}: ` : "") + e.text;
         const lines = [line(t), ...t.replies.map(line)];
         if (t.resolved) lines.unshift("✓ Resolved");
@@ -9474,7 +9677,7 @@ function wireEvents() {
         e.preventDefault();
         break;
       case "F2": {
-        if (e.shiftKey) openPanel("note"); // Shift+F2 → note (Excel parity)
+        if (e.shiftKey) editNote(); // Shift+F2 → a note, in place (XL-UX-039)
         else startInline(undefined, true);
         e.preventDefault(); break;
       }
@@ -9593,6 +9796,10 @@ function wireEvents() {
       // place — a programmatic value change (insertRef) fires no input event,
       // so this only trips on real keystrokes.
       pointMode = null;
+      // Only on a typed character: a deletion is the user taking the
+      // suggestion back, and completing again would undo their Backspace. A
+      // composition's text belongs to the input method until it commits.
+      if (e.inputType === "insertText" && !e.isComposing) completeCellValue(surface);
       mirrorEdit();
       showAutocomplete();
       updateSignatureTip();
@@ -10769,7 +10976,10 @@ function wireEvents() {
         ["Delete rows", () => tryEdit(() => { const r = rng(); wasm.session_delete_rows(state.sheet, r.r0, r.r1 - r.r0 + 1); })],
         ["Delete columns", () => tryEdit(() => { const r = rng(); wasm.session_delete_columns(state.sheet, r.c0, r.c1 - r.c0 + 1); })],
         "sep",
-        ["Note", () => togglePanel("note")],
+        // Comment is the threaded pane, Note the in-place sticky note: two
+        // features in Excel, and two entries here (XL-UX-039).
+        ["Comment", () => openCommentsPane()],
+        ["Note", () => editNote()],
         "sep",
         // The context menu and Ctrl+T both reach this, but neither is somewhere
         // you look for a feature you have not met yet.
