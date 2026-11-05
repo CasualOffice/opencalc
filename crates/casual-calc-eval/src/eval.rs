@@ -606,6 +606,30 @@ impl<'a> Evaluator<'a> {
         let [arg] = args else {
             return Value::Error(ErrorValue::Value);
         };
+        // `@name` for a name that refers to a range intersects that range, read
+        // on the name's own sheet — as `@` over the range written out does.
+        // Falling through would read the name as an array and take its corner:
+        // the range's top-left cell, a wrong number with no error
+        // (`XL-FEAT-137`). A name for another name is followed, a bounded
+        // number of hops so a cycle of names cannot recurse forever.
+        if let Expr::Name(_) = arg {
+            let (mut scope, mut expr) = (sheet_index, arg.clone());
+            for _ in 0..16 {
+                let Expr::Name(name) = &expr else { break };
+                let Some(next) = self.defined_formula(scope, name) else {
+                    break;
+                };
+                (scope, expr) = next;
+            }
+            let reference = match &expr {
+                Expr::Range(..) | Expr::StructuredRef { .. } => true,
+                Expr::Function { name, .. } => name == casual_calc_formula::parse::ANCHORARRAY,
+                _ => false,
+            };
+            if reference {
+                return self.eval_single(scope, std::slice::from_ref(&expr));
+            }
+        }
         // The range an argument names, as (sheet, r0, c0, r1, c1).
         let range = match arg {
             Expr::Range(a, b) => {

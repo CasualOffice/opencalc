@@ -2074,3 +2074,53 @@ fn a_range_valued_name_is_read_as_its_range() {
         assert_eq!(v, CellValue::Number(want), "{f}: got {}", show(&wb, &v));
     }
 }
+
+/// `@name` for a name that refers to a range intersects that range, exactly as
+/// `@` over the range written out does. Reading the name as an array first and
+/// taking its corner gave the range's top-left cell — a wrong number, no
+/// error — once names lifted in array context. Excel writes `@` to file as
+/// `_xlfn.SINGLE(...)`, so a workbook from Excel reaches this path.
+#[test]
+fn implicit_intersection_of_a_range_name_picks_the_cell_in_line() {
+    // col = S!$D$15:$D$25 with D15 = 5 and D20 = 99; `alias` names `col`.
+    let setup = |wb: &mut Workbook, sheet: &mut Sheet| {
+        for (name, text) in [("col", "S!$D$15:$D$25"), ("alias", "col")] {
+            wb.defined_names.push(casual_calc_model::DefinedName {
+                name: name.to_owned(),
+                sheet: None,
+                formula: parse(text).unwrap(),
+                comment: None,
+                attributes: Default::default(),
+            });
+        }
+        put_number(sheet, (14, 3), 5.0);
+        put_number(sheet, (19, 3), 99.0);
+    };
+    for (formula, want) in [
+        ("@S!$D$15:$D$25", CellValue::Number(99.0)),
+        ("@col", CellValue::Number(99.0)),
+        // The tree a file's `_xlfn.SINGLE(col)` imports as (the prefix is
+        // stripped on import).
+        ("SINGLE(col)", CellValue::Number(99.0)),
+        ("@alias", CellValue::Number(99.0)),
+    ] {
+        // In row 20 (index 19), in a column away from D.
+        let (mut wb, mut sheet) = fixture();
+        setup(&mut wb, &mut sheet);
+        put_formula(&mut wb, &mut sheet, (19, 9), formula);
+        wb.sheets.push(sheet);
+        recalculate(&mut wb);
+        let v = cell(&wb, 19, 9);
+        assert_eq!(v, want, "{formula}: got {}", show(&wb, &v));
+    }
+    // Row 30 has no cell of the range in line: #VALUE!, as for the range.
+    let (mut wb, mut sheet) = fixture();
+    setup(&mut wb, &mut sheet);
+    put_formula(&mut wb, &mut sheet, (29, 9), "@col");
+    wb.sheets.push(sheet);
+    recalculate(&mut wb);
+    assert_eq!(
+        cell(&wb, 29, 9),
+        CellValue::Error(casual_calc_model::ErrorValue::Value)
+    );
+}
