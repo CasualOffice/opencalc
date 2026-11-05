@@ -172,14 +172,15 @@ pub fn session_open_as(ext: &str, bytes: &[u8]) -> Result<(), JsError> {
     // format down an unstoppable path, which is a decision that goes stale the
     // day the SDK learns a second package format: `.xlsm` would have arrived
     // uninterruptible on a browser's single thread (`IO-04`).
-    let mut session = WorkbookSession::open_as_cancellable(
+    // The open derives which hidden rows the autofilter hid, before it
+    // recalculates; doing it here, after, left SUBTOTAL(9, …) counting them.
+    let session = WorkbookSession::open_as_cancellable(
         bytes.to_vec(),
         format,
         casual_calc_sdk::SessionConfig::new(),
         &cancel,
     )
     .map_err(js)?;
-    reapply_filters_after_load(&mut session);
     set_session(session);
     Ok(())
 }

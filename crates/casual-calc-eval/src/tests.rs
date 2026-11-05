@@ -1351,6 +1351,34 @@ fn structured_references_resolve_to_the_data_body() {
     assert_eq!(value_at(&wb, 6, 0), CellValue::Number(600.0));
 }
 
+/// XL-FEAT-137: a structured reference is its range in an array context, so a
+/// function that lifts over a range lifts over `Sales[Amount]` too, and an
+/// operator applied to one is applied to each cell. Both were `#VALUE!`.
+#[test]
+fn a_structured_reference_lifts_like_the_range_it_names() {
+    let mut wb = table_workbook();
+    for (row, text) in [
+        (10, "ROUND(Sales[Amount]/3,0)"),
+        (13, "Sales[Amount]*2"),
+        (16, "SUM(ROUND(Sales[Amount]/3,1))"),
+        (17, "IFERROR(Sales[Amount]/0,-1)"),
+    ] {
+        let expr = parse(text).unwrap();
+        let handle = wb.store_formula_at(expr, Origin::at(row, 5));
+        let mut cell = Cell::value(CellValue::Empty);
+        cell.formula = Some(handle);
+        wb.sheets[0].cells.set(CellRef::new(row, 5), cell);
+    }
+    recalculate(&mut wb);
+    assert_eq!(value_at(&wb, 10, 5), CellValue::Number(33.0));
+    assert_eq!(value_at(&wb, 11, 5), CellValue::Number(67.0));
+    assert_eq!(value_at(&wb, 13, 5), CellValue::Number(200.0));
+    assert_eq!(value_at(&wb, 14, 5), CellValue::Number(400.0));
+    assert_eq!(value_at(&wb, 16, 5), CellValue::Number(100.0));
+    assert_eq!(value_at(&wb, 17, 5), CellValue::Number(-1.0));
+    assert_eq!(value_at(&wb, 18, 5), CellValue::Number(-1.0));
+}
+
 #[test]
 fn a_reference_to_a_missing_table_is_ref_not_zero() {
     use casual_calc_model::ErrorValue;

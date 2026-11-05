@@ -205,10 +205,12 @@ fn may_be_array(expr: &Expr) -> bool {
         | Expr::Empty
         | Expr::Raw(_)
         // `#VALUE!` outside the functions that take one, lifted or not.
-        | Expr::Reference3d(_)
-        // A wide structured reference is `#VALUE!` in an array context too;
-        // left to the function, as it always was.
-        | Expr::StructuredRef { .. } => false,
+        | Expr::Reference3d(_) => false,
+        // A structured reference is a range, so it lifts as one does:
+        // `ROUND(Sales[Amount],0)` is a column of answers (`XL-FEAT-137`). A
+        // this-row one is a single cell, and comes back as a 1×1 that is not
+        // lifted.
+        Expr::StructuredRef { .. } => true,
         Expr::Unary { operand, .. } => may_be_array(operand),
         Expr::Binary { left, right, .. } => may_be_array(left) || may_be_array(right),
         // A lifting function answers an array only if a lifted argument is one.

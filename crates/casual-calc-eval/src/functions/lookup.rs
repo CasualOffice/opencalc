@@ -609,6 +609,21 @@ pub(crate) fn range_cells(
                 ),
             )
         }
+        // A defined name for a range is that range (`XL-FEAT-137`). One level
+        // only, and only for a name that *is* a reference: a name for a
+        // formula has no cells to visit.
+        Expr::Name(name) => {
+            let (scope, formula) = ev.defined_formula(sheet, name)?;
+            return match formula {
+                Expr::Range(..) | Expr::StructuredRef { .. } => range_cells(ev, scope, &formula),
+                Expr::Reference(r) => {
+                    let target = ev.resolve_sheet(&r.sheet, scope)?;
+                    let at = r.resolve(ev.origin())?;
+                    Some((target, vec![CellRef::new(at.row, at.col)]))
+                }
+                _ => None,
+            };
+        }
         _ => return None,
     };
     let (r0, c0, r1, c1) = range;

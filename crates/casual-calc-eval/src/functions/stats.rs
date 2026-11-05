@@ -1138,9 +1138,17 @@ pub(crate) fn eval_prob(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -> 
 
 /// `SUBTOTAL(fn, ranges…)` — the aggregate a table's totals row uses.
 ///
-/// Codes 1..11 include manually hidden rows; 101..111 exclude them. The
-/// distinction is the whole point of the function: a filtered list must not
-/// report a total that includes what is hidden.
+/// Microsoft: "1-11 includes manually-hidden rows, while 101-111 excludes
+/// them; filtered-out cells are always excluded." The distinction is the whole
+/// point of the function: a filtered list must not report a total that
+/// includes what is hidden — whichever code the totals row was written with.
+///
+/// Each code *is* the function it names, so over cells with no numbers it
+/// answers what that function does there: SUM, COUNT, MAX, MIN and PRODUCT 0,
+/// AVERAGE, STDEV and VAR `#DIV/0!` (and the population forms too, which need
+/// one value). Code 3 is COUNTA — every non-empty cell, text and logicals
+/// included. It used to be `#DIV/0!` for all but 2 and 3, and 3 counted only
+/// numbers (`XL-FEAT-136`).
 pub(crate) fn eval_subtotal(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -> Value {
     if args.len() < 2 {
         return Value::Error(ErrorValue::Value);
@@ -1154,8 +1162,10 @@ pub(crate) fn eval_subtotal(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr])
     if !(1..=11).contains(&op) {
         return Value::Error(ErrorValue::Value);
     }
-    // Gather the values, skipping hidden rows for the 100-series.
+    // Gather the numbers, and for COUNTA how many cells hold anything,
+    // skipping filtered rows always and hand-hidden ones for the 100-series.
     let mut values = Vec::new();
+    let mut non_empty = 0usize;
     for arg in &args[1..] {
         // A single reference is a cell too — one that may itself be a
         // subtotal, or on a hidden row.
@@ -1167,8 +1177,9 @@ pub(crate) fn eval_subtotal(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr])
             },
             _ => range_cells(ev, sheet, arg),
         };
-        match cells {
+        let read: Vec<Value> = match cells {
             Some((target, cells)) => {
+                let mut read = Vec::with_capacity(cells.len());
                 for at in cells {
                     // MS: nested subtotals "are ignored to avoid double
                     // counting" — the rule AGGREGATE's options 0-3 follow, and
@@ -1176,56 +1187,49 @@ pub(crate) fn eval_subtotal(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr])
                     if is_subtotal_cell(ev, target, at) {
                         continue;
                     }
-                    if ignore_hidden {
-                        let hidden = ev
-                            .workbook()
-                            .sheets
-                            .get(target)
-                            .is_some_and(|sh| sh.is_row_hidden(at.row));
-                        if hidden {
-                            continue;
-                        }
+                    let hidden = ev.workbook().sheets.get(target).is_some_and(|sh| {
+                        sh.filter_hidden.contains(&at.row)
+                            || (ignore_hidden && sh.hidden_rows.contains(&at.row))
+                    });
+                    if hidden {
+                        continue;
                     }
-                    match ev.eval_cell(target, at) {
-                        Value::Number(n) => values.push(n),
-                        Value::Error(e) => return Value::Error(e),
-                        _ => {}
-                    }
+                    read.push(ev.eval_cell(target, at));
                 }
+                read
             }
-            None => match ev.eval_expr(sheet, arg) {
+            None => vec![ev.eval_expr(sheet, arg)],
+        };
+        for v in read {
+            match v {
                 Value::Number(n) => values.push(n),
                 Value::Error(e) => return Value::Error(e),
+                Value::Empty => continue,
                 _ => {}
-            },
+            }
+            non_empty += 1;
         }
     }
-    if values.is_empty() && op != 2 && op != 3 {
-        return Value::Error(ErrorValue::Div0);
-    }
+    let n = values.len();
     Value::Number(match op {
+        1 if n == 0 => return Value::Error(ErrorValue::Div0),
         1 => mean(&values),
-        2 | 3 => values.len() as f64,
+        2 => n as f64,
+        3 => non_empty as f64,
+        // MAX, MIN and PRODUCT of no numbers are 0 in Excel, not ±∞ or 1.
+        4..=6 if n == 0 => 0.0,
         4 => values.iter().copied().fold(f64::NEG_INFINITY, f64::max),
         5 => values.iter().copied().fold(f64::INFINITY, f64::min),
         6 => values.iter().product(),
-        7 => match variance(&values, true) {
-            Some(v) => v.sqrt(),
-            None => return Value::Error(ErrorValue::Div0),
-        },
-        8 => match variance(&values, false) {
-            Some(v) => v.sqrt(),
-            None => return Value::Error(ErrorValue::Div0),
-        },
         9 => values.iter().sum(),
-        10 => match variance(&values, true) {
+        // The population forms need one value, the sample forms two.
+        _ if n == 0 => return Value::Error(ErrorValue::Div0),
+        7 | 8 | 10 | 11 => match variance(&values, op == 7 || op == 10) {
+            Some(v) if op <= 8 => v.sqrt(),
             Some(v) => v,
             None => return Value::Error(ErrorValue::Div0),
         },
-        _ => match variance(&values, false) {
-            Some(v) => v,
-            None => return Value::Error(ErrorValue::Div0),
-        },
+        _ => unreachable!("op checked to be 1..=11 above"),
     })
 }
 

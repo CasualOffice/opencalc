@@ -323,10 +323,37 @@ impl<'a> Evaluator<'a> {
     /// inside `B1:B4>4` it is the four values, and comparing it to a number
     /// gives four answers. Excel draws the line in the same place.
     pub fn eval_expr_array(&mut self, sheet_index: usize, expr: &Expr) -> Value {
-        if let Expr::Range(a, b) = expr {
-            return self.range_as_array(sheet_index, a, b);
+        match expr {
+            Expr::Range(a, b) => self.range_as_array(sheet_index, a, b),
+            // A structured reference names a range, and in an array context a
+            // range is its cells: `ROUND(Sales[Amount],0)` lifts and
+            // `Sales[Amount]*2` doubles each one, as they do over `B2:B9`.
+            // Both were `#VALUE!` (`XL-FEAT-137`).
+            Expr::StructuredRef { table, spec } => {
+                // A single cell (`[@Col]`) stays the cell's value, exactly as in
+                // a scalar context.
+                match self.resolve_structured(sheet_index, table.as_deref(), spec) {
+                    Ok((target, range)) if range.start == range.end => {
+                        self.eval_cell(target, range.start)
+                    }
+                    Ok((target, range)) => self.block_as_array(
+                        target,
+                        (
+                            range.start.row,
+                            range.start.col,
+                            range.end.row,
+                            range.end.col,
+                        ),
+                    ),
+                    Err(e) => Value::Error(e),
+                }
+            }
+            // A defined name is its formula, read in the same context the name
+            // is. Reading it in scalar context made a name for `$B$1:$B$9`
+            // `#VALUE!` everywhere — `SUM(myRange)` included (`XL-FEAT-137`).
+            Expr::Name(name) => self.eval_name_in(sheet_index, name, true),
+            _ => self.eval_expr_inner(sheet_index, expr),
         }
-        self.eval_expr_inner(sheet_index, expr)
     }
 
     /// The cells of a range as an array value.
@@ -334,7 +361,12 @@ impl<'a> Evaluator<'a> {
         let Some(target) = self.resolve_sheet(&a.sheet, sheet_index) else {
             return Value::Error(ErrorValue::Ref);
         };
-        let (r0, c0, r1, c1) = self.range_bounds(target, a, b);
+        let bounds = self.range_bounds(target, a, b);
+        self.block_as_array(target, bounds)
+    }
+
+    /// The cells `(r0, c0, r1, c1)` of sheet `target` as an array value.
+    fn block_as_array(&mut self, target: usize, (r0, c0, r1, c1): (u32, u32, u32, u32)) -> Value {
         let (rows, cols) = ((r1 - r0 + 1) as usize, (c1 - c0 + 1) as usize);
         // The same cap the aggregates use: a whole-column range in an array
         // context would otherwise materialise a million values.
@@ -369,7 +401,7 @@ impl<'a> Evaluator<'a> {
             // An omitted argument is blank, which is what a function that
             // defaults it will read.
             Expr::Empty => Value::Empty,
-            Expr::Name(name) => self.eval_name(sheet_index, name),
+            Expr::Name(name) => self.eval_name_in(sheet_index, name, false),
             // A structured reference resolves to a range, so on its own it is
             // as much a #VALUE! as `A1:B2` is; it is the aggregate around it
             // that consumes the range.
@@ -574,6 +606,30 @@ impl<'a> Evaluator<'a> {
         let [arg] = args else {
             return Value::Error(ErrorValue::Value);
         };
+        // `@name` for a name that refers to a range intersects that range, read
+        // on the name's own sheet — as `@` over the range written out does.
+        // Falling through would read the name as an array and take its corner:
+        // the range's top-left cell, a wrong number with no error
+        // (`XL-FEAT-137`). A name for another name is followed, a bounded
+        // number of hops so a cycle of names cannot recurse forever.
+        if let Expr::Name(_) = arg {
+            let (mut scope, mut expr) = (sheet_index, arg.clone());
+            for _ in 0..16 {
+                let Expr::Name(name) = &expr else { break };
+                let Some(next) = self.defined_formula(scope, name) else {
+                    break;
+                };
+                (scope, expr) = next;
+            }
+            let reference = match &expr {
+                Expr::Range(..) | Expr::StructuredRef { .. } => true,
+                Expr::Function { name, .. } => name == casual_calc_formula::parse::ANCHORARRAY,
+                _ => false,
+            };
+            if reference {
+                return self.eval_single(scope, std::slice::from_ref(&expr));
+            }
+        }
         // The range an argument names, as (sheet, r0, c0, r1, c1).
         let range = match arg {
             Expr::Range(a, b) => {
@@ -883,7 +939,10 @@ impl<'a> Evaluator<'a> {
         result
     }
 
-    fn eval_name(&mut self, sheet_index: usize, name: &str) -> Value {
+    /// A name's value. `array` is the context the name is read in, and its
+    /// formula is read in the same one: a name for a range is that range's
+    /// cells where a range would be, and `#VALUE!` where a bare range would be.
+    fn eval_name_in(&mut self, sheet_index: usize, name: &str, array: bool) -> Value {
         // A LET binding or a lambda parameter shadows a defined name of the
         // same name — the inner one is the one the author just wrote, and it is
         // what every language with scope does.
@@ -895,19 +954,34 @@ impl<'a> Evaluator<'a> {
         {
             return value.clone();
         }
-        let defined = defined_name_in_scope(self.workbook, sheet_index, name);
-        match defined {
-            Some(dn) => {
-                let scope = dn
-                    .sheet
-                    .and_then(|id| self.workbook.sheets.iter().position(|s| s.id == id))
-                    .unwrap_or(sheet_index);
-                // Clone the AST so we no longer borrow the workbook while recursing.
-                let expr = dn.formula.clone();
-                self.eval_expr(scope, &expr)
-            }
+        match self.defined_formula(sheet_index, name) {
+            Some((scope, expr)) if array => self.eval_expr_array(scope, &expr),
+            Some((scope, expr)) => self.eval_expr(scope, &expr),
             None => Value::Error(ErrorValue::Name),
         }
+    }
+
+    /// The formula a defined name stands for, with the sheet it is read on —
+    /// `None` when no defined name of that name is in scope, or when a `LET`
+    /// binding or lambda parameter shadows it.
+    ///
+    /// Cloned, so the caller no longer borrows the workbook while it recurses.
+    /// What lets a function that takes a *reference* (`COUNTIF`'s range,
+    /// `SUBTOTAL`'s refs) take a name for one.
+    pub(crate) fn defined_formula(&self, sheet_index: usize, name: &str) -> Option<(usize, Expr)> {
+        if self
+            .scope
+            .iter()
+            .any(|(bound, _)| bound.eq_ignore_ascii_case(name))
+        {
+            return None;
+        }
+        let dn = defined_name_in_scope(self.workbook, sheet_index, name)?;
+        let scope = dn
+            .sheet
+            .and_then(|id| self.workbook.sheets.iter().position(|s| s.id == id))
+            .unwrap_or(sheet_index);
+        Some((scope, dn.formula.clone()))
     }
 
     /// A unary operator, lifted element-wise over an array operand.

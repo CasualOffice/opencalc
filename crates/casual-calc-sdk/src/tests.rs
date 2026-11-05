@@ -2075,6 +2075,73 @@ fn a_personal_view_does_not_reach_the_saved_file() {
     );
 }
 
+/// **A total over a filtered list is right the moment the file opens.**
+///
+/// Microsoft, SUBTOTAL: "1-11 includes manually-hidden rows, while 101-111
+/// excludes them; filtered-out cells are always excluded." A file cannot say
+/// which: ECMA-376 stores a filtered-out row as `<row hidden="1">`, so the
+/// import puts it in `hidden_rows`. The open recalculated straight away, before
+/// anything moved those rows to `filter_hidden`, so `SUBTOTAL(9,…)` counted
+/// what the filter hides and overwrote Excel's correct cached total — and a
+/// save wrote the wrong one back (`XL-FEAT-136`).
+#[test]
+fn a_subtotal_over_an_autofiltered_list_is_right_straight_after_open() {
+    use casual_calc_model::{AutoFilter, Cell, CellRange, FilterRule};
+    let mut session = WorkbookSession::blank();
+    {
+        let wb = session.workbook_mut();
+        let mut sheet = Sheet::new(SheetId(Id::from_parts(9, 1)), "Sheet1");
+        // A1 header, A2:A4 = 1, 2, 3; the filter keeps 1 and 3.
+        let header = wb.intern_string("N");
+        sheet.cells.set(
+            CellRef::new(0, 0),
+            Cell::value(CellValue::SharedString(header)),
+        );
+        for (row, n) in [(1u32, 1.0), (2, 2.0), (3, 3.0)] {
+            sheet
+                .cells
+                .set(CellRef::new(row, 0), Cell::value(CellValue::Number(n)));
+        }
+        let mut filter = AutoFilter::new(CellRange {
+            start: CellRef::new(0, 0),
+            end: CellRef::new(3, 0),
+        });
+        filter
+            .rules
+            .insert(0, FilterRule::Values(vec!["1".to_owned(), "3".to_owned()]));
+        sheet.auto_filter = Some(filter);
+        sheet.filter_hidden.insert(2);
+        let handle = wb.store_formula_at(
+            casual_calc_formula::parse("SUBTOTAL(9,A2:A4)").unwrap(),
+            casual_calc_formula::stored::Origin::at(5, 0),
+        );
+        let mut total = Cell::value(CellValue::Empty);
+        total.formula = Some(handle);
+        sheet.cells.set(CellRef::new(5, 0), total);
+        wb.sheets.push(sheet);
+    }
+    session.recalculate();
+    let total = |s: &WorkbookSession| {
+        s.workbook().sheets[0]
+            .cells
+            .get(CellRef::new(5, 0))
+            .map(|c| c.value.clone())
+    };
+    assert_eq!(total(&session), Some(CellValue::Number(4.0)), "the control");
+
+    let reopened = WorkbookSession::open(session.save().expect("save")).expect("reopen");
+    assert_eq!(
+        total(&reopened),
+        Some(CellValue::Number(4.0)),
+        "SUBTOTAL(9) counted the filtered-out row on open"
+    );
+    let sheet = &reopened.workbook().sheets[0];
+    assert!(
+        sheet.filter_hidden.contains(&2) && !sheet.hidden_rows.contains(&2),
+        "the filtered-out row came back as hidden by hand"
+    );
+}
+
 /// **One participant's view leaves the other's rows exactly as they were.**
 ///
 /// The tracker's acceptance, at the session level: two sessions over the same
