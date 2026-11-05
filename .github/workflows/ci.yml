@@ -478,6 +478,13 @@ jobs:
       # sweeping it out stay separate commits.
       - name: The live tracker is mostly live work
         run: python3 tools/check-tracker-freshness.py
+      # `docs/96` (the Excel fit-gap) was written once and read for weeks as
+      # current: 72 of its rows had closed, it still led with ten "live" P0s
+      # that were all Done, and 94 newer rows were missing from it (`DOC-054`).
+      # Its status column and counts are now generated from the tracker, and
+      # this fails when they disagree.
+      - name: The Excel fit-gap shows the tracker's status
+        run: python3 tools/check-fit-gap-status.py
       # Eighteen gates guarded this repository and nothing guarded them. Two
       # of them had re-derived "what a tracker row looks like" and guessed
       # narrower than the trackers, so 47 rows were invisible to both and both

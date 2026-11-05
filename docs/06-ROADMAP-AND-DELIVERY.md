@@ -22,7 +22,7 @@ The design of every phase is settled during the documentation phase. The
 
 ---
 
-## Phase D — Documentation (current)
+## Phase D — Documentation
 
 **Deliver:** the full design record — governance, architecture, roadmap,
 contracts (schema, limits, package reader, fidelity), and the two design-critical
@@ -81,6 +81,8 @@ evaluated.**
 every unmodeled construct; snapshots are golden-stable; formula ASTs round-trip
 through pretty-print.
 
+**Status: Done** (AGENTS.md §Current state: Phases 0–1E done).
+
 ---
 
 ## Phase 1B — Semantic writer
@@ -93,6 +95,8 @@ including opaque-part merge-back.
 **Exit gate:** `import(retention) → write → reopen` is a model fixed point;
 unedited packages reconstruct byte-identically; written files open without repair
 in LibreOffice Calc.
+
+**Status: Done.** Open fidelity follow-ups are rows, not a reopened phase: `XL-FEAT-114` (a raw formula and `<extLst>` do not move on a structural edit), `IO-12`.
 
 ---
 
@@ -107,6 +111,8 @@ Layout reads **cached cell values**, so it works before the calc engine exists.
 **Exit gate:** golden display lists for the layout fixtures; the number-format
 display matches the oracle on a format corpus; merged/frozen fixtures are correct.
 
+**Status: Done.** Fraction formats still render wrong (`XL-FEAT-021`, `XL-FEAT-110`).
+
 ---
 
 ## Phase 1D — Grid render & virtualization
@@ -120,6 +126,8 @@ a 1M-cell sheet; incremental repaint on scroll and edit; hit-testing
 fixtures; the scroll/paint benchmark meets the 60 fps budget on the baseline env;
 a 1M-cell fixture stays within the memory budget ([30](30-PERFORMANCE-AND-CAPACITY-TARGETS.md)).
 
+**Status: Done.**
+
 ---
 
 ## Phase 1E — Browser grid editor (WASM)
@@ -130,6 +138,8 @@ Values remain static (calc engine not yet wired).
 
 **Exit gate:** browser-smoke (Playwright) loads a fixture, edits, and saves; the
 editor scrolls a 1M-cell fixture at target frame rate.
+
+**Status: Done.** `browser-smoke` is red on `main` on one IME spec (`CI-036`).
 
 ---
 
@@ -147,6 +157,8 @@ the formula corpus; worst-case incremental recalc is <50 ms on the baseline env
 ([30](30-PERFORMANCE-AND-CAPACITY-TARGETS.md)); recalc is deterministic
 (golden results).
 
+**Status: substantially done, gate not yet passed.** Volatile functions, spill, LAMBDA and the function library are in. Open against the gate: Excel's float comparison (`XL-FEAT-011`), arrays through IFERROR/IFNA and names (`XL-FEAT-137`), recalc off the main thread and the 50 ms target (`PERF-17`), and a formula that prints as different text (`XL-FEAT-158`).
+
 ---
 
 ## Phase 3 — Spreadsheet features
@@ -158,6 +170,8 @@ tables.
 **Exit gate:** each feature has import→model→render→export fidelity against the
 oracle; nothing previously preserved regresses to dropped.
 
+**Status: shipped, with open fidelity rows.** Charts (`CHT-05`, `XL-FEAT-027`..`029`), pivots (`PIV-02`, `PIV-07`, `XL-FEAT-030`, `031`) and icon sets (`XL-FEAT-043`, `151`).
+
 ---
 
 ## Phase 4 — SDK beta / embedding
@@ -166,6 +180,8 @@ oracle; nothing previously preserved regresses to dropped.
 embedding docs and examples.
 
 **Exit gate:** the SDK version is frozen for beta; API-stability tests pass.
+
+**Status: in progress.** Published as `@opencalc/sheet` at `0.0.x` with type declarations (`SDK-009`); not frozen, and the nine decisions of [55](55-SDK-EMBEDDING-AND-INTEGRATION-DESIGN.md) §12 are open (`DOC-034`).
 
 ---
 
@@ -176,6 +192,8 @@ web migration of the editor.
 
 **Exit gate:** concurrent-edit convergence tests pass; no determinism regression.
 
+**Status: built, one convergence row open.** Clustered OT server with resume, presence and relay, driven by two browsers in CI (ADR-011/012/014/017 Accepted). Open: `COL-50` (insert meeting delete over a formula range, a semantics decision), and `DEP-08` (Helm chart, Blocked).
+
 ---
 
 ## Phase 6 — 1.0
@@ -184,6 +202,8 @@ web migration of the editor.
 
 **Exit gate:** the tracker ([14](14-EXECUTION-TRACKER.md)) shows the 1.0
 feature set as *implemented* with all release-evidence gates green.
+
+**Status: not started.** 1.0 has no written precondition yet (`DOC-053`, Open).
 
 ---
 
