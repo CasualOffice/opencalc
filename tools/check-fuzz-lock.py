@@ -26,37 +26,44 @@ import pathlib
 import subprocess
 import sys
 
-MANIFEST = pathlib.Path("fuzz/Cargo.toml")
+# Every separate workspace with its own lockfile. `desktop/` was added after
+# `fuzz/` and had the same exposure with no gate: `casual-calc-eval` gained a
+# dependency on `casual-calc-io`, `fuzz/Cargo.lock` was refreshed because this
+# gate said so, `desktop/Cargo.lock` was not, and all three desktop builds went
+# red on main (2026-11-05, `CI-037`).
+MANIFESTS = [pathlib.Path("fuzz/Cargo.toml"), pathlib.Path("desktop/Cargo.toml")]
 
 
-def main():
-    if not MANIFEST.exists():
-        print(f"{MANIFEST} is missing", file=sys.stderr)
-        return 1
-
+def check(manifest):
+    if not manifest.exists():
+        print(f"{manifest} is missing", file=sys.stderr)
+        return False
     done = subprocess.run(
         ["cargo", "metadata", "--locked", "--format-version", "1",
-         "--manifest-path", str(MANIFEST)],
+         "--manifest-path", str(manifest)],
         capture_output=True, text=True, check=False,
     )
     if done.returncode == 0:
-        print("fuzz lockfile: agrees with fuzz/Cargo.toml and its path dependencies")
-        return 0
-
-    stderr = done.stderr.strip()
-    print("the fuzz workspace's lockfile is out of date:", file=sys.stderr)
-    for line in stderr.splitlines()[:4]:
+        print(f"{manifest.parent}/ lockfile: agrees with its manifest and path dependencies")
+        return True
+    print(f"the {manifest.parent}/ workspace's lockfile is out of date:", file=sys.stderr)
+    for line in done.stderr.strip().splitlines()[:4]:
         print(f"  {line}", file=sys.stderr)
     print(
-        "\nfuzz/ is its own workspace, so a dependency change anywhere in the main\n"
-        "one can invalidate it without the main build noticing. Run:\n"
+        f"\n{manifest.parent}/ is its own workspace, so a dependency change anywhere in the\n"
+        "main one can invalidate it without the main build noticing. Run:\n"
         "\n"
-        "    cargo update --manifest-path fuzz/Cargo.toml --workspace\n"
+        f"    cargo update --manifest-path {manifest} --workspace\n"
         "\n"
-        "and commit fuzz/Cargo.lock in the same change that moved the dependency.",
+        f"and commit {manifest.parent}/Cargo.lock in the same change that moved the dependency.",
         file=sys.stderr,
     )
-    return 1
+    return False
+
+
+def main():
+    results = [check(m) for m in MANIFESTS]
+    return 0 if all(results) else 1
 
 
 if __name__ == "__main__":
