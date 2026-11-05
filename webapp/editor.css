@@ -954,6 +954,9 @@ input.tb-size::placeholder, input.tb-font::placeholder { color: var(--oc-faint-t
   font-size: 13px; font-weight: 500; cursor: pointer;
 }
 .popmenu button:hover { background: var(--oc-surface-color); }
+/* A greyed row — Excel's Paste Special… with nothing copied (XL-UX-034). */
+.popmenu button:disabled,
+.popmenu button:disabled:hover { color: var(--oc-disabled-color); background: transparent; cursor: default; }
 .tb-file input { display: none; }
 /* The only statement of grouping there is (`UX-CHR-05`). Its `margin: 0 2px`
    is folded into the bar's own 6px gap rather than added on top of it: the
@@ -980,6 +983,24 @@ input.tb-size::placeholder, input.tb-font::placeholder { color: var(--oc-faint-t
   color: var(--oc-muted-text-color); font-size: 16px; line-height: 1;
 }
 .ctx-submenu { min-width: 168px; }
+/* A toggle row (Table › Totals Row): Excel's check in the left gutter while
+   it is on. The label no longer names the state, so the mark is what does. */
+.popmenu button.ctx-toggle { position: relative; padding-left: 26px; }
+.popmenu button.ctx-toggle[aria-pressed="true"]::before {
+  content: "✓"; position: absolute; left: 9px; top: 50%; transform: translateY(-50%);
+  color: var(--oc-text-color); font-size: 13px; line-height: 1;
+}
+/* Excel's "Paste Options:" (XL-UX-034): a bold heading over a row of square
+   icon buttons, not a list of rows. */
+.ctx-heading { font-size: 12px; font-weight: 600; color: var(--oc-text-color); padding: 4px 10px 2px; }
+.ctx-paste-row { display: flex; gap: 2px; padding: 0 8px 4px; }
+.popmenu .ctx-paste-row button.ctx-paste-btn {
+  width: 30px; height: 28px; padding: 0; flex: 0 0 auto;
+  display: inline-flex; align-items: center; justify-content: center; text-align: center;
+}
+@media (pointer: coarse) {
+  .popmenu .ctx-paste-row button.ctx-paste-btn { width: 44px; height: 44px; }
+}
 
 /* Enhanced color popover (shared by font & fill): palette + custom hex + recent. */
 .color-menu { width: 214px; gap: 8px; }
@@ -1948,7 +1969,6 @@ button.fx:hover { color: var(--oc-text-color); background: var(--oc-popover-back
 .oc-size-form .oc-form-label { align-self: start; padding-top: 7px; }
 .oc-size-line { display: flex; align-items: baseline; gap: 6px; }
 .oc-size-form .oc-size-field { width: 92px; flex: 0 0 auto; text-align: right; }
-.oc-size-unit { font-size: 12px; color: var(--oc-muted-text-color); }
 
 /* One row per table column in the totals picker: label, then its function. */
 .oc-totals-grid {

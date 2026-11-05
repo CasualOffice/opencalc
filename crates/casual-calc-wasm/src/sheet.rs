@@ -253,6 +253,57 @@ pub fn session_cell_protection(sheet: usize, row: u32, col: u32) -> String {
     .unwrap_or_else(|| "{\"locked\":true,\"hidden\":false}".to_owned())
 }
 
+/// `locked` / `formula_hidden` across a whole range, as JSON
+/// `{locked, hidden}` where each is `true`, `false` or `null` for a mixed
+/// range — what Format Cells ▸ Protection shows as checked, clear or
+/// indeterminate (`XL-UX-044`).
+///
+/// Walks the stored cells rather than the rectangle, so a whole-column
+/// selection costs what the sheet holds, not a million lookups; a rectangle
+/// with any cell that is not stored also holds the default (locked, shown).
+#[wasm_bindgen]
+pub fn session_range_protection(sheet: usize, r0: u32, c0: u32, r1: u32, c1: u32) -> String {
+    let (r0, r1) = (r0.min(r1), r0.max(r1));
+    let (c0, c1) = (c0.min(c1), c0.max(c1));
+    with_session(|s| {
+        let wb = s.workbook();
+        let mut locked = (false, false); // (seen true, seen false)
+        let mut hidden = (false, false);
+        let mut stored: u64 = 0;
+        if let Some(sh) = wb.sheets.get(sheet) {
+            for (at, cell) in sh.cells.iter() {
+                if at.row < r0 || at.row > r1 || at.col < c0 || at.col > c1 {
+                    continue;
+                }
+                stored += 1;
+                let st = cell.style.and_then(|id| wb.styles.get(id));
+                if st.and_then(|st| st.locked).unwrap_or(true) {
+                    locked.0 = true;
+                } else {
+                    locked.1 = true;
+                }
+                if st.and_then(|st| st.formula_hidden).unwrap_or(false) {
+                    hidden.0 = true;
+                } else {
+                    hidden.1 = true;
+                }
+            }
+        }
+        let area = u64::from(r1 - r0 + 1) * u64::from(c1 - c0 + 1);
+        if stored < area {
+            locked.0 = true;
+            hidden.1 = true;
+        }
+        let tri = |(on, off): (bool, bool)| match (on, off) {
+            (true, true) => "null",
+            (true, false) => "true",
+            _ => "false",
+        };
+        format!("{{\"locked\":{},\"hidden\":{}}}", tri(locked), tri(hidden))
+    })
+    .unwrap_or_else(|| "{\"locked\":true,\"hidden\":false}".to_owned())
+}
+
 /// A sheet's page setup as JSON, flattened to `group.attribute` keys.
 ///
 /// Every one of these was read, written and carried verbatim with nothing able

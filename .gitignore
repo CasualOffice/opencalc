@@ -12,6 +12,11 @@ Cargo.lock.orig
 /fuzz/artifacts/
 /fuzz/coverage/
 
+# Python bytecode: running webapp/serve.py or a tools/ script writes it beside
+# the source, and one was committed by accident (XL-UX-034).
+__pycache__/
+*.pyc
+
 # Editor / OS
 .DS_Store
 *.swp

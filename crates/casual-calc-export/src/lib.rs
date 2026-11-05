@@ -2492,17 +2492,6 @@ pub(crate) fn range_a1(range: &CellRange) -> String {
     )
 }
 
-/// Reverse of the importer's column-width conversion: twips → Excel character
-/// width. Chosen so `read(write(x)) == x` for import-derived widths.
-fn twips_to_col_chars(twips: i64) -> f64 {
-    ((twips as f64 / 15.0) - 5.0) / 7.0
-}
-
-/// Reverse of the importer's row-height conversion: twips → points.
-fn twips_to_row_points(twips: i64) -> f64 {
-    twips as f64 / 20.0
-}
-
 /// Format a float for an XML attribute using the shortest round-trippable form.
 fn fmt_f64(value: f64) -> String {
     format!("{value}")
@@ -2640,13 +2629,13 @@ fn worksheet_xml(
         if let Some(w) = sheet.columns.default {
             s.push_str(&format!(
                 " defaultColWidth=\"{}\"",
-                fmt_f64(twips_to_col_chars(w))
+                fmt_f64(casual_calc_model::units::twips_to_col_chars(w))
             ));
         }
         if let Some(h) = sheet.rows.default {
             s.push_str(&format!(
                 " defaultRowHeight=\"{}\"",
-                fmt_f64(twips_to_row_points(h))
+                fmt_f64(casual_calc_model::units::twips_to_row_points(h))
             ));
         }
         // The rest travel verbatim; the two defaults above were interpreted out
@@ -2693,7 +2682,7 @@ fn worksheet_xml(
                 .map(|w| {
                     format!(
                         " width=\"{}\" customWidth=\"1\"",
-                        fmt_f64(twips_to_col_chars(w))
+                        fmt_f64(casual_calc_model::units::twips_to_col_chars(w))
                     )
                 })
                 .unwrap_or_default();
@@ -2739,7 +2728,7 @@ fn worksheet_xml(
             .map(|&t| {
                 format!(
                     " ht=\"{}\" customHeight=\"1\"",
-                    fmt_f64(twips_to_row_points(t))
+                    fmt_f64(casual_calc_model::units::twips_to_row_points(t))
                 )
             })
             .unwrap_or_default();

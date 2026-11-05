@@ -133,7 +133,7 @@ test("the editor served on this port is the checkout under test", async ({ page 
   expect(src.includes("oc-size-form"), "served editor.dialogs.js has no size dialog").toBe(true);
 });
 
-test("Column width… opens the application's own dialog, not a browser prompt", async ({ page }) => {
+test("Column Width… opens the application's own dialog, not a browser prompt", async ({ page }) => {
   const problems = await bootNoNativeDialogs(page);
   await askForSize(page, "col", 1, 1);
 
@@ -151,7 +151,7 @@ test("Column width… opens the application's own dialog, not a browser prompt",
       labelled: !!document.querySelector(`label[for="${a.id}"]`),
     };
   });
-  expect(field.id, "focus is not in the size field").toBe("oc-size-px");
+  expect(field.id, "focus is not in the size field").toBe("oc-size-value");
   expect(Number(field.value), "the field does not offer the current size").toBeGreaterThan(0);
   expect(field.selected, "the value is not selected for overtyping").toBe(field.value);
   expect(field.labelled, "the size field has no label").toBe(true);
@@ -164,7 +164,7 @@ test("Enter applies the typed width to every column in the selection", async ({ 
   await askForSize(page, "col", 1, 3);
   await expect(openModal(page)).toBeVisible();
 
-  await page.locator("#oc-size-px").fill("173");
+  await page.locator("#oc-size-value").fill("24"); // 24 characters: 24 × 7 + 5 = 173 px (XL-UX-035)
   await page.keyboard.press("Enter");
 
   await expect(openModal(page)).toHaveCount(0);
@@ -185,7 +185,7 @@ test("Enter applies the typed height to every row in the selection", async ({ pa
   await askForSize(page, "row", 2, 3);
   await expect(openModal(page)).toBeVisible();
 
-  await page.locator("#oc-size-px").fill("44");
+  await page.locator("#oc-size-value").fill("33"); // 33 points = 44 px
   await page.keyboard.press("Enter");
 
   await expect(openModal(page)).toHaveCount(0);
@@ -202,7 +202,7 @@ test("Escape leaves the sizes exactly as they were", async ({ page }) => {
   await askForSize(page, "col", 1, 3);
   await expect(openModal(page)).toBeVisible();
 
-  await page.locator("#oc-size-px").fill("400");
+  await page.locator("#oc-size-value").fill("400");
   await page.keyboard.press("Escape");
 
   await expect(openModal(page)).toHaveCount(0);
@@ -220,25 +220,25 @@ test("a size that is not a number is refused in a message box, keeping what was 
   await askForSize(page, "col", 1, 1);
   await expect(openModal(page)).toBeVisible();
 
-  await page.locator("#oc-size-px").fill("wide please");
+  await page.locator("#oc-size-value").fill("wide please");
   await page.locator(".oc-modal:not([hidden]) button", { hasText: /^OK$/ }).click();
 
   // Refused in Excel's message box over the dialog (XL-UX-168) — not a native
   // alert — and the dialog stays open so the typo can be corrected rather
   // than retyped from the menu.
   await expect(openModal(page)).toBeVisible();
-  await expect(page.locator("#oc-msgbox-text")).toContainText("wide please");
+  await expect(page.locator("#oc-msgbox-text")).toHaveText("Column width must be between 0 and 255.");
   await page.keyboard.press("Enter");
   await expect(page.locator("#oc-msgbox")).toBeHidden();
-  await expect(page.locator("#oc-size-px")).toBeFocused();
+  await expect(page.locator("#oc-size-value")).toBeFocused();
   // The label stays beside its field after a refusal.
   const drift = await page.evaluate(() => {
-    const field = document.querySelector("#oc-size-px").getBoundingClientRect();
-    const label = document.querySelector('label[for="oc-size-px"]').getBoundingClientRect();
+    const field = document.querySelector("#oc-size-value").getBoundingClientRect();
+    const label = document.querySelector('label[for="oc-size-value"]').getBoundingClientRect();
     return Math.abs((label.top + label.height / 2) - (field.top + field.height / 2));
   });
   expect(drift, "the label drifted away from its field").toBeLessThan(4);
-  expect(await page.locator("#oc-size-px").inputValue(),
+  expect(await page.locator("#oc-size-value").inputValue(),
     "the refusal cleared the field").toBe("wide please");
   expect(await widthOf(page, 1), "a refused size still resized the column").toBe(before);
   expect(await nativeDialogs(page)).toEqual([]);
@@ -247,13 +247,13 @@ test("a size that is not a number is refused in a message box, keeping what was 
 // The tests above call `sizeDialog` directly, which is how the audit reaches
 // it — but nobody uses it that way. This one goes through the header menu a
 // right-click opens, so the wiring is under test and not just the function.
-test("the header menu's Column width… reaches the dialog", async ({ page }) => {
+test("the header menu's Column Width… reaches the dialog", async ({ page }) => {
   await bootNoNativeDialogs(page);
   await page.evaluate(() => {
     window.opencalcEditor.selectForTest(0, 1);
     window.opencalcEditor.headerMenu("col", 200, 120);
   });
-  await page.locator("#sheet-ctx button", { hasText: /^Column width…$/ }).click();
+  await page.locator("#sheet-ctx button", { hasText: /^Column Width…$/ }).click();
 
   await expect(openModal(page)).toBeVisible();
   expect(await nativeDialogs(page), "the menu still opens a native dialog").toEqual([]);
@@ -268,7 +268,7 @@ test("Enter on a focused Cancel cancels, and changes nothing", async ({ page }) 
   const before = await widthOf(page, 1);
   await askForSize(page, "col", 1, 1);
   await expect(openModal(page)).toBeVisible();
-  await page.locator("#oc-size-px").fill("400");
+  await page.locator("#oc-size-value").fill("400");
 
   // Excel's order: the action first, then Cancel (UX-SHELL-18).
   await page.keyboard.press("Tab");
@@ -314,7 +314,7 @@ test("one undo puts back a multi-column resize, as one undo puts back a drag", a
 
   await askForSize(page, "col", 1, 3);
   await expect(openModal(page)).toBeVisible();
-  await page.locator("#oc-size-px").fill("173");
+  await page.locator("#oc-size-value").fill("24"); // 24 characters: 24 × 7 + 5 = 173 px (XL-UX-035)
   await page.keyboard.press("Enter");
   await expect(openModal(page)).toHaveCount(0);
   for (const c of [1, 2, 3]) {
