@@ -155,6 +155,7 @@ import {
   clampScroll,
   colAtX,
   colWidthOf,
+  dragTargetXY,
   edgeVelocity,
   effectiveRange,
   ensureVisible,
@@ -4280,8 +4281,8 @@ function autoScrollTick() {
   if (state.scrollX === x0 && state.scrollY === y0) return;
   if (state.headerDrag === "col") selectColumn(colAtX(cx), true);
   else if (state.headerDrag === "row") selectRow(rowAtY(cy), true);
-  else if (state.fill) updateFill(cx, cy);
-  else if (formulaRefDrag) updateRefDrag(cx, cy);
+  else if (state.fill) { const t = dragTargetXY(); updateFill(t.cx, t.cy); }
+  else if (formulaRefDrag) { const t = dragTargetXY(); updateRefDrag(t.cx, t.cy); }
   else if (handleDrag) {
     // A touch handle moves `anchor`, not `sel` — the active cell is the corner
     // the finger is *not* holding. Sharing this loop with the mouse and writing
@@ -8421,11 +8422,11 @@ function wireEvents() {
     // A fill drag and a formula's reference drag scroll at the edge too, as a
     // selection drag does (`PIPE-04`): filling down past the last visible row,
     // or pointing a SUM at a range taller than the window, is the ordinary case.
-    // The pointer is clamped into the body so one over a header still maps to
-    // a cell rather than to nothing.
+    // A pointer over a header still maps to a cell rather than to nothing; one
+    // over a frozen cell maps to that cell (`dragTargetXY`).
     if (state.fill || formulaRefDrag) {
       dragPos = { px, py };
-      const { cx, cy } = edgeVelocity();
+      const { cx, cy } = dragTargetXY();
       if (state.fill) updateFill(cx, cy);
       else updateRefDrag(cx, cy);
       maybeAutoScroll();
