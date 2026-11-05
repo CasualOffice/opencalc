@@ -23,6 +23,7 @@
 //!
 //! See `docs/40-FORMULA-AND-CALC-ENGINE-ARCHITECTURE.md`.
 
+mod approx;
 pub mod conditional;
 mod custom;
 mod eval;
@@ -744,6 +745,8 @@ fn value_to_cell(workbook: &mut Workbook, value: Value) -> CellValue {
 mod conditional_tests;
 #[cfg(test)]
 mod pivot_tests;
+#[cfg(test)]
+mod semantics_tests;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]

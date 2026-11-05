@@ -1252,6 +1252,21 @@ pub(crate) fn lookup_compare(a: &Value, b: &Value) -> std::cmp::Ordering {
     }
 }
 
+/// [`lookup_compare`] with numbers equal to 15 significant digits, the
+/// equality `=` uses (`XL-FEAT-011`) — for *finding* a key.
+///
+/// Not for sorting: SORT and SORTBY stay on the exact order, because a
+/// tolerance is not transitive and a sort over a non-transitive order has no
+/// defined answer.
+pub(crate) fn lookup_match_compare(a: &Value, b: &Value) -> std::cmp::Ordering {
+    match (a, b) {
+        (Value::Number(x), Value::Number(y)) => {
+            crate::approx::approx_cmp(*x, *y).unwrap_or(std::cmp::Ordering::Equal)
+        }
+        _ => lookup_compare(a, b),
+    }
+}
+
 /// Whether two values are equal for lookup purposes, with `match_mode = 2`
 /// meaning the needle may contain wildcards.
 pub(crate) fn lookup_equal(cell: &Value, needle: &Value, wildcard: bool) -> bool {
@@ -1264,7 +1279,7 @@ pub(crate) fn lookup_equal(cell: &Value, needle: &Value, wildcard: bool) -> bool
             };
         }
     }
-    lookup_compare(cell, needle) == std::cmp::Ordering::Equal
+    lookup_match_compare(cell, needle) == std::cmp::Ordering::Equal
 }
 
 /// The index `XLOOKUP` and `XMATCH` settle on, or `None`.
@@ -1292,7 +1307,7 @@ pub(crate) fn lookup_index(
         -1 | 1 => {
             let mut best: Option<(usize, &Value)> = None;
             for i in indices {
-                let ord = lookup_compare(&values[i], needle);
+                let ord = lookup_match_compare(&values[i], needle);
                 if ord == Ordering::Equal {
                     return Some(i); // exact always wins
                 }
@@ -1307,7 +1322,7 @@ pub(crate) fn lookup_index(
                 let better = match best {
                     None => true,
                     Some((_, b)) => {
-                        let c = lookup_compare(&values[i], b);
+                        let c = lookup_match_compare(&values[i], b);
                         if match_mode == -1 {
                             c == Ordering::Greater // the largest below
                         } else {

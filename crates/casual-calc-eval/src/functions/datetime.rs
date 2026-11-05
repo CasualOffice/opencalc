@@ -636,16 +636,24 @@ pub(crate) fn eval_coupon(
 
 /// `DATEVALUE` / `TIMEVALUE` — text to a serial.
 ///
-/// Only the unambiguous forms are accepted. `03/04/2024` is 3 April in most of
-/// the world and 4 March in the United States, and there is no locale here to
-/// decide; guessing would silently produce the wrong date a third of the time,
-/// so it is `#VALUE!` instead.
+/// The text is read by typed entry's own reader (`XL-FEAT-019`), so whatever
+/// typing into a cell takes as a date — `12/31/2026`, `Dec 31, 2026`,
+/// `31-Dec-2026`, ISO — DATEVALUE takes too. That reader is en-US, the
+/// product's only locale: `03/04/2024` is 4 March, as it is when typed. This
+/// used to refuse every slash date as ambiguous, which made the function
+/// disagree with the cell beside it.
+///
+/// Each keeps only its own half: "any time information in date_text is
+/// ignored" and "any date information in time_text is ignored" (Microsoft,
+/// DATEVALUE and TIMEVALUE). Text naming neither — `5`, `1,234` — is
+/// `#VALUE!`, though `VALUE` would read it.
 pub(crate) fn eval_datevalue(
     ev: &mut Evaluator<'_>,
     sheet: usize,
     args: &[Expr],
     time: bool,
 ) -> Value {
+    use casual_calc_io::entry::{Kind, value_of};
     if args.len() != 1 {
         return Value::Error(ErrorValue::Value);
     }
@@ -653,113 +661,15 @@ pub(crate) fn eval_datevalue(
         Value::Error(e) => return Value::Error(e),
         v => v.as_text().unwrap_or_default(),
     };
-    let text = text.trim();
-    if time {
-        return match parse_time_text(text) {
-            Some(f) => Value::Number(f),
-            None => Value::Error(ErrorValue::Value),
-        };
-    }
-    match parse_date_text(text) {
-        // A date carries no time of day, so the serial is whole — DATEVALUE
-        // discards any time in the text, as Excel does.
-        Some(serial) => Value::Number(serial as f64),
-        None => Value::Error(ErrorValue::Value),
-    }
-}
-
-/// `YYYY-MM-DD` (ISO) or `D-MMM-YYYY` / `MMM D, YYYY`, which name their month.
-pub(crate) fn parse_date_text(text: &str) -> Option<i64> {
-    const MONTHS: [&str; 12] = [
-        "jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec",
-    ];
-    let head = text.split_whitespace().next().unwrap_or(text);
-    let iso: Vec<&str> = head.split('-').collect();
-    if iso.len() == 3
-        && iso[0].len() == 4
-        && let (Ok(y), Ok(m), Ok(d)) = (
-            iso[0].parse::<i64>(),
-            iso[1].parse::<i64>(),
-            iso[2].parse::<i64>(),
-        )
-    {
-        return valid_ymd(y, m, d);
-    }
-    // Named-month forms, in either order, with any of space, `-` or `,`.
-    let parts: Vec<String> = text
-        .split(|c: char| c.is_whitespace() || c == '-' || c == ',')
-        .filter(|p| !p.is_empty())
-        .map(|p| p.to_ascii_lowercase())
-        .collect();
-    if parts.len() != 3 {
-        return None;
-    }
-    let month = parts
-        .iter()
-        .position(|p| MONTHS.iter().any(|m| p.starts_with(m)))?;
-    let m = MONTHS.iter().position(|m| parts[month].starts_with(m))? as i64 + 1;
-    let others: Vec<i64> = parts
-        .iter()
-        .enumerate()
-        .filter(|(i, _)| *i != month)
-        .map(|(_, p)| p.parse::<i64>().unwrap_or(-1))
-        .collect();
-    if others.iter().any(|n| *n < 0) {
-        return None;
-    }
-    // Whichever number cannot be a day is the year; otherwise the year is the
-    // one after the month, as in "May 17, 2024".
-    let (y, d) = if others[0] > 31 {
-        (others[0], others[1])
-    } else {
-        (others[1], others[0])
+    // No clock, as for every coercion in a formula: see `text_to_number`.
+    let Some((serial, kind)) = value_of(&text, 0.0) else {
+        return Value::Error(ErrorValue::Value);
     };
-    valid_ymd(if y < 100 { y + 2000 } else { y }, m, d)
-}
-
-/// A serial, or `None` when the date does not exist — 31 February included.
-pub(crate) fn valid_ymd(y: i64, m: i64, d: i64) -> Option<i64> {
-    if !(1..=12).contains(&m) || d < 1 || d > days_in_month(y, m) || !(1900..=9999).contains(&y) {
-        return None;
+    match (time, kind) {
+        (false, Kind::Date | Kind::DateTime) => Value::Number(serial.floor()),
+        (true, Kind::Time | Kind::DateTime) => Value::Number(serial.fract()),
+        _ => Value::Error(ErrorValue::Value),
     }
-    Some(ymd_to_serial(y, m, d))
-}
-
-/// `h:mm[:ss] [AM|PM]` as a fraction of a day.
-pub(crate) fn parse_time_text(text: &str) -> Option<f64> {
-    let lower = text.to_ascii_lowercase();
-    let pm = lower.contains("pm");
-    let am = lower.contains("am");
-    let body = lower.replace("am", "").replace("pm", "");
-    let parts: Vec<&str> = body.trim().split(':').collect();
-    if parts.is_empty() || parts.len() > 3 {
-        return None;
-    }
-    let h: f64 = parts[0].trim().parse().ok()?;
-    let m: f64 = parts.get(1).map_or(Ok(0.0), |p| p.trim().parse()).ok()?;
-    let s: f64 = parts.get(2).map_or(Ok(0.0), |p| p.trim().parse()).ok()?;
-    if !(0.0..60.0).contains(&m) || !(0.0..60.0).contains(&s) {
-        return None;
-    }
-    // 12 AM is midnight and 12 PM is noon — the one case where adding 12 hours
-    // for PM gives the wrong answer.
-    let hour = if am || pm {
-        if !(1.0..=12.0).contains(&h) {
-            return None;
-        }
-        match (pm, h) {
-            (true, 12.0) => 12.0,
-            (true, _) => h + 12.0,
-            (false, 12.0) => 0.0,
-            (false, _) => h,
-        }
-    } else {
-        if !(0.0..=24.0).contains(&h) {
-            return None;
-        }
-        h
-    };
-    Some((hour * 3600.0 + m * 60.0 + s) / 86400.0)
 }
 
 /// The volatile functions: the clock and the random generator.

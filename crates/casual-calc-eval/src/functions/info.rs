@@ -59,7 +59,8 @@ pub(crate) fn eval_switch(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -
 /// Excel equality for SWITCH: numeric when both numeric, else case-insensitive text.
 pub(crate) fn values_equal(a: &Value, b: &Value) -> bool {
     match (a, b) {
-        (Value::Number(x), Value::Number(y)) => x == y,
+        // The same equality `=` uses (`XL-FEAT-011`).
+        (Value::Number(x), Value::Number(y)) => crate::approx::approx_eq(*x, *y),
         _ => a
             .as_text()
             .unwrap_or_default()

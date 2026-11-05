@@ -488,6 +488,8 @@ fn parse_records(text: &str, delim: char) -> Vec<Vec<String>> {
     records
 }
 
+pub mod entry;
+
 #[cfg(test)]
 mod tests;
 

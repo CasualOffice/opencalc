@@ -1,6 +1,15 @@
 //! What typed text means, the way Excel (en-US) reads it (`XL-FEAT-001`).
 //!
-//! [`WorkbookSession::input_edit`](crate::WorkbookSession::input_edit) used to
+//! **One reader for typing and for formulas** (`XL-FEAT-019`). The SDK's
+//! `input_edit` uses [`parse`] to decide what a typed entry is; the calc
+//! engine uses [`value_of`] for `VALUE`, `DATEVALUE`, `TIMEVALUE` and the
+//! coercion an operator applies to text (`="1,234"*1`). It lives here, below
+//! both, because a second copy is how `1,234` came to be a number when typed
+//! and `#VALUE!` inside `VALUE` — the two had drifted before either was
+//! wrong on its own. It moved down from `casual-calc-sdk`, which the engine
+//! cannot depend on.
+//!
+//! `WorkbookSession::input_edit` used to
 //! recognise only plain numbers and ISO dates, so `50%`, `$5.00`, `1,234.5`,
 //! `TRUE`, `(5)` and `12/31/2026` were stored as text: right on screen, and
 //! zero to every formula that summed them.
@@ -8,13 +17,14 @@
 //! This module is a pure function of the text and the session clock. It reads
 //! no locale and no wall clock: the locale is fixed at en-US, the product's
 //! only locale today, and "this year" for a year-less date (`1/2`, `31-Dec`)
-//! comes from [`Environment::now`](crate::Environment::now). With no clock set
+//! comes from the session clock (the SDK's `Environment::now`). With no clock set
 //! a year-less date is left as text rather than guessed into 1900.
 //!
 //! The plain decimal (`42`, `-0.5`) is deliberately **not** handled here; it
 //! stays on the original path in `input_edit`, which owns the leading-zero and
 //! finiteness rules. ISO `yyyy-mm-dd` is also left to
-//! [`casual_calc_io::parse_iso_datetime`] so typing and importing agree.
+//! [`crate::parse_iso_datetime`] so typing and importing agree. [`value_of`]
+//! folds both back in for a formula, which has no leading-zero rule to keep.
 //!
 //! The number format each entry implies is the one Excel applies on entry.
 //! Where Excel's exact choice is not certain the choice is noted at the
@@ -22,7 +32,7 @@
 
 /// What an entry is, which decides whether an existing cell format survives it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Kind {
+pub enum Kind {
     /// A number that implies no format: `(5)`.
     Plain,
     /// `TRUE` / `FALSE`.
@@ -47,7 +57,7 @@ pub(crate) enum Kind {
 
 /// A recognised entry: its value, the format it implies, and its kind.
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) struct Entry {
+pub struct Entry {
     /// The number stored; for [`Kind::Bool`] this is 1 or 0 and `boolean` is set.
     pub number: f64,
     pub boolean: Option<bool>,
@@ -70,7 +80,7 @@ impl Entry {
 /// Recognise `text` (already trimmed) as Excel en-US would on entry.
 ///
 /// `now` is the session clock as a date serial; below 1 there is no clock.
-pub(crate) fn parse(text: &str, now: f64) -> Option<Entry> {
+pub fn parse(text: &str, now: f64) -> Option<Entry> {
     if text.eq_ignore_ascii_case("TRUE") || text.eq_ignore_ascii_case("FALSE") {
         let b = text.eq_ignore_ascii_case("TRUE");
         return Some(Entry {
@@ -327,7 +337,7 @@ fn serial(year: i32, month: u32, day: u32) -> Option<f64> {
         return None;
     }
     let iso = format!("{year:04}-{month:02}-{day:02}");
-    casual_calc_io::parse_iso_datetime(&iso).map(|(s, _)| s)
+    crate::parse_iso_datetime(&iso).map(|(s, _)| s)
 }
 
 /// The calendar year the session clock falls in, or `None` with no clock.
@@ -535,9 +545,90 @@ fn date_time(text: &str, now: f64) -> Option<Entry> {
     None
 }
 
+// ---------------------------------------------------------------- formulas
+
+/// What `text` is worth as a number inside a formula: `VALUE`, `DATEVALUE`,
+/// `TIMEVALUE`, and the coercion `="1,234"*1` applies.
+///
+/// Everything [`parse`] reads, plus the two forms it leaves to its caller —
+/// the plain decimal and ISO `yyyy-mm-dd` — so a formula reads exactly what
+/// typing would have stored. Two differences from entry, both Excel's:
+///
+/// - **Text that says `TRUE` is not a number.** Typing `TRUE` stores a
+///   logical; `="TRUE"*1` and `=VALUE("TRUE")` are `#VALUE!`.
+/// - **A leading zero is just a digit.** Entry keeps `007` apart for its own
+///   reasons (`input_edit`); `=VALUE("007")` is 7.
+///
+/// The kind says which of a date and a time the text named, which is what
+/// `DATEVALUE` and `TIMEVALUE` need to refuse a plain number. `now` is the
+/// clock for a year-less date, as in [`parse`]; below 1 there is none.
+pub fn value_of(text: &str, now: f64) -> Option<(f64, Kind)> {
+    let text = text.trim();
+    if let Some(entry) = parse(text, now) {
+        return entry
+            .boolean
+            .is_none()
+            .then_some((entry.number, entry.kind));
+    }
+    if let Some((serial, code)) = crate::parse_iso_datetime(text) {
+        let kind = match (code.starts_with("yyyy"), code.contains("hh")) {
+            (true, true) => Kind::DateTime,
+            (true, false) => Kind::Date,
+            (false, _) => Kind::Time,
+        };
+        return Some((serial, kind));
+    }
+    plain_decimal(text).map(|n| (n, Kind::Plain))
+}
+
+/// `42`, `-0.5`, `+3`, `.5`, `007`, `5.`: a sign, digits and one point.
+///
+/// Spelled out rather than left to `f64::from_str`, which also reads `inf`,
+/// `infinity` and `NaN` — none of which is a number to Excel, and the first
+/// two are values no workbook can store.
+fn plain_decimal(text: &str) -> Option<f64> {
+    let body = text.strip_prefix(['+', '-']).unwrap_or(text);
+    let mut points = 0;
+    let mut digits = 0;
+    for b in body.bytes() {
+        match b {
+            b'0'..=b'9' => digits += 1,
+            b'.' => points += 1,
+            _ => return None,
+        }
+    }
+    if digits == 0 || points > 1 {
+        return None;
+    }
+    text.parse::<f64>().ok().filter(|n| n.is_finite())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_formula_reads_what_typing_reads() {
+        assert_eq!(value_of("1,234", 0.0), Some((1234.0, Kind::Grouped)));
+        assert_eq!(value_of(" 42 ", 0.0), Some((42.0, Kind::Plain)));
+        assert_eq!(value_of("007", 0.0), Some((7.0, Kind::Plain)));
+        assert_eq!(value_of("2026-12-31", 0.0), Some((46387.0, Kind::Date)));
+        assert_eq!(value_of("12/31/2026", 0.0), Some((46387.0, Kind::Date)));
+        assert_eq!(value_of("13:30", 0.0), Some((13.5 / 24.0, Kind::Time)));
+        for text in [
+            "TRUE",
+            "inf",
+            "-infinity",
+            "NaN",
+            "1e400",
+            "",
+            ".",
+            "+",
+            "1.2.3",
+        ] {
+            assert_eq!(value_of(text, 0.0), None, "{text:?}");
+        }
+    }
 
     #[test]
     fn current_year_inverts_the_serial() {
