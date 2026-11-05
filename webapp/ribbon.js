@@ -289,7 +289,10 @@ function createShell({ root, host, editor }) {
     clearTimeout(screenTimer);
     if (!node.isConnected || !node.dataset.tipTitle || node.getClientRects().length === 0) return;
     // A control whose own menu is open has nothing to explain.
-    if (node.getAttribute("aria-expanded") === "true") return;
+    // The owner can be the control's frame rather than the control: a combo's
+    // list belongs to its wrap, while focus — and so the tip — lands on the
+    // box inside it, and comes back to the box after every key typed.
+    if (node.closest('[aria-expanded="true"]') || openPop?.owner.contains(node)) return;
     if (!screenTip) {
       screenTip = h("div", "rb-screentip");
       screenTip.id = screenTipId;

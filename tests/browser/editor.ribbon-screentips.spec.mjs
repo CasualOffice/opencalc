@@ -110,3 +110,32 @@ test("clicking into the Font box does not open its ScreenTip", async ({ page }) 
   await page.waitForTimeout(800);
   expect(await tip(page).isVisible(), "a click into the box opened its ScreenTip").toBe(false);
 });
+
+// A combo's list is the control's own menu: a ScreenTip over it hides the
+// fonts the user is choosing from. The caret's click focuses the box (a text
+// box always matches `:focus-visible`), and typing re-focuses it after every
+// key, so focus alone must not bring the tip back while the list is open.
+const fontBox = (page) => page.locator('.oc-ribbon .rb-panel:not([hidden]) input[data-cmd="toolbar.font"]');
+const comboList = (page) => page.locator(".rb-combo-list");
+
+test("opening the Font list by its caret shows no ScreenTip over the list", async ({ page }) => {
+  await boot(page);
+  await fontBox(page).locator("xpath=..").locator(".rb-combo-caret").click();
+  await expect(comboList(page)).toBeVisible();
+  await page.waitForTimeout(800);
+  expect(await tip(page).isVisible(), "a ScreenTip opened over the open Font list").toBe(false);
+});
+
+test("typing a font name into the Font box by KeyTip shows no ScreenTip over the list", async ({ page }) => {
+  await boot(page);
+  await page.locator("#grid").focus();
+  await page.keyboard.down("Alt"); await page.keyboard.up("Alt");
+  await page.keyboard.press("h");
+  await page.keyboard.press("f");
+  await page.keyboard.press("f");
+  await expect(fontBox(page)).toBeFocused();
+  await page.keyboard.type("Ari");
+  await expect(comboList(page)).toBeVisible();
+  await page.waitForTimeout(800);
+  expect(await tip(page).isVisible(), "a ScreenTip opened over the Font list while typing").toBe(false);
+});

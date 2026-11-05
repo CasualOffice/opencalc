@@ -214,7 +214,7 @@ const KEYTIPS = {
     "format.alignment.top": "AT", "format.alignment.middle": "AM", "format.alignment.bottom": "AB",
     "toolbar.rotate": "FQ", "format.text-overflow.wrap": "W",
     "format.alignment.left": "AL", "format.alignment.center": "AC", "format.alignment.right": "AR",
-    "toolbar.indent-less": "AO", "toolbar.indent-more": "AI", "toolbar.merge": "M",
+    "toolbar.indent-less": "5", "toolbar.indent-more": "6", "toolbar.merge": "M",
     "group:Number": "ZN", "launcher:Number": "FM",
     "toolbar.numfmt": "N", "toolbar.currency": "AN", "toolbar.percent": "P", "toolbar.comma": "K",
     "toolbar.inc-dec": "0", "toolbar.dec-dec": "9",

@@ -39,6 +39,8 @@ test("Alt then a tab's letter badges every control on that tab with Excel's KeyT
     FF: "toolbar.font", FS: "toolbar.size", 1: "toolbar.bold", 2: "toolbar.italic", 3: "toolbar.underline",
     B: "toolbar.border", H: "toolbar.fillcolor", FC: "toolbar.fontcolor",
     AT: "format.alignment.top", AC: "format.alignment.center", W: "format.text-overflow.wrap", M: "toolbar.merge",
+    // Alt H 5 / Alt H 6 — digits in Excel, not letters.
+    5: "toolbar.indent-less", 6: "toolbar.indent-more",
     N: "toolbar.numfmt", P: "toolbar.percent", K: "toolbar.comma",
     L: "format.conditional-formatting", T: "insert.table", I: "cells.insert", D: "cells.delete",
     U: "formulas.autosum", S: "data.sort-range", FD: "edit.find-replace",
