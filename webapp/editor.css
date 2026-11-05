@@ -137,6 +137,13 @@
   --oc-accent-soft: color-mix(in srgb, var(--oc-accent-color) 18%, transparent);
   --oc-danger-ring: color-mix(in srgb, var(--oc-danger-color) 30%, transparent);
   --oc-mono-font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  /* A cell note's own colours (XL-UX-039). Part of the document, not of the
+     chrome — Excel's note is the same pale yellow in every theme, as the red
+     corner mark that leads to it is — so defined once and not redefined by
+     the dark blocks below. */
+  --oc-note-fill-color: #ffffe1;
+  --oc-note-text-color: #000000;
+  --oc-note-border-color: #767676;
 }
 /* Dark tokens — applied both by the manual theme toggle (data-theme="dark",
    which must win over the OS setting) and by the OS preference when the user
@@ -1356,6 +1363,25 @@ input.tb-size::placeholder, input.tb-font::placeholder { color: var(--oc-faint-t
   font-size: 13px; line-height: 1.45; white-space: pre-wrap; pointer-events: none;
 }
 @media (prefers-color-scheme: dark) { .comment-tip { background: #3a340f; color: #f4e7b0; border-color: #6b5c1e; } }
+/* A note (XL-UX-039): the sticky box beside its cell, edited in place and
+   shown the same way on hover. Square and flat, with the writer's name in bold
+   at the top, as Excel draws it — not the rounded tooltip above. */
+.oc-note-editor {
+  position: absolute; z-index: 46; width: 180px; height: 96px;
+  display: flex; flex-direction: column; box-sizing: border-box; padding: 3px 5px;
+  background: var(--oc-note-fill-color); color: var(--oc-note-text-color);
+  border: 1px solid var(--oc-note-border-color); box-shadow: var(--oc-elevation-raised);
+  font: 12px/1.35 var(--oc-font-family, inherit);
+}
+.oc-note-editor .oc-note-text {
+  flex: 1; min-height: 0; margin: 0; padding: 0; border: 0; outline: none; resize: none;
+  background: transparent; color: inherit; font: inherit;
+}
+.oc-note-author { font-weight: 700; }
+.comment-tip.oc-note-tip {
+  border-radius: 0; max-width: 180px; padding: 3px 5px; font-size: 12px; line-height: 1.35;
+  background: var(--oc-note-fill-color); color: var(--oc-note-text-color); border-color: var(--oc-note-border-color);
+}
 .cmt-set { min-width: 240px; padding: 8px; }
 .cmt-input { width: 100%; margin: 4px 0 2px; padding: 8px 10px; border-radius: 8px; border: 1px solid var(--oc-border-color); background: var(--oc-background-color); color: var(--oc-text-color); font: inherit; font-size: 13px; resize: vertical; }
 .cmt-input:focus { outline: none; border-color: var(--oc-accent-color); }

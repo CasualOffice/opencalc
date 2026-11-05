@@ -1923,3 +1923,64 @@ fn a_derived_field_in_the_middle_does_not_shift_the_ones_after_it() {
     );
     assert_eq!(map.slot(3), Slot::Column(2));
 }
+
+/// A one-sheet package whose sheet carries `comments` as `xl/comments1.xml`.
+fn package_with_comments(comments: &[u8]) -> Vec<u8> {
+    const SHEET_RELS: &[u8] = br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/comments" Target="../comments1.xml"/></Relationships>"#;
+    const WB1: &[u8] = br#"<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Sheet1" sheetId="1" r:id="rId1"/></sheets></workbook>"#;
+    const WB1_RELS: &[u8] = br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/></Relationships>"#;
+    let sheet = sheet_with(r#"<row r="2"><c r="B2"><v>2</v></c></row>"#);
+    zip_parts(&[
+        ("[Content_Types].xml", CONTENT_TYPES),
+        ("_rels/.rels", ROOT_RELS),
+        ("xl/workbook.xml", WB1),
+        ("xl/_rels/workbook.xml.rels", WB1_RELS),
+        ("xl/worksheets/sheet1.xml", &sheet),
+        ("xl/worksheets/_rels/sheet1.xml.rels", SHEET_RELS),
+        ("xl/comments1.xml", comments),
+    ])
+}
+
+#[test]
+fn an_excel_note_carries_its_author_once() {
+    // Excel writes a note's author *into its text*: a bold run "Grace:" and
+    // then a run that starts on a new line. The author is also the comment's
+    // `authorId`, and the editor heads the note with that. Joining every run
+    // into the text showed the name twice — once as the heading, once as the
+    // first line of the body (XL-UX-039).
+    const COMMENTS: &[u8] = br#"<comments xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><authors><author>Grace</author></authors><commentList><comment ref="B2" authorId="0" shapeId="0"><text><r><rPr><b/><sz val="9"/><color indexed="81"/><rFont val="Tahoma"/><family val="2"/></rPr><t>Grace:</t></r><r><rPr><sz val="9"/><color indexed="81"/><rFont val="Tahoma"/><family val="2"/></rPr><t xml:space="preserve">
+check the total</t></r></text></comment></commentList></comments>"#;
+    let import = import_package(package_with_comments(COMMENTS)).unwrap();
+    let note = &import.workbook.sheets[0].comments[0];
+    assert_eq!(note.author.as_deref(), Some("Grace"));
+    assert_eq!(
+        note.text, "check the total",
+        "the author line is the author, not body text"
+    );
+}
+
+#[test]
+fn a_bold_first_line_that_is_not_the_author_stays_in_the_note() {
+    // Only Excel's own heading is lifted out. A note whose first line is bold
+    // for some other reason — or whose heading was edited to another name — is
+    // the writer's text, and dropping it would lose it.
+    const COMMENTS: &[u8] = br#"<comments xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><authors><author>Grace</author></authors><commentList><comment ref="B2" authorId="0"><text><r><rPr><b/></rPr><t>Warning:</t></r><r><t xml:space="preserve">
+check the total</t></r></text></comment></commentList></comments>"#;
+    let import = import_package(package_with_comments(COMMENTS)).unwrap();
+    assert_eq!(
+        import.workbook.sheets[0].comments[0].text,
+        "Warning:\ncheck the total"
+    );
+}
+
+#[test]
+fn a_note_without_an_author_line_is_read_as_written() {
+    // A note written by a program that does not add the heading, and a note
+    // whose heading the user deleted in Excel, are both plain text.
+    const COMMENTS: &[u8] = br#"<comments xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><authors><author>Grace</author></authors><commentList><comment ref="B2" authorId="0"><text><r><t>Grace: is the name of the cat</t></r></text></comment></commentList></comments>"#;
+    let import = import_package(package_with_comments(COMMENTS)).unwrap();
+    assert_eq!(
+        import.workbook.sheets[0].comments[0].text,
+        "Grace: is the name of the cat"
+    );
+}

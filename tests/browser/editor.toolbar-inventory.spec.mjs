@@ -74,7 +74,7 @@ test("the tools commands survive the group leaving the toolbar", async ({ page }
   for (const [id, title] of [
     ["data.data-validation", /validation/i],
     ["format.conditional-formatting", /conditional/i],
-    ["insert.note", /note|comment/i],
+    ["insert.comment", /comment/i],
   ]) {
     expect(await page.evaluate((c) => window.opencalcEditor.runCommand(c), id),
       `${id} was refused`).toBe(true);

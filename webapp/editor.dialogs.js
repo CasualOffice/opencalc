@@ -39,24 +39,27 @@ import {
   commit,
   ctx,
   currentTable,
+  deleteNote,
   doCopy,
   doCut,
   doPaste,
   doPasteMode,
   draw,
   effectiveRange,
+  editNote,
   el,
   errText,
   formatSel,
   gotoName,
   invalidateGrowth,
+  isThreadedComment,
   locale,
   looksLikeHeader,
   ocOverlayHost,
   off,
   on,
+  openCommentsPane,
   openPanel,
-  panelNote,
   panelRangeEls,
   parseColor,
   parseNameRange,
@@ -3226,13 +3229,22 @@ export function cellMenu(x, y, fromKeyboard = false) {
   // the menu bar, which is a long way to go for something the right-click is
   // already asking about.
   item("Format cells…", false, () => formatCellsDialog());
-  // The verb reflects what is actually there, so the menu is not offering to
-  // insert a comment onto a cell that already has a thread.
-  item(
-    readThread(state.sel.row, state.sel.col) ? "Show comments" : "Insert comment",
-    false,
-    () => { if (activePanel !== "note") togglePanel("note"); else panelNote?.refresh(); },
-  );
+  // Excel's two annotations, each with its own entries (XL-UX-039): New
+  // Comment / New Note on a bare cell, Edit Note / Delete Note on a noted one,
+  // and the thread itself on a commented one. The verbs follow what is there,
+  // so the menu never offers a second note, or a note over a thread — a cell
+  // holds one or the other.
+  {
+    const t = readThread(state.sel.row, state.sel.col);
+    if (isThreadedComment(t)) item("Show Comments", false, () => openCommentsPane());
+    else if (t) {
+      item("Edit Note", false, () => editNote());
+      item("Delete Note", false, () => deleteNote());
+    } else {
+      item("New Comment", false, () => openCommentsPane());
+      item("New Note", false, () => editNote());
+    }
+  }
   // Excel's link entries: "Link" on a plain cell; on a linked one Edit
   // Hyperlink…, Open Hyperlink and Remove Hyperlink (XL-UX-164). A HYPERLINK()
   // formula is edited in its formula, so it offers only to open.

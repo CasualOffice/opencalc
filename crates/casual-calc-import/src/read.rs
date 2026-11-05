@@ -307,6 +307,10 @@ pub fn parse_comments(xml: &[u8]) -> Result<Vec<RawComment>, ImportError> {
     let mut in_comment = false;
     let mut cur_text = String::new();
     let mut in_t = false;
+    // The comment's rich-text runs, `(bold, text)`, kept only to recognise
+    // Excel's author line (see `strip_author_line`).
+    let mut runs: Vec<(bool, String)> = Vec::new();
+    let mut in_run = false;
 
     loop {
         match reader.read_event_into(&mut buf).map_err(xml_err)? {
@@ -324,23 +328,40 @@ pub fn parse_comments(xml: &[u8]) -> Result<Vec<RawComment>, ImportError> {
                             .and_then(|s| s.parse().ok())
                             .unwrap_or(0);
                         cur_text.clear();
+                        runs.clear();
                     }
+                    b"r" if in_comment => {
+                        in_run = true;
+                        runs.push((false, String::new()));
+                    }
+                    b"b" if in_run => mark_run_bold(&e, &mut runs)?,
                     b"t" if in_comment => in_t = true,
                     _ => {}
                 }
+            }
+            Event::Empty(e) if in_run && e.local_name().as_ref() == b"b" => {
+                mark_run_bold(&e, &mut runs)?;
             }
             Event::Text(e) => {
                 if in_author {
                     cur_author.push_str(&text_of(&e)?);
                 } else if in_t {
-                    cur_text.push_str(&text_of(&e)?);
+                    let t = text_of(&e)?;
+                    if in_run && let Some(run) = runs.last_mut() {
+                        run.1.push_str(&t);
+                    }
+                    cur_text.push_str(&t);
                 }
             }
             Event::GeneralRef(e) => {
                 if in_author {
                     cur_author.push_str(&ref_of(&e)?);
                 } else if in_t {
-                    cur_text.push_str(&ref_of(&e)?);
+                    let t = ref_of(&e)?;
+                    if in_run && let Some(run) = runs.last_mut() {
+                        run.1.push_str(&t);
+                    }
+                    cur_text.push_str(&t);
                 }
             }
             Event::End(e) => {
@@ -351,13 +372,15 @@ pub fn parse_comments(xml: &[u8]) -> Result<Vec<RawComment>, ImportError> {
                         authors.push(cur_author.clone());
                     }
                     b"t" => in_t = false,
+                    b"r" => in_run = false,
                     b"comment" => {
                         in_comment = false;
                         // An empty author is the schema's way of saying
                         // "anonymous"; carrying it as `Some("")` would make an
                         // unsigned note look signed by nobody in particular.
                         let author = authors.get(cur_aid).filter(|a| !a.is_empty()).cloned();
-                        out.push((cur_ref.clone(), author, cur_text.clone()));
+                        let text = strip_author_line(&cur_text, &runs, author.as_deref());
+                        out.push((cur_ref.clone(), author, text));
                     }
                     _ => {}
                 }
@@ -368,6 +391,47 @@ pub fn parse_comments(xml: &[u8]) -> Result<Vec<RawComment>, ImportError> {
         buf.clear();
     }
     Ok(out)
+}
+
+/// Record a `<b>` inside a comment run's `<rPr>` on the run it belongs to.
+fn mark_run_bold(e: &BytesStart<'_>, runs: &mut [(bool, String)]) -> Result<(), ImportError> {
+    // `<b val="0"/>` is explicitly not bold, as in `read_rpr_child`.
+    let on = read_attr(e, b"val")?.is_none_or(|v| v == "1" || v.eq_ignore_ascii_case("true"));
+    if let Some(run) = runs.last_mut() {
+        run.0 = on;
+    }
+    Ok(())
+}
+
+/// A note's text without the author line Excel writes at its top (XL-UX-039).
+///
+/// Excel stores a note's heading *in its text*: a bold run `"Name:"`, then a
+/// run that starts on a new line with the body. The name is also the note's
+/// `authorId`, which is what the model keeps and the editor heads the note
+/// with — so carrying the line in the text as well showed the name twice.
+///
+/// Lifted out only when it is exactly Excel's line: bold, the note's own
+/// author followed by a colon, the whole first run, and the body starting on
+/// the next line. Anything else — a bold "Warning:", a heading edited to
+/// another name, a plain "Grace: …" — is the writer's text and stays. So does
+/// a note that is *only* the heading: an empty text would be read as no note.
+fn strip_author_line(text: &str, runs: &[(bool, String)], author: Option<&str>) -> String {
+    let (Some(author), Some((true, first))) = (author, runs.first()) else {
+        return text.to_owned();
+    };
+    if runs.len() < 2 || *first != format!("{author}:") {
+        return text.to_owned();
+    }
+    let Some(rest) = text.strip_prefix(first.as_str()) else {
+        return text.to_owned();
+    };
+    match rest
+        .strip_prefix("\r\n")
+        .or_else(|| rest.strip_prefix('\n'))
+    {
+        Some(body) if !body.is_empty() => body.to_owned(),
+        _ => text.to_owned(),
+    }
 }
 
 /// One `<threadedComment>` element, before threads are assembled.
