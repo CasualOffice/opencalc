@@ -1077,6 +1077,23 @@ fn text_function_formats_via_the_display_engine() {
     assert_eq!(text_at(&wb, 3, 1), "5.000");
 }
 
+/// `XL-FEAT-021`: TEXT with a fraction code. This printed `1  / ` for a half —
+/// the numeric path read `# ?/?` as an integer with literal padding.
+#[test]
+fn text_function_lays_out_fractions() {
+    let mut b = Builder::new();
+    b.formula((0, 0), "TEXT(0.5,\"# ?/?\")");
+    b.formula((1, 0), "TEXT(1.75,\"# ?/?\")");
+    b.formula((2, 0), "TEXT(1.5,\"?/?\")");
+    b.formula((3, 0), "TEXT(0.25,\"# ?/8\")");
+    let mut wb = b.build();
+    recalculate(&mut wb);
+    assert_eq!(text_at(&wb, 0, 0), "1/2");
+    assert_eq!(text_at(&wb, 1, 0), "1 3/4");
+    assert_eq!(text_at(&wb, 2, 0), "3/2");
+    assert_eq!(text_at(&wb, 3, 0), "2/8");
+}
+
 /// Evaluate a single formula and return its value.
 fn eval1(text: &str) -> CellValue {
     let mut b = Builder::new();

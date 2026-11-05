@@ -270,13 +270,17 @@ fn fraction(text: &str) -> Option<Entry> {
         return None;
     }
     let value = whole.parse::<f64>().ok()? + num.parse::<f64>().ok()? / den_value;
-    // **The value, without the format Excel would add.** Excel applies `# ?/?`
-    // for a one-digit denominator and `# ??/??` for two, but the renderer does
-    // not lay out fraction codes yet (`casual-calc-layout` numfmt: "Fraction
-    // layout is still unsupported") and draws 0.5 under `# ?/?` as `1  /` — a
-    // wrong number on screen, which is worse than `0.5`. Applying it is a
-    // one-line change once the renderer can draw it.
-    Entry::number(if negative { -value } else { value }, None, Kind::Fraction)
+    // Excel applies `# ?/?` for a one-digit denominator and `# ??/??` for two,
+    // so `0 1/2` reads back as `1/2`, not `0.5`. This was held back while the
+    // renderer drew 0.5 under `# ?/?` as `1  / ` (`XL-FEAT-021`). A
+    // three-digit denominator keeps General: which code Excel picks for it is
+    // unverified, and a guessed `# ??/??` would round 1/100 to 0 on screen.
+    let format = match width {
+        1 => Some("# ?/?".to_owned()),
+        2 => Some("# ??/??".to_owned()),
+        _ => None,
+    };
+    Entry::number(if negative { -value } else { value }, format, Kind::Fraction)
 }
 
 // ---------------------------------------------------------------- dates

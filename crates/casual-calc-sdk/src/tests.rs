@@ -4237,13 +4237,15 @@ mod typed_entry {
         // `1/2` alone is 2-Jan in Excel en-US, covered above; with a whole part
         // it is a fraction.
         //
-        // Excel would also apply `# ?/?`; the renderer cannot draw fraction
-        // codes yet (it shows 0.5 as `1  /`), so the value lands in General
-        // until it can — see `entry::fraction`.
-        number("0 1/2", 0.5, None);
-        number("1 3/4", 1.75, None);
-        number("-1 1/2", -1.5, None);
-        number("2 1/16", 2.0625, None);
+        // Excel applies `# ?/?` for a one-digit denominator and `# ??/??` for
+        // two (`XL-FEAT-110`) — the renderer now draws both (`XL-FEAT-021`).
+        number("0 1/2", 0.5, Some("# ?/?"));
+        number("1 3/4", 1.75, Some("# ?/?"));
+        number("-1 1/2", -1.5, Some("# ?/?"));
+        number("2 1/16", 2.0625, Some("# ??/??"));
+        // Three digits: Excel's choice of code is unverified here, so the
+        // value is kept and left in General rather than given a guessed code.
+        number("1 1/100", 1.01, None);
         text("1 1/0");
         text("1 1/2/3");
     }
