@@ -37,7 +37,7 @@ pub use casual_calc_text::substitution::{
 };
 pub use geometry::{DEFAULT_COL_WIDTH, DEFAULT_ROW_HEIGHT, GridGeometry};
 pub use numfmt::{
-    adjust_format_decimals, format_general, format_number, format_number_1904,
+    adjust_format_decimals, format_general, format_general_fit, format_number, format_number_1904,
     format_number_colored, format_text,
 };
 

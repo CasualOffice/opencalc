@@ -264,6 +264,119 @@ pub fn format_general(value: f64) -> String {
     format!("{rounded}")
 }
 
+/// General's fit-to-width rule (`XL-UX-152`): the General rendering of `value`
+/// in at most `max_chars` characters, or `None` when no shortening fits — the
+/// caller then shows `#####`.
+///
+/// Excel does this for General and only General: "if the cell isn't wide
+/// enough to show the entire number, this format rounds the number", and large
+/// numbers go to scientific. A fixed format (`0.00`) asked for its digits, so it
+/// keeps `#####` — that is the caller's business, not this function's.
+///
+/// Two shortenings are tried — fewer decimals, and scientific with a mantissa
+/// as long as fits — and the one keeping more significant digits wins, so
+/// `3.14159265` in four characters is `3.14` and `0.00001234` in seven is
+/// `1.2E-05` rather than `0.00001`. A shortening that would round the whole
+/// number away (`0.000` for 0.00001234) is never chosen: that would be a
+/// different number on screen, which is exactly what `#####` exists to avoid.
+///
+/// Counted in characters. The host measures pixels and asks for successively
+/// shorter budgets until the result fits; this function does not know a font.
+pub fn format_general_fit(value: f64, max_chars: usize) -> Option<String> {
+    let full = format_general(value);
+    if full.chars().count() <= max_chars {
+        return Some(full);
+    }
+    if !value.is_finite() || max_chars == 0 {
+        return None;
+    }
+    match (
+        general_fit_decimal(value, max_chars),
+        general_fit_scientific(value, max_chars),
+    ) {
+        (Some(d), Some(s)) => Some(if significant_digits(&s) > significant_digits(&d) {
+            s
+        } else {
+            d
+        }),
+        (d, s) => d.or(s),
+    }
+}
+
+/// `value` rounded to as many decimals as fit, trailing zeros dropped.
+fn general_fit_decimal(value: f64, max_chars: usize) -> Option<String> {
+    let magnitude = value.abs();
+    for decimals in (0..=max_chars.min(20)).rev() {
+        let factor = 10f64.powi(i32::try_from(decimals).ok()?);
+        let scaled = magnitude * factor;
+        if !scaled.is_finite() {
+            continue;
+        }
+        // Half away from zero, as the numeric path rounds.
+        let rounded = scaled.round() / factor;
+        let mut text = format!("{rounded:.decimals$}");
+        if text.contains('.') {
+            text = text.trim_end_matches('0').trim_end_matches('.').to_owned();
+        }
+        if !text.bytes().any(|b| (b'1'..=b'9').contains(&b)) {
+            // Rounded to nothing; fewer decimals can only make that worse.
+            return None;
+        }
+        if value < 0.0 {
+            text.insert(0, '-');
+        }
+        if text.chars().count() <= max_chars {
+            return Some(text);
+        }
+    }
+    None
+}
+
+/// `value` as `d.dddE+XX` with as long a mantissa as fits — General's
+/// scientific form: two-digit exponent at least, mantissa zeros dropped.
+fn general_fit_scientific(value: f64, max_chars: usize) -> Option<String> {
+    // Mantissa and exponent from Rust's own exponent form, which is exact for
+    // subnormals and 1e308 alike — `10f64.powi(exp)` is not.
+    let raw = format!("{:.16e}", value.abs());
+    let (m, e) = raw.split_once('e')?;
+    let base_mantissa: f64 = m.parse().ok()?;
+    let base_exp: i32 = e.parse().ok()?;
+    for decimals in (0..=14usize).rev() {
+        // Half away from zero, not `{:e}`'s half-to-even: 1.5E+100 in six
+        // characters is `2E+100`, as the numeric path would round it.
+        let factor = 10f64.powi(i32::try_from(decimals).ok()?);
+        let mut rounded = (base_mantissa * factor).round() / factor;
+        let mut exp = base_exp;
+        if rounded >= 10.0 {
+            rounded /= 10.0;
+            exp += 1;
+        }
+        let digits = format!("{rounded:.decimals$}");
+        let mantissa = if digits.contains('.') {
+            digits.trim_end_matches('0').trim_end_matches('.')
+        } else {
+            digits.as_str()
+        };
+        let sign = if value < 0.0 { "-" } else { "" };
+        let exp_sign = if exp < 0 { '-' } else { '+' };
+        let text = format!("{sign}{mantissa}E{exp_sign}{:02}", exp.unsigned_abs());
+        if text.chars().count() <= max_chars {
+            return Some(text);
+        }
+    }
+    None
+}
+
+/// How many significant digits a rendering shows (the mantissa's, for `E`).
+fn significant_digits(text: &str) -> usize {
+    let mantissa = text.split('E').next().unwrap_or(text);
+    mantissa
+        .chars()
+        .filter(char::is_ascii_digit)
+        .skip_while(|c| *c == '0')
+        .count()
+}
+
 /// Whether a section contains a real digit placeholder, ignoring the places a
 /// `0` or `#` can appear without being one: inside a quoted literal, after an
 /// escape, or inside a bracket token.
@@ -2081,7 +2194,10 @@ mod fraction_tests {
         // π: the best one-digit denominator is 7, two digits 99, three 113.
         assert_eq!(format_number(std::f64::consts::PI, "# ?/?"), "3 1/7");
         assert_eq!(format_number(std::f64::consts::PI, "# ??/??"), "3 14/99");
-        assert_eq!(format_number(std::f64::consts::PI, "# ???/???"), "3  16/113");
+        assert_eq!(
+            format_number(std::f64::consts::PI, "# ???/???"),
+            "3  16/113"
+        );
         // Microsoft's example for `# ???/???`, padding included.
         assert_eq!(format_number(5.25, "# ???/???"), "5   1/4  ");
         assert_eq!(format_number(5.3, "# ???/???"), "5   3/10 ");
@@ -2145,5 +2261,67 @@ mod fraction_tests {
         assert_eq!(format_number(2.5, "# ?/?\" in\""), "2 1/2 in");
         assert_eq!(format_number(1234.5, "#,### ?/?"), "1,234 1/2");
         assert_eq!(format_number(1.5, "$# ?/?"), "$1 1/2");
+    }
+}
+
+/// General's fit-to-width rule (`XL-UX-152`). Microsoft: General "rounds numbers
+/// that have decimals" when the cell is not wide enough, and "uses scientific
+/// (exponential) notation for large numbers" ("Available number formats in
+/// Excel"). Which of the two wins for a small number is not documented; the
+/// rule here is the one that keeps more significant digits.
+#[cfg(test)]
+mod general_fit_tests {
+    use super::format_general_fit as fit;
+
+    #[test]
+    fn a_number_that_fits_is_left_alone() {
+        assert_eq!(fit(1234567.0, 7).as_deref(), Some("1234567"));
+        assert_eq!(fit(1.23456789, 10).as_deref(), Some("1.23456789"));
+        assert_eq!(fit(-42.0, 3).as_deref(), Some("-42"));
+    }
+
+    #[test]
+    fn decimals_are_rounded_away_first() {
+        assert_eq!(fit(1.23456789, 4).as_deref(), Some("1.23"));
+        assert_eq!(fit(1.23456789, 6).as_deref(), Some("1.2346"));
+        assert_eq!(fit(1.23456789, 2).as_deref(), Some("1"));
+        assert_eq!(fit(1.23456789, 1).as_deref(), Some("1"));
+        // Trailing zeros of the rounding are not shown.
+        assert_eq!(fit(2.5004, 4).as_deref(), Some("2.5"));
+        // The carry may round up a digit and still fit.
+        assert_eq!(fit(9.996, 4).as_deref(), Some("10"));
+        assert_eq!(fit(-0.123456, 5).as_deref(), Some("-0.12"));
+        assert_eq!(fit(1234.5678, 6).as_deref(), Some("1234.6"));
+    }
+
+    #[test]
+    fn an_integer_part_too_wide_goes_scientific() {
+        assert_eq!(fit(1234567.0, 6).as_deref(), Some("1E+06"));
+        assert_eq!(fit(1234567.0, 5).as_deref(), Some("1E+06"));
+        assert_eq!(fit(12345678.0, 7).as_deref(), Some("1.2E+07"));
+        assert_eq!(fit(1234567890.0, 9).as_deref(), Some("1.235E+09"));
+        assert_eq!(fit(-12345678.0, 8).as_deref(), Some("-1.2E+07"));
+        // The mantissa's rounding carries into the exponent.
+        assert_eq!(fit(99_960_000.0, 7).as_deref(), Some("1E+08"));
+        // Trailing zeros of the mantissa are dropped.
+        assert_eq!(fit(12_000_000.0, 7).as_deref(), Some("1.2E+07"));
+        assert_eq!(fit(1e20, 7).as_deref(), Some("1E+20"));
+        assert_eq!(fit(1.5e100, 7).as_deref(), Some("2E+100"));
+    }
+
+    #[test]
+    fn a_small_number_keeps_its_significant_digits() {
+        // `0.00001` keeps one digit of 0.00001234, `1.2E-05` keeps two.
+        assert_eq!(fit(0.000_012_34, 7).as_deref(), Some("1.2E-05"));
+        // Rounded to `0.0`, nothing of the number would be left.
+        assert_eq!(fit(0.000_012_34, 5).as_deref(), Some("1E-05"));
+        assert_eq!(fit(0.0123, 5).as_deref(), Some("0.012"));
+    }
+
+    #[test]
+    fn nothing_fits_is_none() {
+        assert_eq!(fit(1234567.0, 4), None);
+        assert_eq!(fit(-1234567.0, 5), None);
+        assert_eq!(fit(1.0, 0), None);
     }
 }

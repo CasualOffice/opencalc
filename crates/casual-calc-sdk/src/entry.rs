@@ -280,7 +280,11 @@ fn fraction(text: &str) -> Option<Entry> {
         2 => Some("# ??/??".to_owned()),
         _ => None,
     };
-    Entry::number(if negative { -value } else { value }, format, Kind::Fraction)
+    Entry::number(
+        if negative { -value } else { value },
+        format,
+        Kind::Fraction,
+    )
 }
 
 // ---------------------------------------------------------------- dates
