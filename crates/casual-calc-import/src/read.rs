@@ -12,6 +12,7 @@ use quick_xml::events::{BytesStart, Event};
 
 use crate::error::ImportError;
 use crate::theme::{ThemePalette, indexed_color};
+use casual_calc_model::units::{col_width_to_twips, row_height_to_twips};
 
 const MAX_XML_ELEMENTS: usize = 50_000_000;
 const MAX_XML_DEPTH: usize = 256;
@@ -669,57 +670,6 @@ pub struct RawCf {
 /// Ceiling on how many columns one `<col>` span may expand into per-line
 /// overrides; a wider custom span is treated as the sheet's default width.
 const MAX_COL_SPAN: u32 = 4096;
-
-/// Ceiling on an imported column width, in twips: Excel refuses a column wider
-/// than 255 characters, which is `255 * 7 + 5 = 1790` px, or 26_850 twips.
-const MAX_COL_TWIPS: i64 = 26_850;
-
-/// Ceiling on an imported row height, in twips: Excel refuses a row taller than
-/// 409.5 points, or 8_190 twips.
-const MAX_ROW_TWIPS: i64 = 8_190;
-
-/// Convert an Excel column width (character units) to twips, matching the
-/// pixel rounding Excel uses so the value survives a write→read round-trip.
-///
-/// `chars` is an arbitrary `xsd:double` off the wire — `<col width>` and
-/// `<sheetFormatPr defaultColWidth>` are attacker-controlled — and nothing used
-/// to bound it. `width="1e300"` saturated the float→int cast to `i64::MAX` and
-/// the `* 15` panicked with "attempt to multiply with overflow" under the dev
-/// profile, so a crafted `<cols>` aborted the host process instead of returning
-/// `Err`; the shipped release profile wrapped instead, and `width="-1e300"`
-/// handed layout a *negative* column width. Clamp before the multiply, not
-/// after — after is already too late.
-pub(crate) fn col_width_to_twips(chars: f64) -> i64 {
-    let px = (chars * 7.0 + 5.0).round();
-    // Two layers, and they answer different questions. `read_f64_attr` refuses
-    // a non-finite attribute at the boundary, so nothing from a file arrives
-    // here as `NaN`; this function takes a plain `f64` from anywhere in the
-    // crate, so it still declines to trust one. `NaN` is named rather than left
-    // to fall through a comparison it silently fails — it is neither `<` nor
-    // `>`, so relying on that would send it to the ceiling below.
-    if !px.is_finite() || px <= 0.0 {
-        return 0;
-    }
-    let max_px = (MAX_COL_TWIPS / 15) as f64;
-    if px > max_px {
-        return MAX_COL_TWIPS;
-    }
-    (px as i64) * 15
-}
-
-/// Convert an Excel row height (points) to twips. Bounded for the same reason
-/// as [`col_width_to_twips`]: `ht="1e308"` saturated the cast and yielded
-/// `i64::MAX` twips of row.
-fn row_height_to_twips(points: f64) -> i64 {
-    let twips = (points * 20.0).round();
-    if !twips.is_finite() || twips <= 0.0 {
-        return 0;
-    }
-    if twips > MAX_ROW_TWIPS as f64 {
-        return MAX_ROW_TWIPS;
-    }
-    twips as i64
-}
 
 /// Build a [`RawCf`] from a `<cfRule>` element. Shared by the Start and Empty
 /// dispatches: a rule with `<formula>` children opens an element, while

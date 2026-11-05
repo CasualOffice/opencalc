@@ -2789,3 +2789,55 @@ mod column_stats_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod dialog_unit_tests {
+    use super::{
+        session_col_width_chars, session_new, session_range_protection, session_row_height_points,
+        session_set_cell, session_set_cell_protection, session_set_col_width_chars_range,
+        session_set_row_height_points_range,
+    };
+
+    /// Excel's Column Width and Row Height dialogs speak characters and points
+    /// (`XL-UX-035`): the default column is 8.43 and the default row 15, and
+    /// typing the default back changes nothing.
+    #[test]
+    fn the_size_dialogs_read_and_write_excels_units() {
+        session_new();
+        assert_eq!(session_col_width_chars(0, 0), 8.43);
+        assert_eq!(session_row_height_points(0, 0), 15.0);
+        session_set_col_width_chars_range(0, 0, 1, 20.0).unwrap();
+        assert_eq!(session_col_width_chars(0, 1), 20.0);
+        session_set_col_width_chars_range(0, 0, 0, 8.43).unwrap();
+        assert_eq!(session_col_width_chars(0, 0), 8.43);
+        session_set_row_height_points_range(0, 2, 2, 30.0).unwrap();
+        assert_eq!(session_row_height_points(0, 2), 30.0);
+    }
+
+    /// Format Cells ▸ Protection is tri-state over a selection (`XL-UX-044`):
+    /// `null` when the cells disagree, and an untouched cell counts as Excel's
+    /// default — locked, formula shown.
+    #[test]
+    fn range_protection_reports_a_mixed_selection_as_null() {
+        session_new();
+        assert_eq!(
+            session_range_protection(0, 0, 0, 9, 9),
+            r#"{"locked":true,"hidden":false}"#
+        );
+        session_set_cell(0, 0, 0, "x").unwrap();
+        session_set_cell_protection(0, 0, 0, 0, 0, "locked", false).unwrap();
+        assert_eq!(
+            session_range_protection(0, 0, 0, 0, 0),
+            r#"{"locked":false,"hidden":false}"#
+        );
+        assert_eq!(
+            session_range_protection(0, 0, 0, 1, 0),
+            r#"{"locked":null,"hidden":false}"#
+        );
+        session_set_cell_protection(0, 0, 0, 1, 0, "hidden", true).unwrap();
+        assert_eq!(
+            session_range_protection(0, 0, 0, 1, 0),
+            r#"{"locked":null,"hidden":true}"#
+        );
+    }
+}

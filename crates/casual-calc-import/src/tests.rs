@@ -2,6 +2,7 @@
 
 use std::io::{Cursor, Write};
 
+use casual_calc_model::units::col_width_to_twips;
 use casual_calc_model::{CellRef, CellValue, ErrorValue};
 use zip::CompressionMethod;
 use zip::write::{SimpleFileOptions, ZipWriter};
@@ -449,9 +450,9 @@ fn column_widths_survive_the_true_spelling_of_ooxml_booleans() {
     // Every width is kept, whichever spelling declared it — and a width with no
     // customWidth attribute at all is still authoritative for its column.
     let w = |c: u32| sheet.columns.sizes.get(&c).copied();
-    assert_eq!(w(0), Some(super::read::col_width_to_twips(30.0)));
-    assert_eq!(w(1), Some(super::read::col_width_to_twips(12.0)));
-    assert_eq!(w(3), Some(super::read::col_width_to_twips(18.0)));
+    assert_eq!(w(0), Some(col_width_to_twips(30.0)));
+    assert_eq!(w(1), Some(col_width_to_twips(12.0)));
+    assert_eq!(w(3), Some(col_width_to_twips(18.0)));
     assert!(sheet.hidden_cols.contains(&2));
     assert!(sheet.hidden_rows.contains(&1));
     assert!(sheet.rows.sizes.contains_key(&0));
