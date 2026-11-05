@@ -42,7 +42,7 @@ test("comparisons and text coercion answer as Excel does", async ({ page }) => {
   ];
   for (const [i, [formula]] of formulas.entries()) await typeInto(page, `A${i + 1}`, formula);
   const got = await shown(page, formulas.length);
-  for (const [i, [formula, want]] of formulas.entries()) {
-    expect(got[i], `${formula}`).toBe(want);
-  }
+  // One comparison of every row, so a failure names all the formulas that
+  // disagree rather than the first.
+  expect(Object.fromEntries(formulas.map(([f], i) => [f, got[i]]))).toEqual(Object.fromEntries(formulas));
 });
