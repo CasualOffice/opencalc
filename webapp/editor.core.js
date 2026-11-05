@@ -359,6 +359,7 @@ import {
   scrollStateForTest,
   seed,
   selectAll,
+  selectedBands,
   selectColsSpan,
   selectColumn,
   selectForTest,
@@ -366,6 +367,7 @@ import {
   selectRowsSpan,
   cellBoxForTest,
   selectionRectForTest,
+  resolveSortTarget,
   sortRange,
   sortTarget,
   startInline,
@@ -821,6 +823,7 @@ export {
   selectRowsSpan,
   cellBoxForTest,
   selectionRectForTest,
+  resolveSortTarget,
   sortRange,
   sortTarget,
   startInline,
@@ -3923,6 +3926,11 @@ export function holdBlock(b) {
   navBlock = { r0: b.r0, c0: b.c0, r1: b.r1, c1: b.c1 };
 }
 
+/// Let go of a held block, so the selection is anchor+sel again.
+export function releaseBlock() {
+  navBlock = null;
+}
+
 // The block Enter/Tab should walk, or null for a single cell.
 
 // Step the active cell within `b`, wrapping at the edges. `axis` is "row" for
@@ -4605,10 +4613,9 @@ export function setPainter(next) {
 
 
 // Sort the current selection's rows by the active cell's column. A single-cell
-// selection sorts the whole used data region (rows 1..end, keeping a header row
-// out only if the caller selected a body range). Ascending unless `desc`.
-// The block a sort should act on: the selection, or — for a lone cell — the
-// whole used area, which is Excel's "sort this column" gesture.
+// selection sorts its current region, and a selection with data beside it asks
+// Excel's Sort Warning first (`resolveSortTarget`, XL-UX-175). Ascending
+// unless `desc`.
 
 // Whether a range's first row looks like column headings, by Excel's rule of
 // thumb: a heading is text sitting over data that is not. Getting this wrong in
@@ -8242,6 +8249,12 @@ function wireEvents() {
     const fnew = freezeHandleAt(px, py);
     if (fnew) { endInline(); state.freezeDrag = { axis: fnew.axis, px, py }; return; }
     if (px < HW && py < HH) { selectAll(); canvas.focus(); return; }
+    // Header presses with any button but the primary one are left to the
+    // `contextmenu` handler, as cell presses are below (PIPE-08): the right
+    // button's `mousedown` comes first, and selecting the column here
+    // collapsed a multi-band selection before the menu could keep it.
+    if (py < HH && px >= HW && e.button !== 0) return;
+    if (px < HW && py >= HH && e.button !== 0) return;
     if (py < HH && px >= HW) {
       endInline();
       const c = colAtX(px);
@@ -8311,7 +8324,9 @@ function wireEvents() {
     // other than the primary one are left to it.
     if (hit && e.button === 0) {
       endInline();
-      if ((e.metaKey || e.ctrlKey) && !e.shiftKey) { addRange(hit.row, hit.col); state.dragging = true; }
+      // `addRange` answers false when the click *deselected* a cell (PIPE-08):
+      // a drag from there would grow a range back over the cell just removed.
+      if ((e.metaKey || e.ctrlKey) && !e.shiftKey) { if (addRange(hit.row, hit.col)) state.dragging = true; }
       else if (e.shiftKey) extend(hit.row, hit.col);
       else { select(hit.row, hit.col); state.dragging = true; }
       canvas.focus();
@@ -8737,16 +8752,16 @@ function wireEvents() {
     // acted on the wrong target, including Delete.
     if (HH && py < HH && px >= HW) {
       const col = colAtX(px);
-      const r = selRect();
-      const covered = state.selKind === "cols" && col >= r.c0 && col <= r.c1;
+      // Any selected band, banked ones included (PIPE-08): asking only the
+      // active one collapsed a Ctrl+click column selection on a right-click.
+      const covered = (selectedBands("col") ?? []).some(([lo, hi]) => col >= lo && col <= hi);
       if (!covered) selectColumn(col, false);
       headerMenu("col", e.clientX, e.clientY);
       return;
     }
     if (HW && px < HW && py >= HH) {
       const row = rowAtY(py);
-      const r = selRect();
-      const covered = state.selKind === "rows" && row >= r.r0 && row <= r.r1;
+      const covered = (selectedBands("row") ?? []).some(([lo, hi]) => row >= lo && row <= hi);
       if (!covered) selectRow(row, false);
       headerMenu("row", e.clientX, e.clientY);
       return;
@@ -8754,8 +8769,12 @@ function wireEvents() {
     if (HW && HH && px < HW && py < HH) { selectAll(); cellMenu(e.clientX, e.clientY); return; }
     const hit = cellAt(px, py);
     if (hit && state.selKind === "cells") {
-      const r = selRect();
-      const inside = hit.row >= r.r0 && hit.row <= r.r1 && hit.col >= r.c0 && hit.col <= r.c1;
+      // Inside *any* of the selected ranges (PIPE-08). Asking only the active
+      // one (`selRect`) read a right-click on a range banked by an earlier
+      // Ctrl+click as "outside", collapsed the multi-range to one cell, and the
+      // menu's verbs then acted on that cell.
+      const inside = allRanges().some(
+        (r) => hit.row >= r.r0 && hit.row <= r.r1 && hit.col >= r.c0 && hit.col <= r.c1);
       if (!inside) select(hit.row, hit.col);
     }
     cellMenu(e.clientX, e.clientY);
