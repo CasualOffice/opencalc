@@ -391,7 +391,21 @@ export function setFreeze(kind) {
   else if (kind === "col") cols = 1;
   try {
     wasm.session_set_freeze(state.sheet, rows, cols);
-    state.scrollX = state.scrollY = 0;
+    // Excel keeps the view (PIPE-09): Freeze Top Row, Freeze First Column and
+    // Unfreeze move the split, not the sheet, as the divider drag does. This
+    // used to reset both offsets, so freezing column A while reading row 300
+    // jumped back to A1.
+    //
+    // Up to the selection is the exception, on each axis it freezes: this
+    // model's frozen pane always starts at row 1 / column A, so the active
+    // cell sits just below the split only when that axis is unscrolled — kept
+    // scrolled, it would be hidden under the pane. Excel instead freezes the
+    // rows in view (its pane has its own top-left), which needs that origin in
+    // the model; the axis that freezes nothing keeps its scroll.
+    if (kind === "sel") {
+      if (rows) state.scrollY = 0;
+      if (cols) state.scrollX = 0;
+    }
   } catch (e) { statusError(errText(e)); }
   draw();
 }
