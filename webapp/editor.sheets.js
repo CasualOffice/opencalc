@@ -76,7 +76,8 @@ export function setZoom(z) {
   clearHeightMemo();
   invalidateGrowth();
   resize();
-  status.textContent = `zoom ${Math.round(next * 100)}%`;
+  // No "zoom 120%" line: the readout beside the slider says it, which is the
+  // only place Excel says it (`XL-UX-032`).
   renderZoom();
 }
 

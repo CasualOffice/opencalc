@@ -3346,7 +3346,7 @@ export function sizeDialog(axis, index) {
       if (isCol) wasm.session_set_col_width_range(sheet, r.c0, r.c1, px);
       else wasm.session_set_row_height_range(sheet, r.r0, r.r1, px);
     });
-    status.textContent = `resized ${span}`;
+    // No "resized" line (`XL-UX-032`); the grid shows the new size.
   };
 
   // `aria-modal` on the box is a promise to assistive technology that Tab

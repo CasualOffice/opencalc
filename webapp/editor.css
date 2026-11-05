@@ -276,8 +276,11 @@ body {
 .oc-hide-toolbar .toolbar,
 .oc-hide-formulabar .formula-bar,
 .oc-hide-statusbar .bottom-bar { display: none; }
-/* The tabs live inside the bottom bar, so hiding them alone keeps the bar. */
-.oc-hide-tabs .sheet-tabs { display: none; }
+/* The tabs have their own row since `XL-UX-033`; hiding them leaves the
+   horizontal scrollbar the whole row, which is what Excel does when "Show sheet
+   tabs" is off. The splitter goes with the tabs it sizes. */
+.oc-hide-tabs .sheet-tabs,
+.oc-hide-tabs .sheet-bar-split { display: none; }
 /* **The menu bar hides its items, not itself** — because the roster lives
    inside it (COL-33 put it there so it would not fold away with the page
    header) and `display: none` on the bar takes the whole subtree with it. A
@@ -1146,9 +1149,49 @@ input.tb-size::placeholder, input.tb-font::placeholder { color: var(--oc-faint-t
 .formula-bar textarea#formula-input:focus { outline: none; }
 
 .bottom-bar {
-  display: flex; align-items: center; gap: 8px; height: 34px; padding: 0 8px; flex: 0 0 auto;
+  display: flex; align-items: center; gap: 8px; height: 26px; padding: 0 8px; flex: 0 0 auto;
   border-top: 1px solid var(--oc-border-color); background: var(--oc-background-color);
 }
+/* **The sheet-tab row** (`XL-UX-033`, `XL-UX-052`): navigation, tabs, the
+   splitter, then the horizontal scrollbar, which takes the rest of the row.
+   The tabs get a fixed share of the row rather than their content's width —
+   Excel's tab area is the splitter's position, not the tabs' — so adding a
+   sheet does not move the scrollbar under the pointer. */
+.sheet-bar {
+  display: flex; align-items: center; gap: 2px; height: 32px; padding: 0 0 0 8px; flex: 0 0 auto;
+  border-top: 1px solid var(--oc-border-color); background: var(--oc-surface-color);
+}
+.sheet-bar .sheet-tabs { flex: 0 1 var(--oc-tab-split, 55%); }
+.sheet-bar-split {
+  flex: 0 0 auto; width: 6px; align-self: stretch; margin: 4px 2px; cursor: col-resize;
+  border-left: 1px solid var(--oc-border-color); border-right: 1px solid var(--oc-border-color);
+}
+.sheet-bar-split:hover, .sheet-bar-split.drag { background: var(--oc-border-color); }
+.sheet-bar-split:focus-visible { outline: 2px solid var(--oc-accent-color); outline-offset: 1px; }
+/* In the row, not over the grid: in flow, and always drawn, as Excel's is. */
+.sheet-bar .scrollbar.hscroll {
+  position: relative; left: auto; right: auto; bottom: auto;
+  flex: 1 1 0; min-width: 48px; height: 14px; margin-right: 14px;
+}
+/* Lock-key indicators (`XL-UX-030`): plain status-bar text, like the mode. */
+.sb-indicator { font-size: 12px; color: var(--oc-muted-text-color); white-space: nowrap; flex: 0 0 auto; }
+.sb-indicator[hidden] { display: none; }
+/* Customize Status Bar unticks: the controls go, the bar keeps its layout. */
+.sb-off-cell-mode .cell-mode,
+.sb-off-zoom-slider .zoom-step,
+.sb-off-zoom-slider .zoom-slider,
+.sb-off-zoom .zoom-level { display: none; }
+/* The Customize Status Bar menu: a check column, the name, then the value the
+   bar would show, right-aligned — Excel's three columns. */
+.sb-menu { min-width: 260px; }
+.sb-menu .sb-menu-title { font-weight: 600; font-size: 12.5px; color: var(--oc-text-color); padding: 4px 10px 4px 28px; }
+.sb-menu button { display: flex; align-items: center; gap: 12px; position: relative; padding-left: 28px; }
+.sb-menu button[aria-checked="true"]::before {
+  content: "✓"; position: absolute; left: 10px; top: 50%; transform: translateY(-50%);
+  font-size: 11px; color: var(--oc-accent-color); font-family: system-ui, sans-serif;
+}
+.sb-menu .sb-item-label { flex: 1 1 auto; }
+.sb-menu .sb-item-value { color: var(--oc-muted-text-color); font-variant-numeric: tabular-nums; }
 /* Sheet tabs live in a grouped pill (like the toolbar clusters). */
 .sheet-tabs {
   display: flex; align-items: center; gap: 2px; padding: 1px;
@@ -1460,7 +1503,8 @@ textarea.panel-field { resize: vertical; min-height: 68px; font-family: inherit;
 
 /* Custom scrollbars — identical on every OS (no native scrollbar UI). */
 .scrollbar { position: absolute; z-index: 6; }
-.scrollbar.vscroll { top: 24px; right: 0; bottom: 14px; width: 14px; }
+/* To the bottom of the grid: the horizontal bar is in the tab row below it now. */
+.scrollbar.vscroll { top: 24px; right: 0; bottom: 0; width: 14px; }
 .scrollbar.hscroll { left: 46px; bottom: 0; right: 14px; height: 14px; }
 .scrollbar .thumb { position: absolute; background: var(--oc-muted-text-color); opacity: 0.35; border-radius: 7px; transition: opacity 0.12s; }
 .scrollbar .thumb:hover, .scrollbar .thumb.drag { opacity: 0.62; }
