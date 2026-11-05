@@ -150,6 +150,7 @@ the other way around. This index is the map.
 | 100 | [Several embeds on one page](100-MULTI-EMBED.md) | Proposed: why two `<opencalc-sheet>` share one editor since `MNT-005`, and the options — an instance object, a multi-session engine, a same-origin iframe per element — with the engine's one-session model, memory and risk (`UX-SHELL-24`) |
 | 101 | [Japanese, Chinese and Korean fonts](101-CJK-FONTS.md) | Implemented: Noto CJK in four regions as unicode-range WOFF2 slices loaded on demand, Excel's East Asian font names mapped, per-glyph fallback shared by canvas, measurement and export, subset embedding in PDF (`XL-FEAT-140`) |
 | 102 | [Formula grammar extensions: whole rows, array constants, `#` / `@`, 3-D references](102-FORMULA-GRAMMAR-EXTENSIONS.md) | How Excel's `1:1`, `{1,2;3,4}`, `A1#`, `@x` and `Sheet1:Sheet3!A1` are parsed, stored, evaluated and carried through xlsx and ODS — why `#`/`@` are the `_xlfn.` calls the file stores, why a 3-D span is resolved by position, and the 11 → 12 protocol bump (`XL-FEAT-014..017`) |
+| 103 | [Sizes in `rem`, and a grid that follows the screen](103-REM-AND-RESOLUTION.md) | Decided: chrome in `rem`, hairlines in `px`, the grid in document units × zoom × `devicePixelRatio`; re-rasterise on a resolution change, snap hairlines to device pixels, detect a host's root font size when embedded (`UX-REM-01`..`04`) |
 
 ### Measured gap trackers (50–53, 73)
 
