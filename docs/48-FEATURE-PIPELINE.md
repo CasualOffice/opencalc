@@ -1,5 +1,84 @@
 # 48 — Feature Pipeline
 
+> **Re-audited 2026-11-05 against the code, every item and every sub-part.**
+> 58 items: **32 Done, 25 Partial, 1 Absent.** Every
+> remaining gap is a tracker row — the `PIPE-*` rows were filed by this audit
+> for the gaps no row covered. Four read-only audits cited `file:line` for each
+> claim. A sample was re-checked by hand (sheet delete, merged V-align, menu
+> freeze, multi-range right-click, `XL-FEAT-053`, `XL-FEAT-103`, `XL-UX-068`) and
+> held; each `PIPE` row's gate is a test to be seen red, which is the real check.
+>
+> **This is a snapshot, and it will go stale the way the 2026-08-19 one did.**
+> Done is recorded in [docs/14](14-EXECUTION-TRACKER.md), one row at a time;
+> read this table as "where to look", and the row as the answer. "Done" here
+> means the item's parts are in the code — several have no test (`PIPE-03`).
+
+| Item | St | What is left, and its row |
+| --- | --- | --- |
+| M1-1 | Done | — |
+| M1-2 | Done | — |
+| M1-3 | Partial | rename rewrites; delete does not (`PIPE-01`) |
+| M1-4 | Done | untested (`PIPE-03`) |
+| M1-5 | Partial | labels done; multi-range = N steps, editor history unbounded (`PIPE-02`) |
+| M2-1 | Done | — |
+| M2-2 | Done | — |
+| M2-3 | Done | — |
+| M2-4 | Done | — |
+| M3-1 | Done | — |
+| M3-2 | Done | — |
+| M3-3 | Done | dialog is Ctrl+Alt+V as in Excel; skip blanks, paste link (`XL-FEAT-102`) |
+| M3-4 | Done | Q1 wrap, custom lists (`XL-FEAT-086`); Flash Fill (`XL-FEAT-060`); untested parts (`PIPE-03`) |
+| M3-5 | Done | — |
+| M3-6 | Partial | Alt+Down done; ghost-text AutoComplete (`XL-UX-017`) |
+| M4-1 | Done | — |
+| M4-2 | Done | — |
+| M4-3 | Done | — |
+| M4-4 | Partial | edge-pan for fill and ref-drag (`PIPE-04`) |
+| M4-5 | Partial | active tab not saved (`PIPE-05`) |
+| M4-6 | Partial | not every path coalesced; no `measure()` cache (`PIPE-06`) |
+| M4-7 | Partial | paging and Shift+wheel done; ARIA, keyboard, tooltip (`PIPE-07`); horizontal bar (`XL-UX-052`) |
+| M4-8 | Partial | right-click collapses a multi-range (`PIPE-08`) |
+| M4-9 | Partial | drag divider done; menu freeze resets scroll (`PIPE-09`) |
+| M5-1 | Done | names in the graph left conservative by decision (`crates/casual-calc-eval/src/graph.rs:124`) |
+| M5-2 | Partial | Name Manager and name box done; names in AutoComplete (`PIPE-10`) |
+| M6-1 | Done | catalog and dispatch are two lists held equal by tests both ways |
+| M6-2 | Done | — |
+| M6-3 | Partial | graph kept across edits; <50 ms not met (`PERF-17`) |
+| M6-4 | Partial | volatiles done; cycle warning and iteration option (`PIPE-11`) |
+| M6-5 | Done | no spill outline (`PIPE-19`); shape follow-ups (`XL-FEAT-111`, `115`, `137`) |
+| M7-1 | Done | — |
+| M7-2 | Done | — |
+| M7-3 | Done | untested (`PIPE-03`) |
+| M7-4 | Partial | textarea done; underline/strike in wrapped and merged text (`PIPE-12`) |
+| M7-5 | Partial | errors, indicators, trace done; Evaluate Formula (`XL-FEAT-063`) |
+| M8-1 | Partial | popover done; last-colour repeat (`PIPE-13`) |
+| M8-2 | Done | three presets missing (`PIPE-20`) |
+| M8-3 | Partial | decimals, comma, custom dialog, sections done; currency/locale picker (`XL-FEAT-069`) |
+| M8-4 | Done | — |
+| M8-5 | Done | untested (`PIPE-03`) |
+| M8-6 | Done | — |
+| M8-7 | Done | — |
+| M8-8 | Partial | merged text ignores V-align (`PIPE-12`) |
+| M9-1 | Done | measurement still in JS, not the layout crate; `customWidth` (`XL-FEAT-118`) |
+| M9-2 | Done | — |
+| M9-3 | Done | no delete-referenced warning, as in Excel (`XL-UX-173`) |
+| M9-4 | Partial | dialog done; drag readout (`PIPE-14`) |
+| M9-5 | Partial | gutter done; shortcuts (`PIPE-15`); Auto Outline (`XL-FEAT-061`) |
+| M9-6 | Partial | scroll arrows and menu done; drop caret, insert-after, tab Insert (`PIPE-16`) |
+| M10-1 | Done | in `editor.css` / `ribbon.tokens.css` (`UX-TOKEN-01`); no spacing scale (`PIPE-17`) |
+| M10-2 | Partial | `PIPE-17` |
+| M10-3 | Partial | `PIPE-17` |
+| M10-4 | Partial | scrollbar ARIA (`PIPE-07`) |
+| M11-1 | Done | regex and find-by-format (`XL-FEAT-103`, Partial) |
+| M11-2 | Partial | touch inertia only (`PIPE-18`) |
+| M11-3 | Absent | `XL-FEAT-093` |
+| M11-4 | Partial | 3-D refs done (`XL-FEAT-017`); split panes (`XL-FEAT-078`), external refs (`XL-FEAT-071`) |
+
+The plan below is the 2026-08-06 original, kept as history. Its descriptions of
+the code (file sizes, "a single-line `<input>`") are from that date.
+
+<details><summary>The 2026-08-19 audit</summary>
+
 > **Audited 2026-08-19 against the code, and it had gone badly stale.**
 >
 > Of the 35 P0 and P1 items below, **33 have implementation in the tree** —
@@ -22,6 +101,7 @@
 > execution tracker in [docs/14](14-EXECUTION-TRACKER.md) is where done is
 > recorded, one row at a time, with the evidence that made it true.
 
+</details>
 
 _Generated 2026-08-06. A dependency-ordered roadmap synthesized from the [feature/UX map](47-UX-AND-FEATURE-MAP.md) and the [design system](49-DESIGN-SYSTEM.md) assessment. Priority: P0 broken-basics · P1 core parity · P2 advanced · P3 nice-to-have. Effort: S/M/L/XL. ∥ = parallelizable as an isolated workflow agent without file conflicts._
 
