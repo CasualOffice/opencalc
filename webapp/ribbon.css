@@ -252,6 +252,32 @@
 .rb-pop-item[aria-checked="true"], .rb-pop-item[aria-selected="true"] { color: var(--oc-accent-color); font-weight: 600; }
 .rb-pop-key { color: var(--oc-muted-text-color); font-size: 12px; }
 .rb-pop-empty { padding: 8px 10px; color: var(--oc-muted-text-color); font-size: 13px; }
+/* A cascading submenu row (XL-UX-037/041): the chevron sits where a shortcut
+ * would, and the panel it opens is a popover of its own beside the row. */
+.rb-pop-subitem .rb-ico { flex: none; color: var(--oc-muted-text-color); }
+.rb-pop-subitem[aria-expanded="true"] { background: var(--oc-surface-color); }
+.rb-pop-sub { z-index: 61; }
+
+/* Ribbon check boxes (Sheet Options, Show) and the small headings over them. */
+.oc-chrome-ribbon .rb-heading { font-size: 12px; line-height: 22px; padding: 0 4px; color: var(--oc-text-color); white-space: nowrap; }
+.oc-chrome-ribbon .rb-row > .rb-heading:first-child:not(:last-child) { min-width: 48px; }
+.oc-chrome-ribbon .rb-check {
+  display: inline-flex; align-items: center; gap: 6px; height: 22px; padding: 0 4px;
+  border: 0; border-radius: 4px; background: transparent; color: var(--oc-text-color);
+  font: inherit; font-size: 12px; cursor: pointer; white-space: nowrap;
+}
+.oc-chrome-ribbon .rb-check[hidden] { display: none; }
+.oc-chrome-ribbon .rb-check:hover:not(:disabled) { background: var(--oc-surface-color); }
+.oc-chrome-ribbon .rb-check:focus-visible { outline: 2px solid var(--oc-accent-color); outline-offset: -2px; }
+.oc-chrome-ribbon .rb-check:disabled { opacity: 0.4; cursor: default; }
+.oc-chrome-ribbon .rb-check-box {
+  box-sizing: border-box; width: 13px; height: 13px; border-radius: 2px;
+  border: 1px solid var(--oc-control-border-color); background: var(--oc-background-color);
+}
+.oc-chrome-ribbon .rb-check[aria-checked="true"] .rb-check-box {
+  border-color: var(--oc-accent-color); background: var(--oc-accent-color);
+  box-shadow: inset 0 0 0 2px var(--oc-background-color);
+}
 
 /* ── File page ─────────────────────────────────────────────────────────
  * Excel's Backstage: a rail of destinations and a page of described choices.

@@ -37,7 +37,10 @@ export function registeredIds() { return [...registered.keys()]; }
 /// Register a command that has no DOM node. `spec`: `{ label, run, shortcut?,
 /// enabled?: () => boolean, checked?: () => boolean, hidden?: () => boolean }`.
 export function register(id, spec) {
-  registered.set(id, { id, ...spec });
+  // Descriptors rather than a spread, so a getter stays a getter: a label
+  // that follows state ("Freeze Panes" / "Unfreeze Panes") is read each time
+  // the command is looked up, not once at boot.
+  registered.set(id, Object.defineProperties({ id }, Object.getOwnPropertyDescriptors(spec)));
 }
 
 /// The `Document` or `ShadowRoot` the editor's menus and toolbar live in.

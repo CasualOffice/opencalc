@@ -100,10 +100,11 @@ pub fn session_cf_rules(sheet: usize) -> String {
             .map(|&i| {
                 let cf = &sh.conditional_formats[i];
                 format!(
-                    "{{\"i\":{i},\"range\":{},\"desc\":{},\"fill\":{},\"priority\":{},\"stop\":{}}}",
+                    "{{\"i\":{i},\"range\":{},\"desc\":{},\"fill\":{},\"font\":{},\"priority\":{},\"stop\":{}}}",
                     json_string(&range_a1(&cf.range)),
                     json_string(&describe_cf_rule(&cf.rule)),
                     json_string(&cf.fill),
+                    json_string(cf.font_color.as_deref().unwrap_or("")),
                     cf.priority,
                     u8::from(cf.stop_if_true),
                 )
