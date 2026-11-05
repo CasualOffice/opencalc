@@ -471,47 +471,64 @@ pub fn session_block_bounds(sheet: usize, row: u32, col: u32) -> String {
         if !filled(row, col) {
             return "null".to_owned();
         }
-        // Excel's current region (`XL-UX-175`): grow the rectangle until the
-        // row above, the row below and the columns either side — corners
-        // included — are all blank. A ragged region grows to its bounding box,
-        // which is what a user means by "this table" even when one corner is
-        // blank.
-        //
-        // Repeated until nothing moves, because growing one edge brings new
-        // cells next to the others: a single pass per direction stopped a
-        // staircase half-way down, and the corners are checked because a cell
-        // touching only diagonally is not separated by any blank row or column.
-        // The grid's own bounds cap the walk.
-        const LAST_ROW: u32 = 1_048_575;
-        const LAST_COL: u32 = 16_383;
-        let (mut r0, mut r1, mut c0, mut c1) = (row, row, col, col);
-        loop {
-            let (lc, hc) = (c0.saturating_sub(1), (c1 + 1).min(LAST_COL));
-            let (lr, hr) = (r0.saturating_sub(1), (r1 + 1).min(LAST_ROW));
-            let mut grew = false;
-            if r0 > 0 && (lc..=hc).any(|c| filled(r0 - 1, c)) {
-                r0 -= 1;
-                grew = true;
-            }
-            if r1 < LAST_ROW && (lc..=hc).any(|c| filled(r1 + 1, c)) {
-                r1 += 1;
-                grew = true;
-            }
-            if c0 > 0 && (lr..=hr).any(|r| filled(r, c0 - 1)) {
-                c0 -= 1;
-                grew = true;
-            }
-            if c1 < LAST_COL && (lr..=hr).any(|r| filled(r, c1 + 1)) {
-                c1 += 1;
-                grew = true;
-            }
-            if !grew {
-                break;
-            }
-        }
+        let (r0, c0, r1, c1) = current_region(filled, row, col);
         format!("{{\"r0\":{r0},\"c0\":{c0},\"r1\":{r1},\"c1\":{c1}}}")
     })
     .unwrap_or_else(|| "null".to_owned())
+}
+
+/// Excel's current region around a filled cell, as `(r0, c0, r1, c1)`.
+///
+/// Split from [`session_block_bounds`] so the walk can be tested against a
+/// lookup that counts its calls: the cost is the contract here, not just the
+/// answer.
+pub(crate) fn current_region(
+    filled: impl Fn(u32, u32) -> bool,
+    row: u32,
+    col: u32,
+) -> (u32, u32, u32, u32) {
+    // Excel's current region (`XL-UX-175`): grow the rectangle until the
+    // row above, the row below and the columns either side — corners
+    // included — are all blank. A ragged region grows to its bounding box,
+    // which is what a user means by "this table" even when one corner is
+    // blank.
+    //
+    // Repeated until nothing moves, because growing one edge brings new
+    // cells next to the others: a single pass per direction stopped a
+    // staircase half-way down, and the corners are checked because a cell
+    // touching only diagonally is not separated by any blank row or column.
+    // The grid's own bounds cap the walk.
+    //
+    // Each edge walks to its own fixpoint before the next is tried. Moving
+    // every edge one step per round rescanned both side columns over the full
+    // height for every row added — quadratic in a tall table, which froze the
+    // tab at 32,000 rows. Walking an edge out first means a side column is
+    // scanned once per column step, and the outer loop only repeats while
+    // some edge moved.
+    const LAST_ROW: u32 = 1_048_575;
+    const LAST_COL: u32 = 16_383;
+    let (mut r0, mut r1, mut c0, mut c1) = (row, row, col, col);
+    let cols = |c0: u32, c1: u32| c0.saturating_sub(1)..=(c1 + 1).min(LAST_COL);
+    let rows = |r0: u32, r1: u32| r0.saturating_sub(1)..=(r1 + 1).min(LAST_ROW);
+    loop {
+        let before = (r0, r1, c0, c1);
+        while r0 > 0 && cols(c0, c1).any(|c| filled(r0 - 1, c)) {
+            r0 -= 1;
+        }
+        while r1 < LAST_ROW && cols(c0, c1).any(|c| filled(r1 + 1, c)) {
+            r1 += 1;
+        }
+        while c0 > 0 && rows(r0, r1).any(|r| filled(r, c0 - 1)) {
+            c0 -= 1;
+        }
+        while c1 < LAST_COL && rows(r0, r1).any(|r| filled(r, c1 + 1)) {
+            c1 += 1;
+        }
+        if (r0, r1, c0, c1) == before {
+            break;
+        }
+    }
+    (r0, c0, r1, c1)
 }
 
 /// The topmost chart whose frame covers a cell, or `null`.
@@ -3152,5 +3169,36 @@ mod current_region {
             session_block_bounds(0, 2, 3),
             r#"{"r0":0,"c0":3,"r1":2,"c1":3}"#
         );
+    }
+
+    /// The walk is linear in the table's size, not quadratic. Growing each edge
+    /// one step per pass rescanned the full height of both side columns for
+    /// every row added: a 16,000 x 10 table took 128 million lookups (and
+    /// 32,000 rows froze the tab), where Ctrl+A, Ctrl+T and sort from a single
+    /// cell all go through here. Each edge now walks to its own fixpoint before
+    /// the others are retried.
+    #[test]
+    fn a_tall_table_is_measured_in_linear_lookups() {
+        use std::cell::Cell as Counter;
+        const H: u32 = 16_000;
+        const W: u32 = 10;
+        // Both orientations: a wide table is the same walk with the axes
+        // swapped, and seeding from the far corner walks the other edges.
+        for (h, w) in [(H, W), (W, H)] {
+            for (sr, sc) in [(0, 0), (h - 1, w - 1)] {
+                let lookups = Counter::new(0u64);
+                let filled = |r: u32, c: u32| {
+                    lookups.set(lookups.get() + 1);
+                    r < h && c < w
+                };
+                assert_eq!(super::current_region(filled, sr, sc), (0, 0, h - 1, w - 1));
+                let budget = 10 * u64::from(h + w);
+                assert!(
+                    lookups.get() <= budget,
+                    "{} lookups for a {h} x {w} table from ({sr},{sc}), budget {budget}",
+                    lookups.get()
+                );
+            }
+        }
     }
 }
