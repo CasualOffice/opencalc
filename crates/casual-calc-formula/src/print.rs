@@ -341,7 +341,8 @@ fn write_intersection(f: &mut fmt::Formatter<'_>, operand: &Expr, origin: Origin
 /// `callee(args)`. A callee that is an implicit intersection is written in its
 /// function form, `SINGLE(F)(C)`, which parses back to the same tree: as `@F(C)`
 /// it would read as `@` applied to the call `F(C)`, and a bracketed `(@F)(C)` is
-/// not a call the grammar has (found by fuzzing).
+/// not a call the grammar has (found by fuzzing). A spill callee is written
+/// `ANCHORARRAY(X)(C)` for the same reason.
 #[inline(never)]
 fn write_call(
     f: &mut fmt::Formatter<'_>,
@@ -354,6 +355,13 @@ fn write_call(
             if name == crate::parse::SINGLE && inner.len() == 1 =>
         {
             write!(f, "{}({})(", crate::parse::SINGLE, At(&inner[0], origin))?;
+        }
+        // A spill callee likewise: `X#(Y)` reads as `X#` with `(Y)` left over,
+        // so it is written `ANCHORARRAY(X)(Y)` (found by fuzzing on main).
+        Expr::Function { name, args: inner }
+            if name == crate::parse::ANCHORARRAY && spill_anchor(inner) =>
+        {
+            write!(f, "{}({})(", crate::parse::ANCHORARRAY, At(&inner[0], origin))?;
         }
         _ => write!(f, "{}(", At(callee, origin))?,
     }

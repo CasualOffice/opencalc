@@ -943,3 +943,26 @@ fn a_percent_of_an_intersection_keeps_its_brackets() {
     assert_eq!(crate::parse("@A1%").unwrap().to_string(), "@A1%");
     assert_eq!(crate::parse("(@A1)+1").unwrap().to_string(), "@A1+1");
 }
+
+/// Found by the `formula_parse` fuzz target on main, the same family as the
+/// intersection callee above: a spill reference used as a callee.
+/// `ANCHORARRAY(X)(Y)` printed as `X#(Y)`, which the parser reads as `X#` with
+/// `(Y)` left over. A callee spill is written in its function form.
+#[test]
+fn a_spill_as_a_callee_round_trips() {
+    for text in [
+        "S-ANCHORARRAY(AHORARRA)(Y+M)",
+        "ANCHORARRAY(A1)(2)",
+        "ANCHORARRAY(nm)(1,2)",
+        "A1#",
+        "SUM(A1#)",
+    ] {
+        let expr = crate::parse(text).unwrap_or_else(|e| panic!("{text:?}: {e}"));
+        let printed = expr.to_string();
+        let again = crate::parse(&printed)
+            .unwrap_or_else(|e| panic!("{text:?} printed {printed:?}, which does not parse: {e}"));
+        assert_eq!(again, expr, "{text:?} printed {printed:?}, which reads back differently");
+    }
+    // Still the operator where it is not a callee.
+    assert_eq!(crate::parse("SUM(A1#)").unwrap().to_string(), "SUM(A1#)");
+}
