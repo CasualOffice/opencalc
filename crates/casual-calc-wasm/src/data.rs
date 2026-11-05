@@ -1701,35 +1701,6 @@ pub fn session_set_filter_custom(
     commit_filter(sheet, site, Some(f))
 }
 
-/// Re-evaluate every sheet's autofilter against the current data.
-///
-/// Called after a load, where the rows arrive marked `hidden="1"` with no way
-/// to tell which of them the filter hid — OOXML records no distinction. Any row
-/// this filter would hide is moved out of the hand-hidden set and into the
-/// filter's, so clearing the filter later releases exactly those rows. A row
-/// hidden by hand that the filter *also* excludes is reattributed to the
-/// filter; Excel cannot tell those apart either.
-pub(crate) fn reapply_filters_after_load(session: &mut WorkbookSession) {
-    let sheet_count = session.workbook().sheets.len();
-    for i in 0..sheet_count {
-        let wb = session.workbook();
-        let Some(sh) = wb.sheets.get(i) else { continue };
-        if sh.auto_filter.as_ref().is_none_or(|f| !f.is_active()) {
-            continue;
-        }
-        let hidden = recompute_filter_hidden(wb, sh);
-        // Mutate the loaded document in place: this is reconciling what was
-        // read, not an edit, so it must not land on the undo stack or dirty the
-        // document.
-        if let Some(sh) = session.workbook_mut().sheets.get_mut(i) {
-            for row in &hidden {
-                sh.hidden_rows.remove(row);
-            }
-            sh.filter_hidden = hidden;
-        }
-    }
-}
-
 /// Set (or clear, with empty hex) the font color across a range (one undo step).
 ///
 /// `theme_slot` is the `theme="N"` index the colour was picked from, or `-1` for
@@ -2631,6 +2602,25 @@ mod filter_sort_range_tests {
         assert_eq!((0..4).map(|r| shown(r, 1)).collect::<Vec<_>>(), before);
         assert_eq!(hidden_flags(), hidden_before);
         assert_eq!(filter_hidden(), [2]);
+    }
+
+    /// **A filtered list opened from a file keeps its filter, and its total.**
+    ///
+    /// A filtered-out row is saved as `<row hidden="1">` like a hand-hidden one;
+    /// the open re-derives which rows the filter hid. It used to happen here,
+    /// after the SDK had already recalculated — so `SUBTOTAL(9, …)`, which
+    /// counts hand-hidden rows but never filtered ones, came back including the
+    /// East row (`XL-FEAT-136`). Now it happens inside the open, before.
+    #[test]
+    fn a_filtered_list_reopens_with_its_filter_and_its_subtotal() {
+        filtered_grid();
+        crate::session_set_cell(0, 5, 1, "=SUBTOTAL(9,B2:B4)").unwrap();
+        assert_eq!(shown(5, 1), "5", "the control: West rows 3 + 2");
+        let bytes = crate::session_save_as("xlsx").unwrap();
+        crate::session_open_as("xlsx", &bytes).unwrap();
+        assert_eq!(filter_hidden(), [2], "the East row is the filter's again");
+        assert_eq!(hidden_flags(), [false, true, false]);
+        assert_eq!(shown(5, 1), "5", "SUBTOTAL(9) counted the filtered row");
     }
 }
 

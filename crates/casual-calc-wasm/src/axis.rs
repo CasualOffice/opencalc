@@ -1397,43 +1397,10 @@ pub fn session_outline(sheet: usize, first: u32, count: u32, columns: bool) -> S
 /// reports truncation rather than silently returning a short list.
 pub(crate) const MAX_FILTER_VALUES: usize = 10_000;
 
-/// A cell's display text and numeric value, for filter matching.
-pub(crate) fn filter_operands(
-    wb: &Workbook,
-    sheet: &Sheet,
-    row: u32,
-    col: u32,
-) -> (String, Option<f64>) {
-    match sheet.cells.get(CellRef::new(row, col)) {
-        Some(cell) => {
-            let num = match cell.value {
-                CellValue::Number(n) => Some(n),
-                _ => None,
-            };
-            (casual_calc_layout::display_text(wb, cell), num)
-        }
-        None => (String::new(), None),
-    }
-}
-
-/// Whether `row` passes every column rule except `skip` (used to build a
-/// checklist that reflects what the *other* columns have already narrowed to).
-pub(crate) fn row_passes(
-    wb: &Workbook,
-    sheet: &Sheet,
-    filter: &AutoFilter,
-    row: u32,
-    skip: Option<u32>,
-) -> bool {
-    filter.rules.iter().all(|(&off, rule)| {
-        if Some(off) == skip {
-            return true;
-        }
-        let col = filter.range.start.col.saturating_add(off);
-        let (text, num) = filter_operands(wb, sheet, row, col);
-        rule.matches(&text, num)
-    })
-}
+// Matching a row against the rules is the SDK's, so that opening a file can
+// derive the filtered rows before its first recalculation (`XL-FEAT-136`); the
+// checklist and the filter commands here match with the same functions.
+pub(crate) use casual_calc_sdk::autofilter::{filter_operands, row_passes};
 
 /// Every filter on a sheet: its own, then each table's, in table order.
 ///
@@ -1474,18 +1441,7 @@ pub(crate) fn filter_at_col(sheet: &Sheet, col: u32) -> Option<(FilterSite, &Aut
 
 /// The rows every filter on the sheet hides, recomputed from their rules.
 pub(crate) fn recompute_filter_hidden(wb: &Workbook, sheet: &Sheet) -> BTreeSet<u32> {
-    let mut hidden = BTreeSet::new();
-    for (_, filter) in sheet_filters(sheet) {
-        if !filter.is_active() {
-            continue;
-        }
-        for row in filter.body_start()..=filter.range.end.row {
-            if !row_passes(wb, sheet, filter, row, None) {
-                hidden.insert(row);
-            }
-        }
-    }
-    hidden
+    casual_calc_sdk::autofilter::filter_hidden_rows(wb, sheet)
 }
 
 /// Install `filter` on a sheet and hide the rows it excludes, as one undoable

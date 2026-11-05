@@ -745,6 +745,11 @@ impl WorkbookSession {
         let mut report = outcome.report;
         report_uncomputable(&workbook, &mut report);
         apply_environment(&mut workbook, &config);
+        // Before the recalculation, not after it: a filtered-out row arrives as
+        // a hand-hidden one, and `SUBTOTAL(1-11, …)` counts a hand-hidden row.
+        // Recalculating first replaced Excel's cached total with one that
+        // included what the filter hides (`XL-FEAT-136`).
+        autofilter::reconcile_filters_after_load(&mut workbook);
         let calculation = config
             .calculation
             .unwrap_or_else(|| file_calculation_mode(&workbook));
@@ -862,6 +867,9 @@ impl WorkbookSession {
     pub fn open_ods_with(bytes: Vec<u8>, config: SessionConfig) -> Result<Self, SdkError> {
         let (mut workbook, report) = casual_calc_ods::import_ods(&bytes)?;
         apply_environment(&mut workbook, &config);
+        // As for a package: the filtered rows are the filter's before anything
+        // is recalculated over them.
+        autofilter::reconcile_filters_after_load(&mut workbook);
         // The file's own cached values came from LibreOffice's engine, and this
         // reader does not carry a calculation mode to say otherwise; a formula
         // that translated is recalculated here so the session starts consistent
@@ -3128,6 +3136,7 @@ fn recalc_plan(op: &Operation) -> RecalcPlan {
     }
 }
 
+pub mod autofilter;
 pub mod views;
 
 mod entry;
