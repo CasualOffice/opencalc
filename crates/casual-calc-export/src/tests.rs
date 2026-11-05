@@ -5824,3 +5824,60 @@ fn spill_and_intersection_operators_round_trip_through_xlsx() {
         assert_formula_round_trips(file, shown);
     }
 }
+
+/// The sheet left open is the one a reopened file opens on (`PIPE-05`).
+///
+/// Excel records it twice: `<workbookView activeTab>` in the workbook part and
+/// `tabSelected="1"` on that sheet's `<sheetView>`. The views travel verbatim
+/// from the file, so a workbook opened on its first sheet and saved on its third
+/// wrote `tabSelected` on the third and still `activeTab="0"` — and Excel, which
+/// opens on `activeTab`, reopened it on the first.
+#[test]
+fn active_tab_follows_the_selected_sheet() {
+    use casual_calc_model::{Id, Sheet, SheetId, Workbook};
+    use std::collections::BTreeMap;
+
+    let mut wb = Workbook::new(Id::from_parts(1, 1));
+    for (i, name) in ["One", "Two", "Three"].into_iter().enumerate() {
+        wb.sheets
+            .push(Sheet::new(SheetId(Id::from_parts(2, i as u64 + 1)), name));
+    }
+    // As a file opened on its first sheet carries it.
+    let mut view = BTreeMap::new();
+    view.insert("activeTab".to_owned(), "0".to_owned());
+    view.insert("firstSheet".to_owned(), "0".to_owned());
+    view.insert("windowWidth".to_owned(), "20000".to_owned());
+    wb.settings.views.push(view);
+    wb.sheets[2].view.tab_selected = true;
+
+    let bytes = write_workbook(&wb).unwrap();
+    let xml = xml_of(&bytes, "xl/workbook.xml");
+    assert!(xml.contains("activeTab=\"2\""), "in: {xml}");
+    // The rest of the view is the file's own and is kept.
+    assert!(xml.contains("windowWidth=\"20000\""), "in: {xml}");
+    let back = import_package(bytes).unwrap().workbook;
+    let selected: Vec<bool> = back.sheets.iter().map(|s| s.view.tab_selected).collect();
+    assert_eq!(selected, [false, false, true]);
+    assert_eq!(
+        back.settings.views[0].get("activeTab").map(String::as_str),
+        Some("2")
+    );
+
+    // A workbook that never had a view gets one only when it needs it: the
+    // first sheet is Excel's default and is written by omission.
+    let mut fresh = Workbook::new(Id::from_parts(3, 1));
+    fresh
+        .sheets
+        .push(Sheet::new(SheetId(Id::from_parts(4, 1)), "A"));
+    fresh
+        .sheets
+        .push(Sheet::new(SheetId(Id::from_parts(4, 2)), "B"));
+    let plain = xml_of(&write_workbook(&fresh).unwrap(), "xl/workbook.xml");
+    assert!(!plain.contains("activeTab"), "in: {plain}");
+    fresh.sheets[1].view.tab_selected = true;
+    let on_b = xml_of(&write_workbook(&fresh).unwrap(), "xl/workbook.xml");
+    assert!(
+        on_b.contains("<workbookView activeTab=\"1\"/>"),
+        "in: {on_b}"
+    );
+}

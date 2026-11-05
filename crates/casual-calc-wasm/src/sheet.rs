@@ -305,6 +305,23 @@ pub fn session_active_sheet() -> usize {
     .unwrap_or(0)
 }
 
+/// Record that `index` is the sheet on screen, so a saved file opens on it
+/// (`PIPE-05`). Returns whether anything changed.
+///
+/// Not an edit: no undo step, no unsaved-work signal, nothing sent to
+/// collaborators, and an opened file nobody edited still saves back as itself
+/// — see `WorkbookSession::set_active_sheet`. Allowed in a read-only session
+/// for the same reason scrolling is: it changes what is looked at, not what is
+/// in the document.
+#[wasm_bindgen]
+pub fn session_set_active_sheet(index: usize) -> bool {
+    SESSION.with(|cell| {
+        cell.borrow_mut()
+            .as_mut()
+            .is_some_and(|s| s.set_active_sheet(index))
+    })
+}
+
 /// Each sheet's visibility as JSON `["visible"|"hidden"|"veryHidden", …]`, so
 /// the host can leave hidden tabs out of the strip while still offering them in
 /// an unhide list.
@@ -401,4 +418,35 @@ pub fn session_data_bar_style() -> String {
         r#"{{"padX":{},"padY":{},"alpha":{},"defaultColor":"{}"}}"#,
         style.pad_x, style.pad_y, style.alpha, style.default_color
     )
+}
+
+#[cfg(test)]
+mod active_sheet_tests {
+    use super::*;
+    use crate::history::session_edits_applied;
+
+    fn three_sheets() -> Workbook {
+        let mut wb = Workbook::new(Id::from_parts(1, 1));
+        for (i, name) in ["One", "Two", "Three"].into_iter().enumerate() {
+            wb.sheets
+                .push(Sheet::new(SheetId(Id::from_parts(2, i as u64 + 1)), name));
+        }
+        wb
+    }
+
+    /// The editor tells the engine which sheet is open, and that is what the
+    /// next session over the saved bytes opens on (`PIPE-05`) — without the
+    /// switch counting as unsaved work.
+    #[test]
+    fn the_sheet_left_open_is_the_one_the_file_opens_on() {
+        set_session(WorkbookSession::from_workbook(three_sheets()));
+        let applied = session_edits_applied();
+        assert!(session_set_active_sheet(2));
+        assert_eq!(session_edits_applied(), applied);
+        assert_eq!(session_active_sheet(), 2);
+        let bytes =
+            with_session(|s| s.save_as(casual_calc_sdk::SessionFormat::Xlsx).unwrap()).unwrap();
+        set_session(WorkbookSession::open(bytes).unwrap());
+        assert_eq!(session_active_sheet(), 2);
+    }
 }

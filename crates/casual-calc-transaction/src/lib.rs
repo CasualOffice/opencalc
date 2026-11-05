@@ -1614,6 +1614,21 @@ impl History {
         }
     }
 
+    /// Change how many undo entries are kept, dropping the oldest at once when
+    /// the history already holds more than the new bound.
+    ///
+    /// Dropping entries is the bounded stack's ordinary behaviour, so it seals
+    /// the history the way [`Self::apply`]'s own trimming implicitly does: a
+    /// mark taken before can no longer reach entries that are gone, and
+    /// [`Self::group_since`] already refuses when it would.
+    pub fn set_depth(&mut self, depth: Option<usize>) {
+        self.depth = depth;
+        if let Some(depth) = depth {
+            let excess = self.undo.len().saturating_sub(depth);
+            self.undo.drain(..excess);
+        }
+    }
+
     /// Apply `op`, recording its inverse for undo and clearing the redo stack.
     ///
     /// An operation that **changed nothing** is applied and then forgotten: no

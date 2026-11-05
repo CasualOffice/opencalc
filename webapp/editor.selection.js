@@ -6,6 +6,7 @@
 // without touching a single body.
 
 import { command as registryCommand, isRegistered, registeredIds, setPolicy } from "./commands.js";
+import { asOneUndoStep } from "./editor.formatting.js";
 import {
   A1,
   A1_PART,
@@ -1780,8 +1781,9 @@ export function autoSum() {
 }
 
 export function clearSelection() {
-  try { for (const s of allRanges()) wasm.session_clear_contents(state.sheet, s.r0, s.c0, s.r1, s.c1); }
-  catch (e) { statusError(errText(e)); }
+  // Delete over a Ctrl+click selection is one undo step, as Clear All and the
+  // formatting commands are (`PIPE-02`).
+  asOneUndoStep(allRanges(), (s) => wasm.session_clear_contents(state.sheet, s.r0, s.c0, s.r1, s.c1));
   draw();
 }
 
@@ -1991,7 +1993,10 @@ export function currentFnToken() {
   if (!val.startsWith("=")) return null;
   const before = val.slice(0, pos);
   if (inStringLiteral(before)) return null; // don't autocomplete inside "text"
-  const m = before.match(/([A-Za-z][A-Za-z0-9.]*)$/);
+  // A defined name may start with `_` or `\` and hold `_` (`Region_North`),
+  // which a function name never does; without them the token stopped at the
+  // underscore and the name dropped out of the list mid-word (`PIPE-10`).
+  const m = before.match(/([A-Za-z_\\][A-Za-z0-9._\\]*)$/);
   if (!m) return null;
   const prev = before[before.length - m[1].length - 1];
   if (prev !== undefined && !"=+-*/^(,:&<>% ".includes(prev)) return null;
@@ -2004,10 +2009,24 @@ export function renderAutocomplete() {
   acState.matches.forEach((f, i) => {
     const row = document.createElement("div");
     row.className = "ac-item" + (i === acState.idx ? " active" : "");
-    // oc-safe-html: built-in function names and signatures from the engine's
-    // own catalogue, not from any document.
-    // oc-safe-html: see the note above.
-    row.innerHTML = `<span class="ac-name">${f.n}</span><span class="ac-sig">${f.sig.replace(/^[A-Z0-9]+/, "")}</span>`;
+    // What the entry is, which Excel shows with an icon (`PIPE-10`): `fx` for a
+    // function, a grid for a table, a tag-like mark for a defined name.
+    const kind = f.kind || "function";
+    row.dataset.kind = kind;
+    row.title = kind === "name" ? "Defined name" : kind === "table" ? "Table" : "Function";
+    const icon = document.createElement("span");
+    icon.className = "ac-icon";
+    icon.setAttribute("aria-hidden", "true");
+    icon.textContent = kind === "function" ? "fx" : kind === "table" ? "▦" : "≡";
+    const name = document.createElement("span");
+    name.className = "ac-name";
+    name.textContent = f.n;
+    // Text, not markup: a name and what it refers to are the document's own
+    // text, and a defined name's formula may hold any string literal.
+    const sig = document.createElement("span");
+    sig.className = "ac-sig";
+    sig.textContent = kind === "function" ? f.sig.replace(/^[A-Z0-9._]+/, "") : f.sig;
+    row.append(icon, name, sig);
     row.addEventListener("mousedown", (e) => { e.preventDefault(); acState.idx = i; acceptAutocomplete(); });
     acEl.appendChild(row);
   });
@@ -2024,6 +2043,17 @@ export function renderAutocomplete() {
   const width = acEl.offsetWidth;
   acEl.style.left = Math.max(4, Math.min(a.left, window.innerWidth - 4 - width)) + "px";
   acEl.style.top = a.top + 2 + "px";
+  // The list scrolls once it is longer than the menu; the highlighted entry is
+  // kept in view as the arrows move through it. Measured once shown, and by
+  // hand rather than with `scrollIntoView`, which also scrolls every ancestor —
+  // an embedding page included.
+  const active = acEl.children[acState.idx];
+  if (active) {
+    if (active.offsetTop < acEl.scrollTop) acEl.scrollTop = active.offsetTop;
+    else if (active.offsetTop + active.offsetHeight > acEl.scrollTop + acEl.clientHeight) {
+      acEl.scrollTop = active.offsetTop + active.offsetHeight - acEl.clientHeight;
+    }
+  }
 }
 
 export function callAtCaret() {
@@ -2067,10 +2097,14 @@ export function callAtCaret() {
 
 export function acceptAutocomplete() {
   if (!acState || !editSurface) return;
-  const name = acState.matches[acState.idx].n;
+  const pick = acState.matches[acState.idx];
+  const name = pick.n;
+  // A function opens its argument list; a name or a table is a value in its
+  // own right and is written bare, as Excel writes it.
+  const open = !pick.kind || pick.kind === "function" ? "(" : "";
   const val = editSurface.value, pos = editSurface.selectionStart;
-  editSurface.value = val.slice(0, acState.start) + name + "(" + val.slice(pos);
-  const caret = acState.start + name.length + 1;
+  editSurface.value = val.slice(0, acState.start) + name + open + val.slice(pos);
+  const caret = acState.start + name.length + open.length;
   editSurface.setSelectionRange(caret, caret);
   hideAutocomplete();
   editSurface.focus();

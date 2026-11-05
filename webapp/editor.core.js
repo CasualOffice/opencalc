@@ -155,6 +155,7 @@ import {
   clampScroll,
   colAtX,
   colWidthOf,
+  dragTargetXY,
   edgeVelocity,
   effectiveRange,
   ensureVisible,
@@ -4266,9 +4267,30 @@ export function touchHandlesForTest() {
 // like every real spreadsheet. Runs on rAF until the pointer leaves the band
 // or the drag ends.
 export const AUTOSCROLL_EDGE = 28;
+
+/// Whether a pointer gesture that should scroll at the edge is live: a
+/// selection or header drag, a fill-handle drag, or a formula's reference drag
+/// (`PIPE-04` — the last two were never wired, so a fill or a SUM range stopped
+/// at the edge of the window).
+function edgeScrollingDrag() {
+  return state.dragging || !!state.fill || !!formulaRefDrag;
+}
+
+/// The reference a formula's drag has reached at (px, py): the anchor cell to
+/// the one under the pointer, written over the text the drag inserted.
+function updateRefDrag(px, py) {
+  const hit = cellAt(px, py);
+  if (!hit) return;
+  const a = formulaRefDrag.anchor;
+  const r0 = Math.min(a.row, hit.row), r1 = Math.max(a.row, hit.row);
+  const c0 = Math.min(a.col, hit.col), c1 = Math.max(a.col, hit.col);
+  const ref = (r0 === r1 && c0 === c1) ? A1(r0, c0) : `${A1(r0, c0)}:${A1(r1, c1)}`;
+  insertRef(ref);
+}
+
 function autoScrollTick() {
   autoRaf = 0;
-  if (!state.dragging || !dragPos) return;
+  if (!edgeScrollingDrag() || !dragPos) return;
   const { sx, sy, cx, cy } = edgeVelocity();
   if (sx === 0 && sy === 0) return; // pointer back inside — stop
   const SPEED = 0.5;
@@ -4280,6 +4302,8 @@ function autoScrollTick() {
   if (state.scrollX === x0 && state.scrollY === y0) return;
   if (state.headerDrag === "col") selectColumn(colAtX(cx), true);
   else if (state.headerDrag === "row") selectRow(rowAtY(cy), true);
+  else if (state.fill) { const t = dragTargetXY(); updateFill(t.cx, t.cy); }
+  else if (formulaRefDrag) { const t = dragTargetXY(); updateRefDrag(t.cx, t.cy); }
   else if (handleDrag) {
     // A touch handle moves `anchor`, not `sel` — the active cell is the corner
     // the finger is *not* holding. Sharing this loop with the mouse and writing
@@ -4296,7 +4320,7 @@ function autoScrollTick() {
 }
 function maybeAutoScroll() {
   const { sx, sy } = edgeVelocity();
-  if (state.dragging && dragPos && (sx !== 0 || sy !== 0)) {
+  if (edgeScrollingDrag() && dragPos && (sx !== 0 || sy !== 0)) {
     if (!autoRaf) autoRaf = requestAnimationFrame(autoScrollTick);
   } else {
     stopAutoScroll();
@@ -7647,12 +7671,63 @@ export let acEl;
 // The function-name token being typed just before the caret, if the caret sits
 // somewhere a function name is valid (after =, an operator, "(", or ",").
 
+/// The defined names and tables a formula on `home` can use, as AutoComplete
+/// entries `{n, sig, kind}` (`PIPE-10`). Excel lists them beside the functions,
+/// each with its own icon.
+///
+/// Scope is the sheet being *edited*, not the one on screen: picking a
+/// reference on another sheet does not move the formula, and a name scoped to
+/// that other sheet would not resolve where it is written. A name scoped to
+/// the home sheet shadows a workbook name of the same spelling, so only one is
+/// listed. Hidden names are add-in and macro plumbing, left out as the Name Box
+/// leaves them out. Tables are workbook-wide, so every sheet's are offered.
+function nameEntries(home) {
+  const out = [];
+  const seen = new Set();
+  let names = [];
+  try { names = JSON.parse(wasm.session_names()); } catch {}
+  names.sort((a, b) => (b.sheet === home) - (a.sheet === home));
+  for (const n of names) {
+    if (n.hidden || !n.name) continue;
+    if (n.sheet !== -1 && n.sheet !== home) continue;
+    const key = n.name.toUpperCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push({ n: n.name, sig: n.refersTo ? `=${n.refersTo}` : "", kind: "name" });
+  }
+  let count = 0;
+  try { count = JSON.parse(wasm.session_sheet_names()).length; } catch {}
+  for (let i = 0; i < count; i++) {
+    let tables = [];
+    try { tables = JSON.parse(wasm.session_tables(i)); } catch {}
+    for (const t of tables) {
+      const key = t.name.toUpperCase();
+      if (!t.name || seen.has(key)) continue;
+      seen.add(key);
+      out.push({ n: t.name, sig: "", kind: "table" });
+    }
+  }
+  return out;
+}
+
 function showAutocomplete() {
   const tok = currentFnToken();
   if (!tok) { hideAutocomplete(); return; }
   if (!fnCatalog) { try { fnCatalog = JSON.parse(wasm.function_catalog()); } catch { fnCatalog = []; } }
   const up = tok.text.toUpperCase();
-  const matches = withCustomFns(fnCatalog).filter((f) => f.n.startsWith(up)).slice(0, 8);
+  const fns = withCustomFns(fnCatalog).filter((f) => f.n.startsWith(up)).map((f) => ({ ...f, kind: "function" }));
+  const named = nameEntries(editHome ? editHome.sheet : state.sheet).filter((f) => f.n.toUpperCase().startsWith(up));
+  // One alphabetical list, as Excel's is, rather than functions and then
+  // names: a name sorted after every function of its prefix would sit below
+  // the fold. A tie (a name `Rate` beside RATE) lists the function first.
+  const order = { function: 0, name: 1, table: 2 };
+  const matches = [...fns, ...named]
+    .sort((a, b) => {
+      const x = a.n.toUpperCase(), y = b.n.toUpperCase();
+      return x < y ? -1 : x > y ? 1 : order[a.kind] - order[b.kind];
+    })
+    // The list scrolls; this only bounds the DOM built per keystroke.
+    .slice(0, 50);
   if (!matches.length) { hideAutocomplete(); return; }
   acState = { matches, idx: 0, start: tok.start };
   renderAutocomplete();
@@ -7741,6 +7816,12 @@ export function renderTabs() {
     const firstVisible = names.findIndex((_, i) => (vis[i] || "visible") === "visible");
     if (firstVisible >= 0) state.sheet = firstVisible;
   }
+  // The sheet on screen is the one a saved file opens on (`PIPE-05`). Here,
+  // after the clamping above, because every path that changes the sheet — a
+  // tab click, Ctrl+PgDn, a move, a delete, a hide — ends by redrawing the
+  // strip, and recording it in each of them is how one gets missed. Not an
+  // edit: no undo step and no unsaved-work signal, as in Excel.
+  try { wasm.session_set_active_sheet(state.sheet); } catch {}
   tabsEl.textContent = "";
   names.forEach((name, i) => {
     // Hidden sheets keep their index (everything addresses sheets by it) but
@@ -8366,16 +8447,17 @@ function wireEvents() {
       return;
     }
     if (state.resize) { updateResize(px, py); return; }
-    if (state.fill) { updateFill(px, py); return; }
-    if (formulaRefDrag) {
-      const hit = cellAt(px, py);
-      if (hit) {
-        const a = formulaRefDrag.anchor;
-        const r0 = Math.min(a.row, hit.row), r1 = Math.max(a.row, hit.row);
-        const c0 = Math.min(a.col, hit.col), c1 = Math.max(a.col, hit.col);
-        const ref = (r0 === r1 && c0 === c1) ? A1(r0, c0) : `${A1(r0, c0)}:${A1(r1, c1)}`;
-        insertRef(ref);
-      }
+    // A fill drag and a formula's reference drag scroll at the edge too, as a
+    // selection drag does (`PIPE-04`): filling down past the last visible row,
+    // or pointing a SUM at a range taller than the window, is the ordinary case.
+    // A pointer over a header still maps to a cell rather than to nothing; one
+    // over a frozen cell maps to that cell (`dragTargetXY`).
+    if (state.fill || formulaRefDrag) {
+      dragPos = { px, py };
+      const { cx, cy } = dragTargetXY();
+      if (state.fill) updateFill(cx, cy);
+      else updateRefDrag(cx, cy);
+      maybeAutoScroll();
       return;
     }
     if (state.dragging && state.headerDrag) {
@@ -8574,6 +8656,10 @@ function wireEvents() {
     if (formulaRefDrag) {
       const caret = formulaRefDrag.end;
       formulaRefDrag = null;
+      // This branch returns before the shared clean-up below, so the edge
+      // scroll it may have started is stopped here.
+      dragPos = null;
+      stopAutoScroll();
       const surface = editSurface ?? inline;
       surface.focus();
       surface.setSelectionRange(caret, caret);

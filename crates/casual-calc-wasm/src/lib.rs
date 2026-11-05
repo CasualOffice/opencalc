@@ -260,8 +260,21 @@ thread_local! {
     pub(crate) static HOST_READ_ONLY: core::cell::Cell<bool> = const { core::cell::Cell::new(false) };
 }
 
+/// How many steps undo reaches back in the editor: Excel's default, "a default
+/// undo/redo maximum of 100 actions" (support.microsoft.com, "Undo, redo, or
+/// repeat an action"). `PIPE-02`: the editor never set one, so every session
+/// it installed kept every inverse — and a metadata edit's inverse is a
+/// snapshot of the sheet's metadata — for the life of the tab.
+pub(crate) const EDITOR_UNDO_DEPTH: usize = 100;
+
+/// Install a session for the editor, under the host's settings: its clock, its
+/// read-only flag and the editor's undo bound.
 pub(crate) fn set_session(session: WorkbookSession) {
     let mut session = session;
+    // On the session rather than through `SessionConfig`: sessions reach here
+    // from a dozen constructors, several of which take no config at all, and a
+    // bound set at each would be missing from the one somebody adds next.
+    session.set_undo_depth(Some(EDITOR_UNDO_DEPTH));
     let (now, seed) = VOLATILE.with(core::cell::Cell::get);
     if now != 0.0 {
         // Through the SDK, never `workbook_mut()`: the clock is configuration,

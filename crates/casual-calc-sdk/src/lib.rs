@@ -1621,6 +1621,53 @@ impl WorkbookSession {
         self.history.group_since(mark)
     }
 
+    /// Bound how far back undo reaches on a session that already exists
+    /// (`PIPE-02`). The same bound as
+    /// [`SessionConfig::with_undo_depth`], for a host that is handed sessions
+    /// from many constructors and wants one rule for all of them; entries past
+    /// the new bound are dropped at once, oldest first.
+    pub fn set_undo_depth(&mut self, depth: Option<usize>) {
+        self.config.undo_depth = depth;
+        self.history.set_depth(depth);
+    }
+
+    /// Make `index` the sheet the workbook is saved open on — OOXML's
+    /// `tabSelected`, and the `activeTab` the writer derives from it
+    /// (`PIPE-05`). Returns whether anything changed.
+    ///
+    /// **Not an edit**, deliberately, in every sense the session tracks:
+    ///
+    /// - not an undo step — Ctrl+Z after looking at another sheet takes back
+    ///   the last change to the document, not the click on a tab, as in Excel;
+    /// - not unsaved work — looking through a workbook does not make closing
+    ///   it ask to save;
+    /// - not sent to collaborators — which sheet each participant has open is
+    ///   their own;
+    /// - and not the end of the untouched original. An opened file that was
+    ///   only looked through still saves back byte for byte (`SAVE-14`), its
+    ///   digital signature included, and so opens where it was opened. Losing
+    ///   the signature, or re-serializing a file this engine does not fully
+    ///   model, to record a tab would be a poor trade.
+    ///
+    /// Refuses an index past the end and a hidden sheet, whose tab is not
+    /// shown and so cannot be the one a file opens on.
+    pub fn set_active_sheet(&mut self, index: usize) -> bool {
+        let sheets = &mut self.workbook.sheets;
+        match sheets.get(index) {
+            Some(s) if s.visibility == casual_calc_model::SheetVisibility::Visible => {}
+            _ => return false,
+        }
+        let mut changed = false;
+        for (i, sheet) in sheets.iter_mut().enumerate() {
+            let on = i == index;
+            if sheet.view.tab_selected != on {
+                sheet.view.tab_selected = on;
+                changed = true;
+            }
+        }
+        changed
+    }
+
     /// What undo would reverse, for a menu label.
     pub fn undo_label(&self) -> Option<&'static str> {
         self.history.undo_label()
