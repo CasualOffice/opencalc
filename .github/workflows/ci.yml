@@ -485,6 +485,11 @@ jobs:
       # this fails when they disagree.
       - name: The Excel fit-gap shows the tracker's status
         run: python3 tools/check-fit-gap-status.py
+      # The chrome is sized in rem so it follows the user's text size
+      # (docs/103, UX-REM-01). A ratchet: no new px length gets in, and each
+      # sheet's baseline falls with the conversion until it is 0.
+      - name: Chrome lengths are rem, not px
+        run: python3 tools/check-css-units.py
       # Eighteen gates guarded this repository and nothing guarded them. Two
       # of them had re-derived "what a tracker row looks like" and guessed
       # narrower than the trackers, so 47 rows were invisible to both and both
