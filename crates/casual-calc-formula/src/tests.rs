@@ -911,3 +911,35 @@ fn an_intersection_as_a_callee_round_trips() {
         );
     }
 }
+
+/// Found by the `formula_parse` fuzz target on main (XL-FEAT-158). `@` takes a
+/// whole postfix operand, so `@A1%` is `@(A1%)`; a `%` applied to an
+/// intersection must keep its brackets. It printed `(@A1)%` as `@A1%` — a
+/// different tree — and `SU(@(@x)%)` as `SU(@@x%)`, which does not parse.
+#[test]
+fn a_percent_of_an_intersection_keeps_its_brackets() {
+    for text in [
+        "(@A1)%",
+        "SU(@(@p2S)%)",
+        "HH+(@(L+ +H) %)%",
+        "(@A1)%%",
+        "@A1%",
+        "-(@A1)%",
+        "(@A1)%+1",
+        "1+@A1",
+        "@A1&B1",
+    ] {
+        let expr = crate::parse(text).unwrap_or_else(|e| panic!("{text:?}: {e}"));
+        let printed = expr.to_string();
+        let again = crate::parse(&printed)
+            .unwrap_or_else(|e| panic!("{text:?} printed {printed:?}, which does not parse: {e}"));
+        assert_eq!(
+            again, expr,
+            "{text:?} printed {printed:?}, which reads back differently"
+        );
+    }
+    // Minimal still: brackets only where the reader needs them.
+    assert_eq!(crate::parse("(@A1)%").unwrap().to_string(), "(@A1)%");
+    assert_eq!(crate::parse("@A1%").unwrap().to_string(), "@A1%");
+    assert_eq!(crate::parse("(@A1)+1").unwrap().to_string(), "@A1+1");
+}
