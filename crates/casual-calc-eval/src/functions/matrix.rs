@@ -522,10 +522,17 @@ pub(crate) fn eval_dynamic(
             if args.is_empty() || args.len() > 4 {
                 return Value::Error(ErrorValue::Value);
             }
-            let v = match opt_numbers(ev, sheet, args, 1, [1.0, 1.0, 1.0, 1.0]) {
-                Ok(v) => v,
-                Err(e) => return e,
-            };
+            // Every argument after `rows` defaults to 1, and so does `rows`
+            // itself when written empty: `SEQUENCE(3,,5)` is 5, 6, 7.
+            let mut v = [1.0; 4];
+            for (i, slot) in v.iter_mut().enumerate() {
+                if let Some(a) = given(args, i) {
+                    match ev.eval_expr(sheet, a).as_number() {
+                        Ok(n) => *slot = n,
+                        Err(e) => return Value::Error(e),
+                    }
+                }
+            }
             if v[0] < 0.0 || v[1] < 0.0 {
                 return Value::Error(ErrorValue::Value);
             }
@@ -561,7 +568,7 @@ pub(crate) fn eval_dynamic(
             };
             let flat: Vec<Value> = haystack.cells.clone();
             let opt = |ev: &mut Evaluator<'_>, i: usize, dflt: f64| -> f64 {
-                args.get(i)
+                given(args, i)
                     .map(|a| ev_number_or(ev, sheet, a, dflt))
                     .unwrap_or(dflt)
             };
@@ -581,7 +588,10 @@ pub(crate) fn eval_dynamic(
             let Some(i) = found else {
                 // `if_not_found` is the fourth argument, and its whole purpose
                 // is to replace the #N/A — so it is only consulted here.
-                return match args.get(3) {
+                // Written empty is missing too: `XLOOKUP(x,r,v,,0)` is the
+                // ordinary way to reach the match mode, and its miss is #N/A,
+                // not a blank.
+                return match given(args, 3) {
                     Some(a) => ev.eval_expr(sheet, a),
                     None => Value::Error(ErrorValue::Na),
                 };
@@ -661,10 +671,14 @@ pub(crate) fn eval_dynamic(
                 Ok(g) => g,
                 Err(e) => return Value::Error(e),
             };
-            let exactly_once = args
-                .get(2)
-                .map(|a| ev.eval_expr(sheet, a).as_bool().unwrap_or(false))
-                .unwrap_or(false);
+            let flag = |ev: &mut Evaluator<'_>, i: usize| {
+                given(args, i).is_some_and(|a| ev.eval_expr(sheet, a).as_bool().unwrap_or(false))
+            };
+            // `by_col` compares columns: done as rows of the transpose, and
+            // transposed back.
+            let by_col = flag(ev, 1);
+            let exactly_once = flag(ev, 2);
+            let data = if by_col { transpose_grid(&data) } else { data };
             let rows = grid_rows(&data);
             let key = |r: &Vec<Value>| -> String {
                 r.iter()
@@ -691,6 +705,9 @@ pub(crate) fn eval_dynamic(
             if picked.is_empty() {
                 return Value::Error(ErrorValue::Calc);
             }
+            if by_col {
+                return transpose_value(rows_to_value(picked));
+            }
             rows_to_value(picked)
         }
         "SORT" | "SORTBY" => {
@@ -701,18 +718,23 @@ pub(crate) fn eval_dynamic(
                 Ok(g) => g,
                 Err(e) => return Value::Error(e),
             };
+            // SORT's `by_col` sorts the columns by one of the rows: the rows
+            // of the transpose, transposed back.
+            let by_col = name == "SORT"
+                && given(args, 3)
+                    .is_some_and(|a| ev.eval_expr(sheet, a).as_bool().unwrap_or(false));
+            let data = if by_col { transpose_grid(&data) } else { data };
             let mut rows = grid_rows(&data);
             // SORT keys on one of its own columns; SORTBY on a parallel array.
+            // An index or order written empty is the default, as omitted.
             let (keys, descending) = if name == "SORT" {
-                let index = args
-                    .get(1)
+                let index = given(args, 1)
                     .map(|a| ev_number_or(ev, sheet, a, 1.0))
                     .unwrap_or(1.0) as usize;
                 if index < 1 || index > data.cols {
                     return Value::Error(ErrorValue::Value);
                 }
-                let order = args
-                    .get(2)
+                let order = given(args, 2)
                     .map(|a| ev_number_or(ev, sheet, a, 1.0))
                     .unwrap_or(1.0);
                 (
@@ -729,8 +751,7 @@ pub(crate) fn eval_dynamic(
                 if by.cells.len() != rows.len() {
                     return Value::Error(ErrorValue::Value);
                 }
-                let order = args
-                    .get(2)
+                let order = given(args, 2)
                     .map(|a| ev_number_or(ev, sheet, a, 1.0))
                     .unwrap_or(1.0);
                 (by.cells.clone(), order < 0.0)
@@ -745,6 +766,9 @@ pub(crate) fn eval_dynamic(
             });
             let sorted: Vec<Vec<Value>> = order.into_iter().map(|i| rows[i].clone()).collect();
             rows.clear();
+            if by_col {
+                return transpose_value(rows_to_value(sorted));
+            }
             rows_to_value(sorted)
         }
         _ => Value::Error(ErrorValue::Name),
@@ -1017,5 +1041,36 @@ pub(crate) fn eval_munit(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) ->
         rows: n,
         cols: n,
         cells,
+    }
+}
+
+/// A grid with its rows and columns swapped — how `by_col` is done by the
+/// row-wise code.
+fn transpose_grid(g: &Grid) -> Grid {
+    let mut cells = Vec::with_capacity(g.cells.len());
+    for c in 0..g.cols {
+        for r in 0..g.rows {
+            cells.push(g.get(r, c).clone());
+        }
+    }
+    Grid {
+        rows: g.cols,
+        cols: g.rows,
+        cells,
+    }
+}
+
+/// [`transpose_grid`] for a result value; a scalar is itself.
+fn transpose_value(v: Value) -> Value {
+    match v {
+        Value::Array { rows, cols, cells } => {
+            let t = transpose_grid(&Grid { rows, cols, cells });
+            Value::Array {
+                rows: t.rows,
+                cols: t.cols,
+                cells: t.cells,
+            }
+        }
+        other => other,
     }
 }

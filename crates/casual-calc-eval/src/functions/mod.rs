@@ -42,6 +42,18 @@ pub(crate) use special::*;
 pub(crate) use stats::*;
 pub(crate) use text::*;
 
+/// Argument `i` as written, or `None` when it is absent or written empty
+/// (`SORT(r,,-1)`).
+///
+/// For the dynamic-array functions Excel reads an empty argument as an
+/// omitted one, so its documented default applies; evaluated, it is a blank —
+/// zero — which is a different answer (`XL-FEAT-018`). The legacy functions do
+/// read it as zero (`VLOOKUP(x,r,2,)` is an exact match), so this is used where
+/// a function's own default is meant, not everywhere.
+pub(crate) fn given(args: &[Expr], i: usize) -> Option<&Expr> {
+    args.get(i).filter(|a| !matches!(a, Expr::Empty))
+}
+
 /// Guard against pathological full-range aggregates (a dependency-graph with
 /// range buckets is the Phase-2 optimization; this bounds the naive scan).
 pub(crate) const MAX_RANGE_CELLS: u64 = 2_000_000;
@@ -1531,15 +1543,61 @@ fn if_elementwise(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr], condition
 }
 
 pub(crate) fn eval_iferror(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -> Value {
+    replace_errors(ev, sheet, args, |_| true)
+}
+
+/// `IFERROR` / `IFNA`: `args[0]`, with every error `catches` accepts replaced
+/// by `args[1]` — element by element when `args[0]` is an array.
+///
+/// Microsoft: "If value is an array formula, IFERROR returns an array of
+/// results for each cell in the range specified in value." Reading the value in
+/// scalar context answered for its first element only, so
+/// `IFERROR(1/C1:C3,0)` spilled one cell and `SUM(IFERROR(…))` summed one
+/// (`XL-FEAT-137`).
+///
+/// The fallback is still evaluated only when something needs replacing — the
+/// laziness both functions exist for. When it is an array too it is read
+/// element by element against the value, broadcast as an operator's operands
+/// are, so `IFERROR(1/(A1:A3-2),B1:B3)` takes the replacement from the same
+/// row.
+pub(crate) fn replace_errors(
+    ev: &mut Evaluator<'_>,
+    sheet: usize,
+    args: &[Expr],
+    catches: fn(ErrorValue) -> bool,
+) -> Value {
     if args.len() != 2 {
         return Value::Error(ErrorValue::Value);
     }
-    let value = ev.eval_expr(sheet, &args[0]);
-    if value.as_error().is_some() {
-        ev.eval_expr(sheet, &args[1])
-    } else {
-        value
+    let caught = |v: &Value| matches!(v, Value::Error(e) if catches(*e));
+    let value = ev.eval_expr_array(sheet, &args[0]);
+    let Value::Array { cells, .. } = &value else {
+        return if caught(&value) {
+            ev.eval_expr(sheet, &args[1])
+        } else {
+            value
+        };
+    };
+    if !cells.iter().any(caught) {
+        return value;
     }
+    let fallback = ev.eval_expr_array(sheet, &args[1]);
+    let (rows, cols) = crate::value::broadcast_shape(&[&value, &fallback]);
+    if let Err(e) = checked_array_size(rows, cols) {
+        return Value::Error(e);
+    }
+    let mut cells = Vec::with_capacity(rows * cols);
+    for r in 0..rows {
+        for c in 0..cols {
+            let v = value.broadcast_at(r, c);
+            cells.push(if caught(&v) {
+                fallback.broadcast_at(r, c)
+            } else {
+                v
+            });
+        }
+    }
+    Value::Array { rows, cols, cells }
 }
 
 /// `AND`/`OR`. `require_all` true means `AND` (every truthy), false means `OR`.

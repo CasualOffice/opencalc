@@ -69,13 +69,7 @@ pub(crate) fn values_equal(a: &Value, b: &Value) -> bool {
 
 /// IFNA(value, value_if_na): substitute only on #N/A.
 pub(crate) fn eval_ifna(ev: &mut Evaluator<'_>, sheet: usize, args: &[Expr]) -> Value {
-    if args.len() != 2 {
-        return Value::Error(ErrorValue::Value);
-    }
-    match ev.eval_expr(sheet, &args[0]) {
-        Value::Error(ErrorValue::Na) => ev.eval_expr(sheet, &args[1]),
-        v => v,
-    }
+    replace_errors(ev, sheet, args, |e| e == ErrorValue::Na)
 }
 
 /// Which aggregate a `*IFS` call computes over the matched positions.

@@ -1849,3 +1849,228 @@ fn index_with_a_zero_index_is_the_whole_row_or_column() {
     error("INDEX(SEQUENCE(3,3),0,4)", ErrorValue::Ref);
     error("INDEX(SEQUENCE(3,3),4,0)", ErrorValue::Ref);
 }
+
+// --- XL-FEAT-018: an argument written empty takes the function's default ----
+//
+// `=SORT(B1:B5,,-1)` has a `sort_index` that is *there but empty*, which the
+// parser keeps as `Expr::Empty` and the evaluator reads as a blank — zero. For
+// the dynamic-array functions Excel reads it as omitted, so the documented
+// default applies (Microsoft: SORT "sort_index … if omitted, 1"; SEQUENCE
+// "[columns] … [start] … [step] … each default to 1"; XLOOKUP "If a valid
+// match is not found, and [if_not_found] is missing, #N/A is returned").
+//
+// The legacy functions are the other way round, and that is pinned too: an
+// empty `range_lookup` / `match_type` is FALSE / 0 — exact — which is the
+// well-known `VLOOKUP(x,r,2,)` idiom, not the TRUE / 1 default an omitted one
+// gets. [unverified] from memory; consistent with LibreOffice.
+
+#[test]
+fn sort_reads_an_empty_sort_index_as_column_one() {
+    spills("SORT(C1:C3,,-1)", |_, _| {}, &[&["3"], &["2"], &["1"]]);
+    spills("SORT(C1:C3,,)", |_, _| {}, &[&["1"], &["2"], &["3"]]);
+    spills(
+        "SORT(C1:D3,,-1)",
+        |_, _| {},
+        &[&["3", "30"], &["2", "20"], &["1", "10"]],
+    );
+}
+
+/// `by_col` (the fourth argument) sorts the columns by one of the rows. It was
+/// ignored, so the rows were sorted instead.
+#[test]
+fn sort_by_col_sorts_columns_by_a_row() {
+    spills(
+        "SORT(C1:D2,,-1,TRUE)",
+        |_, _| {},
+        &[&["10", "1"], &["20", "2"]],
+    );
+    spills(
+        "SORT(C1:D2,2,-1,TRUE)",
+        |_, _| {},
+        &[&["10", "1"], &["20", "2"]],
+    );
+    // FALSE is the default: rows sorted as before.
+    spills(
+        "SORT(C1:D2,1,-1,FALSE)",
+        |_, _| {},
+        &[&["2", "20"], &["1", "10"]],
+    );
+}
+
+#[test]
+fn sequence_reads_empty_arguments_as_their_defaults() {
+    spills("SEQUENCE(3,,5)", |_, _| {}, &[&["5"], &["6"], &["7"]]);
+    spills("SEQUENCE(3,,,2)", |_, _| {}, &[&["1"], &["3"], &["5"]]);
+    spills("SEQUENCE(,3)", |_, _| {}, &[&["1", "2", "3"]]);
+    spills("SEQUENCE(2,2,,)", |_, _| {}, &[&["1", "2"], &["3", "4"]]);
+    spills(
+        "SEQUENCE(2,3,10,)",
+        |_, _| {},
+        &[&["10", "11", "12"], &["13", "14", "15"]],
+    );
+}
+
+#[test]
+fn xlookup_with_an_empty_if_not_found_is_na() {
+    error("XLOOKUP(9,C1:C5,D1:D5,)", ErrorValue::Na);
+    error("XLOOKUP(9,C1:C5,D1:D5,,)", ErrorValue::Na);
+    error("XLOOKUP(9,C1:C5,D1:D5,,0)", ErrorValue::Na);
+    // Found, the empty modes are the defaults: exact, first to last.
+    num("XLOOKUP(2,C1:C5,D1:D5,,,)", 20.0);
+    num("XMATCH(2,C1:C5,,)", 2.0);
+    error("XMATCH(2.5,C1:C5,,)", ErrorValue::Na);
+}
+
+/// UNIQUE's `by_col` (the second argument) compares columns. It was ignored,
+/// so `UNIQUE({1,1,2},TRUE)` came back as all three.
+#[test]
+fn unique_by_col_compares_columns() {
+    spills("UNIQUE({1,1,2},TRUE)", |_, _| {}, &[&["1", "2"]]);
+    spills("UNIQUE({1,1,2},TRUE,TRUE)", |_, _| {}, &[&["2"]]);
+    spills("UNIQUE(C1:C3,,)", |_, _| {}, &[&["1"], &["2"], &["3"]]);
+    spills("UNIQUE({1;1;2},)", |_, _| {}, &[&["1"], &["2"]]);
+}
+
+/// The legacy functions read an empty argument as zero / FALSE. These already
+/// held; they are pinned so a "default every empty argument" change cannot
+/// quietly turn the exact-match idiom into an approximate one.
+#[test]
+fn legacy_functions_read_an_empty_argument_as_zero() {
+    error("VLOOKUP(2.5,C1:D5,2,)", ErrorValue::Na);
+    error("HLOOKUP(2.5,C1:D5,2,)", ErrorValue::Na);
+    error("MATCH(3.5,C1:C5,)", ErrorValue::Na);
+    num("MATCH(3,C1:C5,)", 3.0);
+    num("ROUND(2.5,)", 3.0);
+    num("ROUNDDOWN(2.9,)", 2.0);
+    num("INDEX(C1:D5,3,)", 3.0);
+    num("SUM(INDEX(C1:D5,,2))", 150.0);
+}
+
+// --- XL-FEAT-136: SUBTOTAL over no numbers, and its COUNTA code -------------
+//
+// Microsoft, "SUBTOTAL function": each code is the function it names — 9 is
+// SUM, 3 is COUNTA — so over a range with no numbers 9/4/5/6 are what SUM,
+// MAX, MIN and PRODUCT give there (0), while AVERAGE, STDEV(.P) and VAR(.P)
+// stay #DIV/0!. COUNTA counts every non-empty cell, text and logicals too.
+// "Filtered-out cells are always excluded" — by 1-11 as well as 101-111.
+
+#[test]
+fn subtotal_over_no_numbers_is_what_its_function_gives() {
+    for code in [9.0, 4.0, 5.0, 6.0, 2.0, 109.0, 104.0, 105.0, 106.0, 102.0] {
+        num(&format!("SUBTOTAL({code},E1:E5)"), 0.0);
+    }
+    for code in [1, 7, 8, 10, 11, 101, 107, 108, 110, 111] {
+        error(&format!("SUBTOTAL({code},E1:E5)"), ErrorValue::Div0);
+    }
+    // One number: STDEV.P and VAR.P are 0, the sample forms #DIV/0!.
+    num("SUBTOTAL(8,C1)", 0.0);
+    num("SUBTOTAL(11,C1)", 0.0);
+    error("SUBTOTAL(7,C1)", ErrorValue::Div0);
+    error("SUBTOTAL(10,C1)", ErrorValue::Div0);
+}
+
+#[test]
+fn subtotal_3_counts_every_non_empty_cell() {
+    num("SUBTOTAL(3,E1:E5)", 5.0); // words
+    num("SUBTOTAL(3,F1:F5)", 5.0); // logicals
+    num("SUBTOTAL(103,F1:F5)", 5.0);
+    // C, D, E, F, G full; H has one blank.
+    num("SUBTOTAL(3,C1:H5)", 29.0);
+    num("SUBTOTAL(103,C1:H5)", 29.0);
+    // A formula answering "" is not empty.
+    let (wb, v) = eval_in("SUBTOTAL(3,A1:A2)", |wb, sheet| {
+        put_formula(wb, sheet, (0, 0), "\"\"");
+    });
+    assert_eq!(v, CellValue::Number(1.0), "got {}", show(&wb, &v));
+    // COUNT is still numbers only: C, D and G (H's numbers are text).
+    num("SUBTOTAL(2,C1:H5)", 15.0);
+}
+
+#[test]
+fn subtotal_excludes_filtered_rows_for_every_code() {
+    // C1:C3 = 1, 2, 3; row 1 filtered out, row 2 hidden by hand.
+    let hide = |_: &mut Workbook, sheet: &mut Sheet| {
+        sheet.filter_hidden.insert(0);
+        sheet.hidden_rows.insert(1);
+    };
+    let read = |f: &str| {
+        let (wb, v) = eval_in(f, hide);
+        show(&wb, &v)
+    };
+    assert_eq!(read("SUBTOTAL(9,C1:C3)"), "5", "9 keeps the hidden row");
+    assert_eq!(read("SUBTOTAL(109,C1:C3)"), "3", "109 drops both");
+    assert_eq!(read("SUBTOTAL(3,C1:C3)"), "2");
+    assert_eq!(read("SUBTOTAL(103,C1:C3)"), "1");
+}
+
+// --- XL-FEAT-137: IFERROR/IFNA, and named and structured ranges, lift --------
+//
+// Microsoft, IFERROR: "If value is an array formula, IFERROR returns an array
+// of results for each cell in the range specified in value." A defined name
+// that refers to a range is that range wherever the range would be read.
+
+/// `myRange` → `S!$G$1:$G$3` = 2.5, -3.5, 0.
+fn with_my_range(wb: &mut Workbook, _: &mut Sheet) {
+    wb.defined_names.push(casual_calc_model::DefinedName {
+        name: "myRange".to_owned(),
+        sheet: None,
+        formula: parse("S!$G$1:$G$3").unwrap(),
+        comment: None,
+        attributes: Default::default(),
+    });
+}
+
+#[test]
+fn iferror_and_ifna_spill_element_wise() {
+    spills(
+        "IFERROR(1/(C1:C3-2),\"x\")",
+        |_, _| {},
+        &[&["-1"], &["\"x\""], &["1"]],
+    );
+    spills(
+        "IFNA(IF(C1:C3=2,NA(),C1:C3),0)",
+        |_, _| {},
+        &[&["1"], &["0"], &["3"]],
+    );
+    // IFNA replaces only #N/A.
+    spills(
+        "IFNA(1/(C1:C3-2),0)",
+        |_, _| {},
+        &[&["-1"], &["#DIV/0!"], &["1"]],
+    );
+    // An array fallback is read element by element too.
+    spills(
+        "IFERROR(1/(C1:C3-2),D1:D3)",
+        |_, _| {},
+        &[&["-1"], &["20"], &["1"]],
+    );
+    // Inside an aggregate the whole array is seen, not its first element.
+    num("SUM(IFERROR(1/(C1:C3-2),0))", 0.0);
+    num("SUM(IFERROR(1/(C1:C3-2),5))", 5.0);
+    // A scalar is unchanged.
+    num("IFERROR(1/0,7)", 7.0);
+}
+
+#[test]
+fn a_range_valued_name_is_read_as_its_range() {
+    let (wb, v) = eval_in("SUM(myRange)", with_my_range);
+    assert_eq!(v, CellValue::Number(-1.0), "got {}", show(&wb, &v));
+    let (wb, v) = eval_in("ROWS(myRange)", with_my_range);
+    assert_eq!(v, CellValue::Number(3.0), "got {}", show(&wb, &v));
+    spills(
+        "ROUND(myRange,0)",
+        with_my_range,
+        &[&["3"], &["-4"], &["0"]],
+    );
+    spills("myRange*2", with_my_range, &[&["5"], &["-7"], &["0"]]);
+    // The functions that take a *reference* take a name for one.
+    for (f, want) in [
+        ("SUBTOTAL(9,myRange)", -1.0),
+        ("SUBTOTAL(3,myRange)", 3.0),
+        ("COUNTIF(myRange,\">0\")", 1.0),
+        ("SUMIF(myRange,\"<1\")", -3.5),
+    ] {
+        let (wb, v) = eval_in(f, with_my_range);
+        assert_eq!(v, CellValue::Number(want), "{f}: got {}", show(&wb, &v));
+    }
+}
