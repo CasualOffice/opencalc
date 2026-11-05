@@ -12,8 +12,6 @@ import {
   A1range,
   BD_TITLES,
   COLOR_PALETTE,
-  COL_W,
-  ROW_H,
   TABLE_STYLES,
   TOTALS_FUNCTIONS,
   activePanel,
@@ -55,6 +53,7 @@ import {
   ocOverlayHost,
   off,
   on,
+  openColumnPickList,
   openPanel,
   panelNote,
   panelRangeEls,
@@ -344,6 +343,36 @@ export function formatCellsDialog() {
     pending.push((sel) => wasm.session_set_number_format(state.sheet, sel.r0, sel.c0, sel.r1, sel.c1, code(cat)));
   });
 
+  // Excel's six tabs, in Excel's order: Number, Alignment, Font, Border,
+  // Fill, Protection (XL-UX-044).
+  addTab("Alignment", (page) => {
+    page.append(el("p", "oc-confirm-text", "Horizontal"));
+    const h = el("select", "panel-select");
+    for (const [v, t] of [["", "General"], ["left", "Left"], ["center", "Center"], ["right", "Right"],
+                          ["fill", "Fill"], ["justify", "Justify"],
+                          ["centerContinuous", "Center across selection"], ["distributed", "Distributed"]]) {
+      const o = el("option", null, t); o.value = v; h.appendChild(o);
+    }
+    h.value = cur.al || "";
+    const v = el("select", "panel-select");
+    for (const [val, t] of [["", "Default"], ["top", "Top"], ["middle", "Middle"], ["bottom", "Bottom"],
+                            ["justify", "Justify"], ["distributed", "Distributed"]]) {
+      const o = el("option", null, t); o.value = val; v.appendChild(o);
+    }
+    v.value = { t: "top", m: "middle", b: "bottom", vj: "justify", vd: "distributed" }[cur.va] || "";
+    const wrapL = el("label", "fc-check");
+    const wrapC = document.createElement("input");
+    wrapC.type = "checkbox"; wrapC.checked = !!cur.w;
+    wrapL.append(wrapC, document.createTextNode(" Wrap text"));
+    page.append(el("p", "oc-confirm-text", "Horizontal"), h,
+                el("p", "oc-confirm-text", "Vertical"), v, wrapL);
+    pending.push((s) => {
+      wasm.session_set_align(state.sheet, s.r0, s.c0, s.r1, s.c1, h.value);
+      wasm.session_set_valign(state.sheet, s.r0, s.c0, s.r1, s.c1, v.value);
+      wasm.session_set_text_overflow(state.sheet, s.r0, s.c0, s.r1, s.c1, wrapC.checked ? "wrap" : "overflow");
+    });
+  });
+
   addTab("Font", (page) => {
     const row = el("div", "fc-row");
     const mk = (label, on) => {
@@ -378,48 +407,6 @@ export function formatCellsDialog() {
     });
   });
 
-  addTab("Alignment", (page) => {
-    page.append(el("p", "oc-confirm-text", "Horizontal"));
-    const h = el("select", "panel-select");
-    for (const [v, t] of [["", "General"], ["left", "Left"], ["center", "Center"], ["right", "Right"],
-                          ["fill", "Fill"], ["justify", "Justify"],
-                          ["centerContinuous", "Center across selection"], ["distributed", "Distributed"]]) {
-      const o = el("option", null, t); o.value = v; h.appendChild(o);
-    }
-    h.value = cur.al || "";
-    const v = el("select", "panel-select");
-    for (const [val, t] of [["", "Default"], ["top", "Top"], ["middle", "Middle"], ["bottom", "Bottom"],
-                            ["justify", "Justify"], ["distributed", "Distributed"]]) {
-      const o = el("option", null, t); o.value = val; v.appendChild(o);
-    }
-    v.value = { t: "top", m: "middle", b: "bottom", vj: "justify", vd: "distributed" }[cur.va] || "";
-    const wrapL = el("label", "fc-check");
-    const wrapC = document.createElement("input");
-    wrapC.type = "checkbox"; wrapC.checked = !!cur.w;
-    wrapL.append(wrapC, document.createTextNode(" Wrap text"));
-    page.append(el("p", "oc-confirm-text", "Horizontal"), h,
-                el("p", "oc-confirm-text", "Vertical"), v, wrapL);
-    pending.push((s) => {
-      wasm.session_set_align(state.sheet, s.r0, s.c0, s.r1, s.c1, h.value);
-      wasm.session_set_valign(state.sheet, s.r0, s.c0, s.r1, s.c1, v.value);
-      wasm.session_set_text_overflow(state.sheet, s.r0, s.c0, s.r1, s.c1, wrapC.checked ? "wrap" : "overflow");
-    });
-  });
-
-  addTab("Fill", (page) => {
-    page.append(el("p", "oc-confirm-text", "Background"));
-    const col = document.createElement("input");
-    col.type = "color";
-    col.value = cur.bg ? "#" + cur.bg : "#ffffff";
-    const none = el("button", "cf-preset", "No fill");
-    let cleared = false;
-    none.addEventListener("click", () => { cleared = true; none.classList.add("on"); });
-    col.addEventListener("input", () => { cleared = false; none.classList.remove("on"); });
-    page.append(col, none);
-    pending.push((s) =>
-      wasm.session_set_fill(state.sheet, s.r0, s.c0, s.r1, s.c1, cleared ? "" : col.value.replace("#", ""), -1, 0));
-  });
-
   addTab("Border", (page) => {
     page.append(el("p", "oc-confirm-text", "Placement"));
     const grid = el("div", "fc-borders");
@@ -438,6 +425,53 @@ export function formatCellsDialog() {
     page.append(el("div", "panel-hint", "Uses the line style and colour from the toolbar's border palette."));
     pending.push((s) => {
       if (chosen) wasm.session_set_border(state.sheet, s.r0, s.c0, s.r1, s.c1, chosen, borderStyle, borderColor);
+    });
+  });
+
+  addTab("Fill", (page) => {
+    page.append(el("p", "oc-confirm-text", "Background"));
+    const col = document.createElement("input");
+    col.type = "color";
+    col.value = cur.bg ? "#" + cur.bg : "#ffffff";
+    const none = el("button", "cf-preset", "No fill");
+    let cleared = false;
+    none.addEventListener("click", () => { cleared = true; none.classList.add("on"); });
+    col.addEventListener("input", () => { cleared = false; none.classList.remove("on"); });
+    page.append(col, none);
+    pending.push((s) =>
+      wasm.session_set_fill(state.sheet, s.r0, s.c0, s.r1, s.c1, cleared ? "" : col.value.replace("#", ""), -1, 0));
+  });
+
+  // Protection (XL-UX-044): Excel's two boxes and its sentence about them.
+  // Tri-state over the selection — a box that is ticked for some of the cells
+  // and not others is indeterminate, and OK leaves an untouched indeterminate
+  // box's cells exactly as they were rather than flattening them all to one.
+  // The same engine call the Format ▸ Protection menu's Locked and Hide
+  // formula use (`setCellProtection`).
+  addTab("Protection", (page) => {
+    const s0 = effectiveRange();
+    let now = { locked: true, hidden: false };
+    try { now = JSON.parse(wasm.session_range_protection(state.sheet, s0.r0, s0.c0, s0.r1, s0.c1)); } catch {}
+    const box = (label, value) => {
+      const l = el("label", "fc-check");
+      const c = document.createElement("input");
+      c.type = "checkbox";
+      c.checked = value === true;
+      c.indeterminate = value === null;
+      l.append(c, el("span", null, label));
+      page.appendChild(l);
+      return c;
+    };
+    const locked = box("Locked", now.locked);
+    const hidden = box("Hidden", now.hidden);
+    page.appendChild(el("p", "fc-note",
+      "Locking cells or hiding formulas has no effect until you protect the worksheet "
+        + "(Review tab, Protect group, Protect Sheet button)."));
+    pending.push((s) => {
+      for (const [which, c, was] of [["locked", locked, now.locked], ["hidden", hidden, now.hidden]]) {
+        if (c.indeterminate || c.checked === was) continue;
+        wasm.session_set_cell_protection(state.sheet, s.r0, s.c0, s.r1, s.c1, which, c.checked);
+      }
     });
   });
 
@@ -1315,22 +1349,27 @@ export function buildTablePanel(body) {
 
   const row = el("div", "panel-actions");
   const rm = el("button", "oc-btn", "Convert to range");
-  rm.addEventListener("click", async () => {
-    const cur = currentTable();
-    if (!cur) return;
-    const ok = await confirmModal(
-      `Convert "${cur.name}" to a range`,
-      "The values and formatting stay. The table's name goes, so any formula "
-        + "written as " + cur.name + "[Column] will stop resolving.",
-      "Convert to range",
-    );
-    if (!ok) return;
-    tryEdit(() => wasm.session_remove_table(state.sheet, cur.r0, cur.c0));
-    status.textContent = "converted to a range";
-    closePanel();
-  });
+  rm.addEventListener("click", () => convertTableToRange());
   row.appendChild(rm);
   body.appendChild(row);
+}
+
+/// Convert the table under the active cell to a plain range, having asked.
+/// One function for the table panel's button and the cell menu's Table ›
+/// Convert to Range, so the two ask the same question.
+async function convertTableToRange() {
+  const cur = currentTable();
+  if (!cur) return;
+  const ok = await confirmModal(
+    `Convert "${cur.name}" to a range`,
+    "The values and formatting stay. The table's name goes, so any formula "
+      + "written as " + cur.name + "[Column] will stop resolving.",
+    "Convert to range",
+  );
+  if (!ok) return;
+  tryEdit(() => wasm.session_remove_table(state.sheet, cur.r0, cur.c0));
+  status.textContent = "converted to a range";
+  if (activePanel === "table") closePanel();
 }
 
 export function refreshTablePanel() {
@@ -3031,28 +3070,39 @@ export function refreshValidationPrompt() {
 /// it activates the focused `<button>` natively, and each item's click already
 /// closes the menu and runs its verb.
 export function menuKeyboard(menu, focusFirst) {
-  const items = (scope) => [...scope.children].filter((n) => n.tagName === "BUTTON" && !n.hidden && !n.disabled);
+  // The Paste Options icon row is one stop for Up and Down, as in Excel, and
+  // Left and Right move along it; it stands in the list as its first icon.
+  const items = (scope) => [...scope.children]
+    .map((n) => (n.classList?.contains("ctx-paste-row") ? n.firstElementChild : n))
+    .filter((n) => n && n.tagName === "BUTTON" && !n.hidden && !n.disabled);
   const scopeOf = (n) => n?.closest(".ctx-submenu") ?? menu;
   menu.addEventListener("keydown", (e) => {
     const cur = document.activeElement;
     const scope = menu.contains(cur) ? scopeOf(cur) : menu;
     const list = items(scope);
-    const i = list.indexOf(cur);
+    const row = cur?.parentElement?.classList.contains("ctx-paste-row") ? cur.parentElement : null;
+    const i = row ? list.indexOf(row.firstElementChild) : list.indexOf(cur);
     const go = (j) => { const n = list[(j + list.length) % list.length]; if (n) n.focus(); };
+    const along = (d) => {
+      const icons = [...row.children];
+      icons[(icons.indexOf(cur) + d + icons.length) % icons.length].focus();
+    };
     switch (e.key) {
       case "ArrowDown": go(i + 1); break;
       case "ArrowUp": go(i < 0 ? -1 : i - 1); break;
       case "Home": go(0); break;
       case "End": go(-1); break;
       case "ArrowRight":
-        if (cur?.classList.contains("has-sub")) {
+        if (row) along(1);
+        else if (cur?.classList.contains("has-sub")) {
           cur.click();
           const sub = cur.nextElementSibling;
           if (sub && !sub.hidden) items(sub)[0]?.focus();
         }
         break;
       case "ArrowLeft":
-        if (scope !== menu) { scope.hidden = true; scope.previousElementSibling?.focus(); }
+        if (row) along(-1);
+        else if (scope !== menu) { scope.hidden = true; scope.previousElementSibling?.focus(); }
         break;
       case "Escape":
         if (scope !== menu) { scope.hidden = true; scope.previousElementSibling?.focus(); break; }
@@ -3068,29 +3118,37 @@ export function menuKeyboard(menu, focusFirst) {
   if (focusFirst) items(menu)[0]?.focus({ preventScroll: true });
 }
 
-export function cellMenu(x, y, fromKeyboard = false) {
-  closeSheetMenu();
-  const menu = document.createElement("div");
-  menu.className = "popmenu ctx-menu";
-  menu.id = "sheet-ctx";
+/// The parts every grid context menu is built from: rows, separators,
+/// submenus, and Excel's Paste Options icon row. One builder for the cell menu
+/// and both header menus, so the three cannot drift into different shapes for
+/// the same verbs — which is how the cell menu came to say "Paste special ›"
+/// while the header menu said nothing at all (XL-UX-034).
+function ctxMenuBuilder(menu) {
   const hideSubs = () => menu.querySelectorAll(".ctx-submenu").forEach((s) => (s.hidden = true));
-  const sep = () => menu.appendChild(el("div", "menu-sep"));
-  const item = (label, danger, fn) => {
+  const run = (fn) => { closeSheetMenu(); canvas.focus(); fn(); };
+  const item = (label, fn, { danger = false } = {}) => {
     const b = el("button", danger ? "danger" : null, label);
     b.addEventListener("mouseenter", hideSubs);
-    b.addEventListener("click", () => { closeSheetMenu(); canvas.focus(); fn(); });
+    b.addEventListener("click", () => run(fn));
     menu.appendChild(b);
+    return b;
   };
+  const sep = () => menu.appendChild(el("div", "menu-sep"));
   // A submenu row (label + ›); its child popmenu is nested so it is removed
   // with the parent, and fixed-positioned to the parent row's right edge.
+  // `entries` are `[label, fn, {checked}]`.
   const submenu = (label, entries) => {
     const b = el("button", "has-sub", label);
     b.setAttribute("aria-haspopup", "true");
     const sub = el("div", "popmenu ctx-submenu");
     sub.hidden = true;
-    for (const [lbl, danger, fn] of entries) {
-      const c = el("button", danger ? "danger" : null, lbl);
-      c.addEventListener("click", (e) => { e.stopPropagation(); closeSheetMenu(); canvas.focus(); fn(); });
+    for (const [lbl, fn, opts = {}] of entries) {
+      const c = el("button", null, lbl);
+      if (opts.checked !== undefined) {
+        c.setAttribute("role", "menuitemcheckbox");
+        c.setAttribute("aria-checked", opts.checked ? "true" : "false");
+      }
+      c.addEventListener("click", (e) => { e.stopPropagation(); run(fn); });
       sub.appendChild(c);
     }
     const openSub = () => {
@@ -3110,121 +3168,212 @@ export function cellMenu(x, y, fromKeyboard = false) {
     menu.appendChild(b);
     menu.appendChild(sub);
   };
-  const span = () => { const r = effectiveRange(); return { r, rows: r.r1 - r.r0 + 1, cols: r.c1 - r.c0 + 1 }; };
-
-  item("Cut", false, () => doCut());
-  item("Copy", false, () => doCopy());
-  item("Paste", false, () => doPaste());
-  submenu("Paste special", [
-    ["Paste special…", false, () => pasteSpecialDialog()],
-    ["Values only", false, () => doPasteMode("values")],
-    ["Formulas only", false, () => doPasteMode("formulas")],
-    ["Formats only", false, () => doPasteMode("formats")],
-    ["Transpose", false, () => doPasteMode("transpose")],
-  ]);
-  sep();
-  // Insert/delete *cells*, shifting the rest. The engine adjusts references to
-  // the moved cells, as Excel does, so nothing is asked (XL-UX-173).
-  const shiftCells = (insert, vertical, label) => () => {
-    const r = effectiveRange();
-    tryEdit(() => wasm.session_shift_cells(state.sheet, r.r0, r.c0, r.r1, r.c1, insert, vertical));
-    status.textContent = label.toLowerCase();
+  // Excel's "Paste Options:" — a heading over a row of icons, each named by
+  // its tooltip with the access key Excel gives it. Paste Link is Excel's
+  // sixth and is left out: OpenCalc cannot paste a link (docs/95 rule 9).
+  // The icons come from the shell's sprite; without it (an editor mounted
+  // with no ribbon) each button shows its access key instead of drawing blank.
+  const pasteOptions = () => {
+    const head = el("div", "ctx-heading", "Paste Options:");
+    head.addEventListener("mouseenter", hideSubs);
+    menu.appendChild(head);
+    const row = el("div", "ctx-paste-row");
+    row.setAttribute("role", "group");
+    row.setAttribute("aria-label", "Paste Options");
+    const root = ocOverlayHost.getRootNode ? ocOverlayHost.getRootNode() : document;
+    const sprite = !!root.getElementById?.("oc-fluent-icons");
+    for (const [label, key, icon, fn] of [
+      ["Paste", "P", "clipboard_paste", () => doPaste()],
+      ["Values", "V", "number_symbol", () => doPasteMode("values")],
+      ["Formulas", "F", "math_formula", () => doPasteMode("formulas")],
+      ["Transpose", "T", "arrow_clockwise", () => doPasteMode("transpose")],
+      ["Formatting", "R", "paint_brush", () => doPasteMode("formats")],
+    ]) {
+      const b = el("button", "ctx-paste-btn");
+      b.setAttribute("aria-label", label);
+      b.title = `${label} (${key})`;
+      if (sprite) {
+        const NS = "http://www.w3.org/2000/svg";
+        const svg = document.createElementNS(NS, "svg");
+        svg.setAttribute("viewBox", "0 0 20 20");
+        svg.setAttribute("width", "18");
+        svg.setAttribute("height", "18");
+        svg.setAttribute("aria-hidden", "true");
+        const use = document.createElementNS(NS, "use");
+        use.setAttribute("href", `#fi-${icon}`);
+        svg.appendChild(use);
+        b.appendChild(svg);
+      } else {
+        b.textContent = key;
+      }
+      b.addEventListener("mouseenter", hideSubs);
+      b.addEventListener("click", () => run(fn));
+      row.appendChild(b);
+    }
+    menu.appendChild(row);
   };
-  submenu("Insert cells", [
-    ["Shift cells down", false, shiftCells(true, true, "Inserted, shifted down")],
-    ["Shift cells right", false, shiftCells(true, false, "Inserted, shifted right")],
-  ]);
-  submenu("Delete cells", [
-    ["Shift cells up", false, shiftCells(false, true, "Deleted, shifted up")],
-    ["Shift cells left", false, shiftCells(false, false, "Deleted, shifted left")],
-  ]);
-  submenu("Insert", [
-    ["Row above", false, () => { const { r, rows } = span(); tryEdit(() => wasm.session_insert_rows(state.sheet, r.r0, rows)); }],
-    ["Row below", false, () => { const { r, rows } = span(); tryEdit(() => wasm.session_insert_rows(state.sheet, r.r1 + 1, rows)); }],
-    ["Column left", false, () => { const { r, cols } = span(); tryEdit(() => wasm.session_insert_columns(state.sheet, r.c0, cols)); }],
-    ["Column right", false, () => { const { r, cols } = span(); tryEdit(() => wasm.session_insert_columns(state.sheet, r.c1 + 1, cols)); }],
-  ]);
-  submenu("Delete", [
-    ["Row", true, () => { const { r, rows } = span(); tryEdit(() => wasm.session_delete_rows(state.sheet, r.r0, rows)); }],
-    ["Column", true, () => { const { r, cols } = span(); tryEdit(() => wasm.session_delete_columns(state.sheet, r.c0, cols)); }],
-  ]);
-  submenu("Hide", [
-    ["Row", false, () => { const { r } = span(); tryEdit(() => wasm.session_hide_rows(state.sheet, r.r0, r.r1)); }],
-    ["Column", false, () => { const { r } = span(); tryEdit(() => wasm.session_hide_cols(state.sheet, r.c0, r.c1)); }],
-    ["Unhide rows/cols", false, () => { const { r } = span(); tryEdit(() => { wasm.session_unhide_rows(state.sheet, r.r0, r.r1); wasm.session_unhide_cols(state.sheet, r.c0, r.c1); }); }],
-  ]);
+  return { item, sep, submenu, pasteOptions };
+}
+
+/// Excel's cell context menu (XL-UX-034): Cut, Copy, Paste Options:, Paste
+/// Special…, Insert…, Delete…, Clear Contents, Filter ›, Sort ›, New Comment,
+/// Format Cells…, Pick From Drop-down List…, Define Name…, Link.
+///
+/// What Excel has and this leaves out, because OpenCalc does not have the
+/// feature: Smart Lookup, Translate, Quick Analysis, Get Data from
+/// Table/Range, New Note (the model keeps notes and comments as one), the
+/// colour and icon entries of Filter and Sort, and the table-aware Insert and
+/// Delete submenus.
+export function cellMenu(x, y, fromKeyboard = false) {
+  closeSheetMenu();
+  const menu = document.createElement("div");
+  menu.className = "popmenu ctx-menu";
+  menu.id = "sheet-ctx";
+  const { item, sep, submenu, pasteOptions } = ctxMenuBuilder(menu);
+  const { row, col } = state.sel;
+
+  item("Cut", () => doCut());
+  item("Copy", () => doCopy());
+  pasteOptions();
+  item("Paste Special…", () => pasteSpecialDialog());
   sep();
-  submenu("Clear", [
-    ["Contents", false, () => clearSelection()],
-    ["Formats", false, () => clearFormats()],
-    ["All (incl. formats)", true, () => clearAll()],
-  ]);
+  // Excel's Insert… and Delete… are the dialog Ctrl++ and Ctrl+- open, with
+  // its four choices — not two submenus each for cells and for lines.
+  item("Insert…", () => insertDeleteDialog(true));
+  item("Delete…", () => insertDeleteDialog(false));
+  item("Clear Contents", () => clearSelection());
+  sep();
+  submenu("Filter", filterMenuEntries(row, col));
+  // Excel names the sort for what is in the active cell: A to Z for text,
+  // Smallest to Largest for a number.
+  let numeric = false;
+  try { numeric = !!JSON.parse(wasm.session_cells(state.sheet, row, col, row, col))[0]?.n; } catch {}
   submenu("Sort", [
-    [`${colName(state.sel.col)} A → Z`, false, () => sortRange(false)],
-    [`${colName(state.sel.col)} Z → A`, false, () => sortRange(true)],
-    ["Custom sort…", false, () => sortDialog()],
+    [numeric ? "Sort Smallest to Largest" : "Sort A to Z", () => sortRange(false)],
+    [numeric ? "Sort Largest to Smallest" : "Sort Z to A", () => sortRange(true)],
+    ["Custom Sort…", () => sortDialog()],
   ]);
+  // Inside a table Excel adds its Table submenu here; a plain range has none,
+  // and "Create table…" was never on Excel's menu.
+  let table = null;
+  try { table = JSON.parse(wasm.session_table_at(state.sheet, row, col)); } catch {}
+  if (table) {
+    submenu("Table", [
+      ["Totals Row", () => {
+        try {
+          wasm.session_table_totals(state.sheet, row, col, table.totals === 0);
+          status.textContent = table.totals > 0 ? "totals row hidden" : "totals row shown";
+        } catch (e) { statusError(errText(e)); }
+        draw();
+      }, { checked: table.totals > 0 }],
+      ["Convert to Range", () => convertTableToRange()],
+    ]);
+  }
   sep();
-  // The things you reach for *from a cell* — previously only on the toolbar or
-  // the menu bar, which is a long way to go for something the right-click is
-  // already asking about.
-  item("Format cells…", false, () => formatCellsDialog());
-  // The verb reflects what is actually there, so the menu is not offering to
-  // insert a comment onto a cell that already has a thread.
-  item(
-    readThread(state.sel.row, state.sel.col) ? "Show comments" : "Insert comment",
-    false,
-    () => { if (activePanel !== "note") togglePanel("note"); else panelNote?.refresh(); },
-  );
+  // A threaded comment: New Comment on a cell without one; on a cell with
+  // one, Excel offers New Reply and Delete Comment.
+  if (readThread(row, col)) {
+    item("New Reply", () => openCommentPanel());
+    item("Delete Comment", () => {
+      try { wasm.session_set_comment(state.sheet, row, col, "", "", ""); }
+      catch (e) { statusError(errText(e)); return; }
+      panelNote?.render?.();
+      draw();
+    });
+  } else {
+    item("New Comment", () => openCommentPanel());
+  }
+  sep();
+  item("Format Cells…", () => formatCellsDialog());
+  // Alt+Down's list, under Excel's name for it: the validation list where the
+  // cell has one, otherwise the text already in the column. Opened on the
+  // next tick: the click that chose this item is still on its way to the
+  // document, where this menu's close-on-click listener would take the list
+  // down the moment it appeared.
+  item("Pick From Drop-down List…", () => setTimeout(() => (validationChevron ? openValidationMenu() : openColumnPickList()), 0));
+  item("Define Name…", () => nameDialog());
   // Excel's link entries: "Link" on a plain cell; on a linked one Edit
   // Hyperlink…, Open Hyperlink and Remove Hyperlink (XL-UX-164). A HYPERLINK()
   // formula is edited in its formula, so it offers only to open.
-  (() => {
-    const { row, col } = state.sel;
-    let has = null;
-    try { has = JSON.parse(wasm.session_hyperlink_at(state.sheet, row, col)); } catch {}
-    if (!has || has.formula) item("Link", false, () => hyperlinkDialog());
-    if (has && !has.formula) item("Edit Hyperlink…", false, () => hyperlinkDialog());
-    if (has) item("Open Hyperlink", false, () => followHyperlink(row, col));
-    if (has && !has.formula) item("Remove Hyperlink", false, () => removeHyperlink());
-  })();
-  item(
-    (() => {
-      let t = null;
-      try { t = JSON.parse(wasm.session_table_at(state.sheet, state.sel.row, state.sel.col)); } catch {}
-      return t ? "Convert to range…" : "Create table…";
-    })(),
-    false,
-    () => tableDialog(),
-  );
-  (() => {
-    let t = null;
-    try { t = JSON.parse(wasm.session_table_at(state.sheet, state.sel.row, state.sel.col)); } catch {}
-    if (!t) return;
-    item(t.totals > 0 ? "Hide totals row" : "Show totals row", false, () => {
-      try {
-        wasm.session_table_totals(state.sheet, state.sel.row, state.sel.col, t.totals === 0);
-        status.textContent = t.totals > 0 ? "totals row hidden" : "totals row shown";
-      } catch (e) { statusError(errText(e)); }
-      draw();
-    });
-  })();
-  item("Define name…", false, () => nameDialog());
-  item("Filter", false, () => toggleFilter());
+  let has = null;
+  try { has = JSON.parse(wasm.session_hyperlink_at(state.sheet, row, col)); } catch {}
+  if (!has || has.formula) item("Link", () => hyperlinkDialog());
+  if (has && !has.formula) item("Edit Hyperlink…", () => hyperlinkDialog());
+  if (has) item("Open Hyperlink", () => followHyperlink(row, col));
+  if (has && !has.formula) item("Remove Hyperlink", () => removeHyperlink());
   positionMenu(menu, x, y);
   menuKeyboard(menu, fromKeyboard);
 }
 
-/// The largest size this dialog will accept, in device pixels.
+/// The comment panel on the active cell — New Comment and New Reply both.
+function openCommentPanel() {
+  if (activePanel !== "note") togglePanel("note");
+  else panelNote?.refresh?.();
+}
+
+/// The cell menu's Filter submenu, for the active cell's column.
 ///
-/// Excel's own ceilings are 255 characters of column width (~1790 px) and 409.5
-/// points of row height (~546 px); this is deliberately looser than both, and
-/// exists only so that a slipped digit — `1200` typed as `12000` — is answered
-/// in the field instead of leaving the sheet unnavigable and the mistake
-/// undoable only by Ctrl+Z. The engine itself does not bound this
-/// (`resize_px_to_twips` clamps at `i32::MAX`), so nothing below this line
-/// would refuse it.
-const MAX_SIZE_PX = 2000;
+/// Excel's: Clear Filter From "<heading>" while that column is filtering, and
+/// Filter by Selected Cell's Value, which turns the filter on if it is off and
+/// keeps only the rows whose value matches this cell's. The colour, font
+/// colour and icon variants are left out — OpenCalc cannot filter by colour.
+function filterMenuEntries(row, col) {
+  const entries = [];
+  let info = null;
+  try {
+    const j = wasm.session_filter_info(state.sheet);
+    if (j && j !== "null") info = JSON.parse(j);
+  } catch {}
+  const inside = info && col >= info.c0 && col <= info.c1;
+  if (inside) {
+    let payload = null;
+    try { payload = JSON.parse(wasm.session_filter_values(state.sheet, col)); } catch {}
+    const active = payload && (payload.custom || (payload.values || []).some((v) => !v.c));
+    if (active) {
+      let heading = "";
+      try { heading = JSON.parse(wasm.session_cells(state.sheet, info.r0, col, info.r0, col))[0]?.t ?? ""; } catch {}
+      entries.push([`Clear Filter From "${heading || colName(col)}"`, () => {
+        tryEdit(() => wasm.session_set_filter_values(state.sheet, col, []));
+        afterFilterChange();
+      }]);
+    }
+  }
+  entries.push(["Filter by Selected Cell's Value", () => filterBySelectedValue(row, col)]);
+  return entries;
+}
+
+function filterBySelectedValue(row, col) {
+  let info = null;
+  try {
+    const j = wasm.session_filter_info(state.sheet);
+    if (j && j !== "null") info = JSON.parse(j);
+  } catch {}
+  if (!info || col < info.c0 || col > info.c1) {
+    // No filter over this cell yet: the same range Ctrl+Shift+L would take.
+    let box = null;
+    try {
+      const j = wasm.session_filter_range_for(state.sheet, row, col, row, col);
+      if (j && j !== "null") box = JSON.parse(j);
+    } catch {}
+    if (!box || row <= box.r0) { status.textContent = "nothing to filter"; return; }
+    tryEdit(() => wasm.session_set_filter_range(state.sheet, box.r0, box.c0, box.r1, box.c1));
+  }
+  let shown = "";
+  try { shown = JSON.parse(wasm.session_cells(state.sheet, row, col, row, col))[0]?.t ?? ""; } catch {}
+  let values = [];
+  try { values = JSON.parse(wasm.session_filter_values(state.sheet, col)).values || []; } catch {}
+  const hit = values.find((v) => v.v === shown);
+  if (!hit) { status.textContent = "nothing to filter"; return; }
+  tryEdit(() => wasm.session_set_filter_values(state.sheet, col, [hit.v]));
+  afterFilterChange();
+}
+
+/// Excel's limits for the Column Width and Row Height dialogs, in their own
+/// units: 255 characters, 409 points (Microsoft, "Change the column width and
+/// row height"). The engine stores up to 409.5, which a file may carry, and
+/// refuses past it (`casual_calc_model::units`); the dialog states Excel's.
+const MAX_COL_CHARS = 255;
+const MAX_ROW_POINTS = 409.5;
 
 /// Ask for a column width or row height — in the application, not in a browser
 /// prompt (`UX-DLG-02`).
@@ -3242,6 +3391,12 @@ const MAX_SIZE_PX = 2000;
 /// *when* the selection is read: a prompt was synchronous, so `selRect()` after
 /// it was still the selection the menu was opened on — this captures it up
 /// front so the same is true of an answer that arrives a minute later.
+///
+/// **In Excel's units** (`XL-UX-035`): a column in characters of the default
+/// font (8.43 for a fresh one), a row in points (15). It used to be pixels,
+/// so "set column B to 20" — Excel's number — made a 20 px sliver. The
+/// conversion is the engine's, the one the xlsx reader and writer use; a copy
+/// here would be a second answer to how wide 8.43 is.
 export function sizeDialog(axis, index) {
   const isCol = axis === "col";
   const r = selRect();
@@ -3251,11 +3406,9 @@ export function sizeDialog(axis, index) {
   // and `editor.dialog-grid-layout` both call — where reading `session_row_px`
   // at `undefined` threw and the title read "Row NaN height".
   const at = Number.isInteger(index) ? index : (isCol ? r.c0 : r.r0);
-  let current = 0;
+  let current = isCol ? 8.43 : 15;
   try {
-    current = isCol
-      ? JSON.parse(wasm.session_col_px(sheet, at, 1))[0]
-      : JSON.parse(wasm.session_row_px(sheet, at, 1))[0];
+    current = isCol ? wasm.session_col_width_chars(sheet, at) : wasm.session_row_height_points(sheet, at);
   } catch {}
   const n = isCol ? r.c1 - r.c0 + 1 : r.r1 - r.r0 + 1;
   // Sheets names the lines it is about to resize in the title, and the count is
@@ -3274,8 +3427,9 @@ export function sizeDialog(axis, index) {
   if (n > 1) body.appendChild(el("p", "oc-confirm-text", `Applies to ${span}.`));
 
   const form = el("div", "oc-size-form");
-  const label = el("label", "oc-form-label", isCol ? "Width" : "Height");
-  label.htmlFor = "oc-size-px";
+  // Excel's box labels, and no unit beside the field — Excel shows none.
+  const label = el("label", "oc-form-label", isCol ? "Column width:" : "Row height:");
+  label.htmlFor = "oc-size-value";
   const cell = el("div", "oc-form-cell");
   const line = el("div", "oc-size-line");
   const input = el("input", "oc-form-field oc-size-field");
@@ -3283,12 +3437,11 @@ export function sizeDialog(axis, index) {
   // anything it cannot parse, which is exactly the "destroys what you typed"
   // behaviour the prompt had. `inputmode` still brings up a numeric keypad.
   input.type = "text";
-  input.id = "oc-size-px";
-  input.inputMode = "numeric";
+  input.id = "oc-size-value";
+  input.inputMode = "decimal";
   input.autocomplete = "off";
-  input.value = String(Math.round(current || (isCol ? COL_W : ROW_H)));
-  const unit = el("span", "oc-size-unit", "px");
-  line.append(input, unit);
+  input.value = String(current);
+  line.append(input);
   cell.append(line);
   form.append(label, cell);
 
@@ -3313,38 +3466,37 @@ export function sizeDialog(axis, index) {
 
   // A message box over the dialog, as Excel's (docs/95 rule 8). The typed
   // text stays, selected: a refusal that clears the field makes the person
-  // retype the part that was right. The words are ours while this dialog
-  // measures in pixels where Excel's measures in points and characters.
-  const refuse = (message) => messageBox(message, { field: input });
+  // retype the part that was right. One sentence for anything out of range or
+  // not a number, Excel's: "Column width must be between 0 and 255."
+  // [unverified] from memory of Excel 365.
+  const limit = isCol ? MAX_COL_CHARS : 409;
+  const refusal = `${isCol ? "Column width" : "Row height"} must be between 0 and ${limit}.`;
+  const refuse = () => messageBox(refusal, { field: input });
 
   const apply = () => {
     const typed = input.value.trim();
     const value = typed === "" ? NaN : Number(typed);
-    const what = isCol ? "width" : "height";
-    if (!Number.isFinite(value)) {
-      refuse(typed
-        ? `"${typed}" is not a number of pixels — type something like 120.`
-        : `Enter a ${what} in pixels, such as 120.`);
+    if (!Number.isFinite(value) || value < 0 || value > (isCol ? MAX_COL_CHARS : MAX_ROW_POINTS)) {
+      refuse();
       return;
     }
-    // Not "0 hides the line": `resize_px_to_twips` floors every size at 8 px
-    // (`crates/casual-calc-wasm/src/axis.rs`), so 0 becomes 8 rather than
-    // hiding anything. Hiding is the menu's own "Hide rows/columns".
-    if (value < 0) { refuse(`A ${what} cannot be negative — use Hide to hide ${isCol ? "a column" : "a row"}.`); return; }
-    if (value > MAX_SIZE_PX) { refuse(`The largest ${what} is ${MAX_SIZE_PX} px.`); return; }
-    const px = Math.round(value);
     close();
     canvas.focus();
+    // Zero hides the line, as it does in Excel; the size it had is kept for
+    // Unhide, because hiding is a flag beside the size rather than a size.
+    if (value === 0) {
+      tryEdit(() => (isCol
+        ? wasm.session_hide_cols(sheet, r.c0, r.c1)
+        : wasm.session_hide_rows(sheet, r.r0, r.r1)));
+      status.textContent = `hid ${span}`;
+      return;
+    }
     tryEdit(() => {
-      // One edit for the whole band, not one per line. Each
-      // `session_set_col_width` is its own `session.edit`, so the loop this
-      // replaces cost three undo steps to put back a three-column resize —
-      // while the *drag* path has always used the range call
-      // (`editor.core.js`), so the menu and the drag disagreed about what one
-      // Ctrl+Z means. The person who resizes three columns is the one who
-      // finds out.
-      if (isCol) wasm.session_set_col_width_range(sheet, r.c0, r.c1, px);
-      else wasm.session_set_row_height_range(sheet, r.r0, r.r1, px);
+      // One edit for the whole band, not one per line: the drag path has
+      // always used a range call, and the menu and the drag must agree about
+      // what one Ctrl+Z means.
+      if (isCol) wasm.session_set_col_width_chars_range(sheet, r.c0, r.c1, value);
+      else wasm.session_set_row_height_points_range(sheet, r.r0, r.r1, value);
     });
     status.textContent = `resized ${span}`;
   };
@@ -3392,66 +3544,56 @@ export function sizeDialog(axis, index) {
   input.select();
 }
 
+/// Excel's row-header and column-header context menu (XL-UX-034): Cut, Copy,
+/// Paste Options:, Paste Special…, Insert, Delete, Clear Contents, Format
+/// Cells…, Row Height… / Column Width…, Hide, Unhide.
+///
+/// Insert puts as many lines as are selected above (or to the left of) the
+/// selection, which is the only place Excel's puts them; the "below" and
+/// "right" variants and Autofit were ours, and Autofit is still on Home ▸
+/// Format.
 export function headerMenu(axis, x, y, fromKeyboard = false) {
   closeSheetMenu();
   const isCol = axis === "col";
   const menu = el("div", "popmenu ctx-menu");
   menu.id = "sheet-ctx";
-  const item = (label, danger, fn) => {
-    const b = el("button", danger ? "danger" : null, label);
-    b.addEventListener("click", () => { closeSheetMenu(); canvas.focus(); fn(); });
-    menu.appendChild(b);
-  };
-  const sep = () => menu.appendChild(el("div", "menu-sep"));
+  const { item, sep, pasteOptions } = ctxMenuBuilder(menu);
   const span = () => {
     const r = effectiveRange();
     return { r, n: isCol ? r.c1 - r.c0 + 1 : r.r1 - r.r0 + 1 };
   };
-  const what = isCol ? "column" : "row";
-  const plural = (n) => (n === 1 ? what : `${what}s`);
 
-  item("Cut", false, () => doCut());
-  item("Copy", false, () => doCopy());
-  item("Paste", false, () => doPaste());
+  item("Cut", () => doCut());
+  item("Copy", () => doCopy());
+  pasteOptions();
+  item("Paste Special…", () => pasteSpecialDialog());
   sep();
-  const { n } = span();
-  item(isCol ? `Insert ${n} ${plural(n)} left` : `Insert ${n} ${plural(n)} above`, false, () => {
-    const { r, n: count } = span();
+  item("Insert", () => {
+    const { r, n } = span();
     tryEdit(() => (isCol
-      ? wasm.session_insert_columns(state.sheet, r.c0, count)
-      : wasm.session_insert_rows(state.sheet, r.r0, count)));
+      ? wasm.session_insert_columns(state.sheet, r.c0, n)
+      : wasm.session_insert_rows(state.sheet, r.r0, n)));
   });
-  item(isCol ? `Insert ${n} ${plural(n)} right` : `Insert ${n} ${plural(n)} below`, false, () => {
-    const { r, n: count } = span();
+  item("Delete", () => {
+    const { r, n } = span();
     tryEdit(() => (isCol
-      ? wasm.session_insert_columns(state.sheet, r.c1 + 1, count)
-      : wasm.session_insert_rows(state.sheet, r.r1 + 1, count)));
+      ? wasm.session_delete_columns(state.sheet, r.c0, n)
+      : wasm.session_delete_rows(state.sheet, r.r0, n)));
   });
-  item(`Delete ${n} ${plural(n)}`, true, () => {
-    const { r, n: count } = span();
-    tryEdit(() => (isCol
-      ? wasm.session_delete_columns(state.sheet, r.c0, count)
-      : wasm.session_delete_rows(state.sheet, r.r0, count)));
-  });
-  item("Clear contents", false, () => clearSelection());
+  item("Clear Contents", () => clearSelection());
   sep();
-  item(isCol ? "Column width…" : "Row height…", false, () => {
+  item("Format Cells…", () => formatCellsDialog());
+  item(isCol ? "Column Width…" : "Row Height…", () => {
     const r = selRect();
     sizeDialog(axis, isCol ? r.c0 : r.r0);
   });
-  item(isCol ? "Autofit width" : "Autofit height", false, () => {
-    const r = selRect();
-    if (isCol) for (let c = r.c0; c <= r.c1; c += 1) autofitColumn(c);
-    else for (let row = r.r0; row <= r.r1; row += 1) autofitRow(row);
-  });
-  sep();
-  item(`Hide ${plural(n)}`, false, () => {
+  item("Hide", () => {
     const { r } = span();
     tryEdit(() => (isCol
       ? wasm.session_hide_cols(state.sheet, r.c0, r.c1)
       : wasm.session_hide_rows(state.sheet, r.r0, r.r1)));
   });
-  item("Unhide", false, () => {
+  item("Unhide", () => {
     const { r } = span();
     tryEdit(() => (isCol
       ? wasm.session_unhide_cols(state.sheet, r.c0, r.c1)

@@ -68,10 +68,10 @@ test("Enter on a focused menu item runs it", async ({ page }) => {
   await page.locator("#grid").focus();
   await page.keyboard.press("Shift+F10");
   await expect(page.locator("#sheet-ctx")).toBeVisible();
-  // Down to "Format cells…" and run it.
+  // Down to "Format Cells…" and run it.
   for (let i = 0; i < 30; i++) {
     const t = await page.evaluate(() => document.activeElement?.textContent?.trim());
-    if (t === "Format cells…") break;
+    if (t === "Format Cells…") break;
     await page.keyboard.press("ArrowDown");
   }
   await page.keyboard.press("Enter");

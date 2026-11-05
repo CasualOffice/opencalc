@@ -83,11 +83,11 @@ const SITES = [
 
   ["Column Width, not a number", async (page) => {
     await page.evaluate(() => window.opencalcEditor.sizeDialog("col", 1));
-    await page.locator("#oc-size-px").fill("wide");
+    await page.locator("#oc-size-value").fill("wide");
     await primary(page).click();
   }, {
-    text: "\"wide\" is not a number of pixels — type something like 120.",
-    icon: "warning", title: "Column Width", field: "#oc-size-px", value: "wide",
+    text: "Column width must be between 0 and 255.",
+    icon: "warning", title: "Column Width", field: "#oc-size-value", value: "wide",
   }],
 
   ["New Name, an invalid name", async (page) => {
