@@ -185,7 +185,13 @@ pub fn session_validation_error(sheet: usize, row: u32, col: u32, input: &str) -
         }
         // The model decides; this only phrases the refusal. `None` means the
         // rule needs the formula engine, so nothing is blocked on it.
-        let number = trimmed.parse::<f64>().ok();
+        //
+        // The number is the one the entry *becomes* — `50%` is 0.5, `$1,200`
+        // is 1200, `3/15/2026` a date serial — read by the same decision the
+        // commit makes (`XL-FEAT-127`). It used to be `trimmed.parse::<f64>()`,
+        // which reads none of those, so a decimal rule between 0 and 1 refused
+        // the `50%` Excel accepts.
+        let number = s.typed_number(sheet, CellRef::new(row, col), input);
         if rule.accepts(trimmed, number) != Some(false) {
             return String::new();
         }
@@ -419,6 +425,30 @@ pub fn session_set_validation(
     error_text: &str,
 ) -> Result<(), JsError> {
     let (rr0, cc0, rr1, cc1) = (r0.min(r1), c0.min(c1), r0.max(r1), c0.max(c1));
+    let kind = casual_calc_model::DvKind::from_ooxml(kind);
+    // A bound typed as a cell takes an entry — `50%`, `$1,000`, `1/1/2026` —
+    // is stored as the number it means, as Excel's dialog stores a date bound
+    // as its serial (`XL-FEAT-127`). Left as typed, the rule cannot compare
+    // against it and so refuses nothing. A bound that is not a number
+    // (`TODAY()`, a reference) is kept as written.
+    let numeric = matches!(
+        kind,
+        casual_calc_model::DvKind::Whole
+            | casual_calc_model::DvKind::Decimal
+            | casual_calc_model::DvKind::Date
+            | casual_calc_model::DvKind::Time
+            | casual_calc_model::DvKind::TextLength
+    );
+    let operand = |text: &str| {
+        let text = text.trim();
+        if !numeric {
+            return text.to_owned();
+        }
+        with_session(|s| s.operand_number(text))
+            .flatten()
+            .map_or_else(|| text.to_owned(), |n| format!("{n}"))
+    };
+    let (f1, f2) = (operand(f1), operand(f2));
     edit_sheet_metadata(sheet, move |_, data| {
         // Replace whatever covered this block, as the list setter does.
         data.validations.retain(|v| {
@@ -429,10 +459,10 @@ pub fn session_set_validation(
         });
         let range = CellRange::new(CellRef::new(rr0, cc0), CellRef::new(rr1, cc1));
         data.validations.push(casual_calc_model::DataValidation {
-            kind: casual_calc_model::DvKind::from_ooxml(kind),
+            kind,
             operator: casual_calc_model::DvOperator::from_ooxml(op),
-            formula1: f1.trim().to_owned(),
-            formula2: f2.trim().to_owned(),
+            formula1: f1,
+            formula2: f2,
             allow_blank,
             error_text: error_text.trim().to_owned(),
             ..casual_calc_model::DataValidation::none(range)

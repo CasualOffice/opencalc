@@ -4698,11 +4698,12 @@ fn three_d_references_follow_sheet_edits_as_excel_does() {
     assert_eq!(text(&wb).as_deref(), Some("SUM(Jan:March!B5)"));
 
     // Down to one sheet it is a plain reference, and deleting that sheet is
-    // what deleting any referenced sheet is: the name stays, and reads #REF!.
+    // what deleting any referenced sheet is: the reference breaks, in the
+    // formula, so a later sheet called `Jan` cannot revive it (`PIPE-01`).
     apply(&mut wb, Operation::RemoveSheet { index: 2 }).unwrap(); // March
     assert_eq!(text(&wb).as_deref(), Some("SUM(Jan!B5)"));
     apply(&mut wb, Operation::RemoveSheet { index: 1 }).unwrap(); // Jan
-    assert_eq!(text(&wb).as_deref(), Some("SUM(Jan!B5)"));
+    assert_eq!(text(&wb).as_deref(), Some("SUM(#REF!)"));
 }
 
 /// `B2#` and `@B2:B9` are calls in the tree (`ANCHORARRAY`, `SINGLE`), so they
@@ -5147,5 +5148,129 @@ fn group_since_folds_a_gesture_into_one_undo_step() {
         value_at(&wb, at),
         CellValue::Number(3.0),
         "ungrouped: width only"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Every formula naming a removed sheet (`PIPE-01`).
+// ---------------------------------------------------------------------------
+
+/// `S` and `Gone`, with `S` naming `Gone` from everywhere a formula lives: two
+/// cells (a reference and a range, one in another case), a defined name, a
+/// name scoped to `Gone` itself, a conditional format and a validation. `S!A4`
+/// names only `S` and must come through untouched.
+fn workbook_naming_a_sheet_to_be_removed() -> Workbook {
+    let mut wb = workbook();
+    wb.sheets.push(named_sheet(3, "Gone"));
+    set_formula(&mut wb, 0, 0, 0, "Gone!A1*2");
+    set_formula(&mut wb, 0, 1, 0, "SUM(gone!A1:B2)+1");
+    set_formula(&mut wb, 0, 3, 0, "S!B1+1");
+    let named = |n: &str, sheet: Option<SheetId>, f: &str| casual_calc_model::DefinedName {
+        name: n.to_owned(),
+        sheet,
+        formula: parse(f).unwrap(),
+        comment: None,
+        attributes: Default::default(),
+    };
+    let gone_id = wb.sheets[1].id;
+    wb.defined_names = vec![
+        named("Rate", None, "Gone!$B$1"),
+        named("Kept", None, "S!$C$1"),
+        named("Local", Some(gone_id), "Gone!$C$1"),
+    ];
+    wb.sheets[0]
+        .conditional_formats
+        .push(casual_calc_model::ConditionalFormat {
+            range: merge(0, 0, 3, 0),
+            rule: casual_calc_model::CfRule::Expression("Gone!$A$1>0".to_owned()),
+            fill: "FF0000".to_owned(),
+            font_color: None,
+            bold: false,
+            priority: 1,
+            stop_if_true: false,
+        });
+    let mut list = validation_over(0, 3);
+    list.kind = casual_calc_model::DvKind::List;
+    list.formula1 = "Gone!$A$1:$A$3".to_owned();
+    wb.sheets[0].validations.push(list);
+    wb
+}
+
+type FormulaSurface = (Vec<Option<String>>, Vec<(String, String)>, String, String);
+
+/// What every formula on `S` and every defined name reads, in one value, so a
+/// test compares the whole surface at once.
+fn formulas_naming(wb: &Workbook) -> FormulaSurface {
+    let cells = (0..4).map(|row| formula_text(wb, 0, row, 0)).collect();
+    let names = wb
+        .defined_names
+        .iter()
+        .map(|n| (n.name.clone(), n.formula.to_string()))
+        .collect();
+    let cf = match &wb.sheets[0].conditional_formats[0].rule {
+        casual_calc_model::CfRule::Expression(text) => text.clone(),
+        other => format!("{other:?}"),
+    };
+    let dv = wb.sheets[0].validations[0].formula1.clone();
+    (cells, names, cf, dv)
+}
+
+/// **A removed sheet's name does not survive in the formulas that used it.**
+///
+/// The formula used to keep `Gone!A1`, reading `#REF!` only because nothing
+/// answered to the name — so the next sheet to be called `Gone` (an import, a
+/// duplicate, a collaborator's new tab) silently became what every one of them
+/// computed from. Excel writes the break into the formula; so does this, with
+/// the spelling `DeleteRows` already uses for a reference it took away.
+#[test]
+fn a_recreated_sheet_does_not_revive_formulas_naming_the_removed_one() {
+    let mut wb = workbook_naming_a_sheet_to_be_removed();
+    apply(&mut wb, Operation::RemoveSheet { index: 1 }).unwrap();
+    apply(
+        &mut wb,
+        Operation::InsertSheet {
+            index: 1,
+            sheet: Box::new(named_sheet(9, "Gone")),
+        },
+    )
+    .unwrap();
+
+    let (cells, names, cf, dv) = formulas_naming(&wb);
+    assert_eq!(
+        cells,
+        vec![
+            Some("#REF!*2".to_owned()),
+            Some("SUM(#REF!)+1".to_owned()),
+            None,
+            Some("S!B1+1".to_owned()),
+        ],
+        "cell formulas must not name the removed sheet"
+    );
+    assert_eq!(
+        names,
+        vec![
+            ("Rate".to_owned(), "#REF!".to_owned()),
+            ("Kept".to_owned(), "S!$C$1".to_owned()),
+        ],
+        "a name pointing at the sheet breaks; a name scoped to it leaves with it"
+    );
+    assert_eq!(cf, "#REF!>0", "a conditional format's formula breaks too");
+    assert_eq!(dv, "#REF!", "and so does a validation's");
+}
+
+/// Undo puts every one of them back exactly.
+#[test]
+fn undoing_a_sheet_removal_restores_every_formula_that_named_it() {
+    let mut wb = workbook_naming_a_sheet_to_be_removed();
+    let before = formulas_naming(&wb);
+    let inverse = apply(&mut wb, Operation::RemoveSheet { index: 1 }).unwrap();
+    apply(&mut wb, inverse).unwrap();
+    assert_eq!(wb.sheets[1].name, "Gone");
+    assert_eq!(formulas_naming(&wb), before);
+    let local = wb.defined_names.iter().find(|n| n.name == "Local").unwrap();
+    assert_eq!(
+        local.sheet,
+        Some(wb.sheets[1].id),
+        "the scoped name is back on its sheet"
     );
 }
