@@ -396,10 +396,12 @@ fn date(text: &str, now: f64) -> Option<(f64, &'static str)> {
             break;
         }
         return match parts.as_slice() {
-            // Year first: `2026/12/31`. With dashes it is ISO, which the
-            // importer's reader owns.
+            // Year first: `2026/12/31`. With dashes and both fields padded
+            // it is ISO, which the importer's reader owns; `2024-5-7` is not
+            // ISO but is still a date to Excel en-US, so it is read here.
             [y, m, d] if y.len() == 4 => {
-                if sep == '-' || m.len() > 2 || d.len() > 2 {
+                let iso = sep == '-' && m.len() == 2 && d.len() == 2;
+                if iso || m.len() > 2 || d.len() > 2 {
                     return None;
                 }
                 Some((
@@ -453,8 +455,19 @@ fn date(text: &str, now: f64) -> Option<(f64, &'static str)> {
     }
 }
 
-/// A time of day: `(fraction, with_seconds, twelve_hour, elapsed)`.
-fn time(text: &str) -> Option<(f64, bool, bool, bool)> {
+/// A time of day as typed.
+struct Clock {
+    /// The fraction of a day; past 1 for an elapsed `25:00`.
+    fraction: f64,
+    seconds: bool,
+    /// The seconds carried a decimal part: `13:30:15.5`.
+    tenths: bool,
+    twelve_hour: bool,
+    elapsed: bool,
+}
+
+/// `h:mm`, `h:mm:ss`, `h:mm:ss.0`, each with an optional `AM`/`PM`.
+fn time(text: &str) -> Option<Clock> {
     let upper = text.to_ascii_uppercase();
     let (body, meridiem) = if let Some(b) = upper.strip_suffix("AM") {
         (b.trim_end(), Some(false))
@@ -486,7 +499,21 @@ fn time(text: &str) -> Option<(f64, bool, bool, bool)> {
     }
     let mut h: u32 = hours.parse().ok()?;
     let m = field(minutes)?;
-    let s = field(seconds)?;
+    // Only the seconds may carry a decimal part, and it needs a digit after
+    // the point: `13:30:15.` and `13:30.5` are text.
+    let (whole, tenths) = match seconds.map(|s| s.split_once('.')) {
+        Some(Some((w, f))) if !f.is_empty() && f.bytes().all(|b| b.is_ascii_digit()) => {
+            (Some(w), Some(f))
+        }
+        Some(Some(_)) => return None,
+        Some(None) => (seconds, None),
+        None => (None, None),
+    };
+    let s = f64::from(field(whole)?)
+        + match tenths {
+            Some(f) => format!("0.{f}").parse::<f64>().ok()?,
+            None => 0.0,
+        };
     match meridiem {
         Some(pm) => {
             if h > 12 {
@@ -500,49 +527,83 @@ fn time(text: &str) -> Option<(f64, bool, bool, bool)> {
         None if hours.len() > 2 && h < 24 => return None,
         None => {}
     }
-    let frac = (f64::from(h) * 3600.0 + f64::from(m) * 60.0 + f64::from(s)) / 86400.0;
-    Some((frac, seconds.is_some(), meridiem.is_some(), h >= 24))
+    let fraction = (f64::from(h) * 3600.0 + f64::from(m) * 60.0 + s) / 86400.0;
+    Some(Clock {
+        fraction,
+        seconds: seconds.is_some(),
+        tenths: tenths.is_some(),
+        twelve_hour: meridiem.is_some(),
+        elapsed: h >= 24,
+    })
 }
 
-fn time_format(seconds: bool, twelve_hour: bool) -> &'static str {
-    match (seconds, twelve_hour) {
-        (false, false) => "h:mm",
-        (true, false) => "h:mm:ss",
-        (false, true) => "h:mm AM/PM",
-        (true, true) => "h:mm:ss AM/PM",
+/// The format Excel applies to a typed time.
+///
+/// **Fractional seconds: `h:mm:ss.0` is this product's choice, not a verified
+/// Excel one.** Excel appears to apply `mm:ss.0` (built-in format 47), which
+/// hides the hour; until that is checked against Excel the hour stays on
+/// screen. The value is exact either way.
+fn time_format(clock: &Clock) -> &'static str {
+    match (clock.seconds, clock.tenths, clock.twelve_hour) {
+        (false, _, false) => "h:mm",
+        (true, false, false) => "h:mm:ss",
+        (true, true, false) => "h:mm:ss.0",
+        (false, _, true) => "h:mm AM/PM",
+        (true, false, true) => "h:mm:ss AM/PM",
+        (true, true, true) => "h:mm:ss.0 AM/PM",
     }
 }
 
+/// A date, a space, and a time — tried at each space, since the date part may
+/// contain spaces of its own (`Dec 31, 2026 1:45 PM`). The two halves are
+/// returned apart: their sum has already rounded the time away to the date's
+/// magnitude, which `TIMEVALUE` must not inherit.
+///
+/// A padded ISO date is taken here only when the whole text is not ISO
+/// (`2024-05-07 1:30 PM`): `2024-05-07 13:30` stays the importer's, with the
+/// format it gives.
+fn date_then_time(text: &str, now: f64) -> Option<(f64, Clock)> {
+    let iso_date = |d: &str| {
+        crate::parse_iso_datetime(text)
+            .is_none()
+            .then(|| crate::parse_iso_datetime(d))
+            .flatten()
+            .filter(|(_, code)| *code == "yyyy-mm-dd")
+            .map(|(day, _)| day)
+    };
+    for (at, _) in text.match_indices(' ') {
+        let (d, t) = (&text[..at], text[at + 1..].trim_start());
+        let Some(clock) = time(t) else {
+            continue;
+        };
+        if clock.elapsed {
+            continue;
+        }
+        let d = d.trim_end();
+        let Some(day) = date(d, now).map(|(day, _)| day).or_else(|| iso_date(d)) else {
+            continue;
+        };
+        return Some((day, clock));
+    }
+    None
+}
+
 fn date_time(text: &str, now: f64) -> Option<Entry> {
-    if let Some((frac, seconds, twelve, elapsed)) = time(text) {
+    if let Some(clock) = time(text) {
         // Past 24 hours Excel keeps the whole duration, shown as `[h]:mm:ss`.
-        let format = if elapsed {
+        let format = if clock.elapsed {
             "[h]:mm:ss"
         } else {
-            time_format(seconds, twelve)
+            time_format(&clock)
         };
-        return Entry::number(frac, Some(format.to_owned()), Kind::Time);
+        return Entry::number(clock.fraction, Some(format.to_owned()), Kind::Time);
     }
     if let Some((serial, format)) = date(text, now) {
         return Entry::number(serial, Some(format.to_owned()), Kind::Date);
     }
-    // A date, a space, and a time — tried at each space, since the date part
-    // may contain spaces of its own (`Dec 31, 2026 1:45 PM`).
-    for (at, _) in text.match_indices(' ') {
-        let (d, t) = (&text[..at], text[at + 1..].trim_start());
-        let Some((frac, seconds, twelve, elapsed)) = time(t) else {
-            continue;
-        };
-        if elapsed {
-            continue;
-        }
-        let Some((day, _)) = date(d.trim_end(), now) else {
-            continue;
-        };
-        let format = format!("m/d/yyyy {}", time_format(seconds, twelve));
-        return Entry::number(day + frac, Some(format), Kind::DateTime);
-    }
-    None
+    let (day, clock) = date_then_time(text, now)?;
+    let format = format!("m/d/yyyy {}", time_format(&clock));
+    Entry::number(day + clock.fraction, Some(format), Kind::DateTime)
 }
 
 // ---------------------------------------------------------------- formulas
@@ -579,6 +640,35 @@ pub fn value_of(text: &str, now: f64) -> Option<(f64, Kind)> {
         return Some((serial, kind));
     }
     plain_decimal(text).map(|n| (n, Kind::Plain))
+}
+
+/// The date and the time of day that formula text names, each read on its
+/// own: `(day serial, time fraction)`, with `None` for a half the text does not
+/// have. `None` overall when the text names neither (`5`, `1,234`).
+///
+/// `DATEVALUE` and `TIMEVALUE` keep one half each. They cannot take it from
+/// [`value_of`]'s sum: near serial 45 000 a double keeps only about eleven
+/// significant digits of the time, so `fract()` of the sum disagrees with the
+/// time read alone from the eleventh digit — enough for `=` to tell them apart.
+pub fn date_and_time_of(text: &str, now: f64) -> Option<(Option<f64>, Option<f64>)> {
+    let text = text.trim();
+    let (serial, kind) = value_of(text, now)?;
+    match kind {
+        Kind::Date => Some((Some(serial), None)),
+        Kind::Time => Some((None, Some(serial))),
+        Kind::DateTime => {
+            if let Some((day, clock)) = date_then_time(text, now) {
+                return Some((Some(day), Some(clock.fraction)));
+            }
+            // ISO: `yyyy-mm-dd hh:mm` or `yyyy-mm-ddThh:mm`, each half
+            // through the importer's own reader.
+            let (d, t) = text.split_once(['T', ' '])?;
+            let day = crate::parse_iso_datetime(d)?.0;
+            let fraction = crate::parse_iso_datetime(t)?.0;
+            Some((Some(day), Some(fraction)))
+        }
+        _ => None,
+    }
 }
 
 /// `42`, `-0.5`, `+3`, `.5`, `007`, `5.`: a sign, digits and one point.
@@ -628,6 +718,42 @@ mod tests {
         ] {
             assert_eq!(value_of(text, 0.0), None, "{text:?}");
         }
+    }
+
+    #[test]
+    fn typing_reads_an_unpadded_iso_date() {
+        let e = parse("2024-5-7", 0.0).expect("2024-5-7 is a date");
+        assert_eq!((e.number, e.kind), (45419.0, Kind::Date));
+        // The padded form stays with the importer's ISO reader, with a time
+        // it reads too; a time it does not read makes it ours.
+        assert_eq!(parse("2024-05-07", 0.0), None);
+        assert_eq!(parse("2024-05-07 13:30", 0.0), None);
+        let e = parse("2024-05-07 1:30 PM", 0.0).expect("a date and a time");
+        assert_eq!((e.number, e.kind), (45419.0 + 13.5 / 24.0, Kind::DateTime));
+        let e = parse("2024-5-7 1:30 PM", 0.0).expect("a date and a time");
+        assert_eq!((e.number, e.kind), (45419.0 + 13.5 / 24.0, Kind::DateTime));
+    }
+
+    #[test]
+    fn typing_reads_fractional_seconds() {
+        let e = parse("13:30:15.5", 0.0).expect("13:30:15.5 is a time");
+        assert_eq!(e.number, (13.0 * 3600.0 + 30.0 * 60.0 + 15.5) / 86400.0);
+        assert_eq!(e.format.as_deref(), Some("h:mm:ss.0"));
+        for text in ["13:30:15.", "13:30:15.5.5", "13:30.5", "13:30:59.99999x"] {
+            assert_eq!(parse(text, 0.0), None, "{text:?}");
+        }
+    }
+
+    #[test]
+    fn date_and_time_halves_are_read_apart() {
+        let alone = date_and_time_of("6:01", 0.0).unwrap();
+        assert_eq!(alone.0, None);
+        let both = date_and_time_of("5/17/2024 6:01", 0.0).unwrap();
+        assert_eq!(both, (Some(45429.0), alone.1));
+        let iso = date_and_time_of("2024-05-17 06:01", 0.0).unwrap();
+        assert_eq!(iso, both);
+        assert_eq!(date_and_time_of("5", 0.0), None);
+        assert_eq!(date_and_time_of("1,234", 0.0), None);
     }
 
     #[test]

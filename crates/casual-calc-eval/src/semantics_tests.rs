@@ -226,6 +226,63 @@ fn datevalue_and_timevalue_read_what_typed_entry_reads() {
     }
 }
 
+/// An ISO date need not be zero-padded: Excel en-US reads `2024-5-7` as
+/// 7 May 2024. The private DATEVALUE parser this replaced read it, so moving to
+/// the shared reader must not lose it.
+#[test]
+fn datevalue_reads_an_unpadded_iso_date() {
+    const MAY_7_2024: f64 = 45419.0;
+    assert_eq!(num("DATEVALUE(\"2024-5-7\")"), MAY_7_2024);
+    assert_eq!(num("DATEVALUE(\"2024-5-07\")"), MAY_7_2024);
+    assert_eq!(num("DATEVALUE(\"2024-05-7\")"), MAY_7_2024);
+    assert_eq!(num("VALUE(\"2024-5-7\")"), MAY_7_2024);
+    assert_eq!(num("DATEVALUE(\"2024-5-7 13:30\")"), MAY_7_2024);
+    // A padded ISO date with a time the ISO reader does not take — a 12-hour
+    // clock, fractional seconds — is still a date and a time.
+    assert_eq!(num("DATEVALUE(\"2024-05-07 1:30 PM\")"), MAY_7_2024);
+    assert_eq!(num("DATEVALUE(\"2024-05-07 13:30:15.5\")"), MAY_7_2024);
+    assert_eq!(num("TIMEVALUE(\"2024-05-07 1:30 PM\")"), 13.5 / 24.0);
+    assert_eq!(
+        eval("DATEVALUE(\"2024-2-30\")"),
+        CellValue::Error(ErrorValue::Value)
+    );
+}
+
+/// `h:mm:ss.0` — a decimal fraction of a second — is a time to Excel, on
+/// entry and in TIMEVALUE.
+#[test]
+fn timevalue_reads_fractional_seconds() {
+    let expected = (13.0 * 3600.0 + 30.0 * 60.0 + 15.5) / 86400.0;
+    assert_eq!(num("TIMEVALUE(\"13:30:15.5\")"), expected);
+    assert_eq!(num("TIMEVALUE(\"1:30:15.5 PM\")"), expected);
+    assert_eq!(num("TIMEVALUE(\"12/31/2026 13:30:15.5\")"), expected);
+    for bad in [
+        "TIMEVALUE(\"13:30:60.5\")",
+        "TIMEVALUE(\"13:30:15.\")",
+        "TIMEVALUE(\"13:30.5\")",
+    ] {
+        assert_eq!(eval(bad), CellValue::Error(ErrorValue::Value), "{bad}");
+    }
+}
+
+/// TIMEVALUE of date-and-time text is the time read on its own, not the
+/// fraction of the summed serial: at a serial near 45 000 the sum has already
+/// lost about five digits of the time, so `fract()` of it is wrong from the
+/// eleventh digit and even `=` (to 15 digits) tells the two apart. 6:01 is not
+/// exact in binary, which is what makes the difference visible.
+#[test]
+fn timevalue_of_a_date_and_time_is_the_time_alone() {
+    let six_01 = num("TIMEVALUE(\"6:01\")");
+    assert_eq!(num("TIMEVALUE(\"5/17/2024 6:01\")"), six_01);
+    assert_eq!(num("TIMEVALUE(\"2024-05-17 06:01\")"), six_01);
+    assert_eq!(num("TIMEVALUE(\"2024-05-17T06:01\")"), six_01);
+    assert!(truth("TIMEVALUE(\"5/17/2024 6:01\")=TIMEVALUE(\"6:01\")"));
+    assert_eq!(
+        num("TIMEVALUE(\"12/31/9999 23:59:59\")"),
+        num("TIMEVALUE(\"23:59:59\")")
+    );
+}
+
 /// The coercion an operator applies to text is the same reading.
 #[test]
 fn implicit_coercion_reads_what_typed_entry_reads() {

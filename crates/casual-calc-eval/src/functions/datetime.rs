@@ -653,7 +653,7 @@ pub(crate) fn eval_datevalue(
     args: &[Expr],
     time: bool,
 ) -> Value {
-    use casual_calc_io::entry::{Kind, value_of};
+    use casual_calc_io::entry::date_and_time_of;
     if args.len() != 1 {
         return Value::Error(ErrorValue::Value);
     }
@@ -661,13 +661,14 @@ pub(crate) fn eval_datevalue(
         Value::Error(e) => return Value::Error(e),
         v => v.as_text().unwrap_or_default(),
     };
-    // No clock, as for every coercion in a formula: see `text_to_number`.
-    let Some((serial, kind)) = value_of(&text, 0.0) else {
-        return Value::Error(ErrorValue::Value);
-    };
-    match (time, kind) {
-        (false, Kind::Date | Kind::DateTime) => Value::Number(serial.floor()),
-        (true, Kind::Time | Kind::DateTime) => Value::Number(serial.fract()),
+    // No clock, as for every coercion in a formula: see `text_to_number`. The
+    // two halves come apart rather than as one serial: `fract()` of a
+    // date-and-time sum has lost the time's last digits to the date's
+    // magnitude.
+    match (time, date_and_time_of(&text, 0.0)) {
+        (false, Some((Some(day), _))) => Value::Number(day.floor()),
+        // A time past 24 hours (`25:00`) keeps its time of day.
+        (true, Some((_, Some(fraction)))) => Value::Number(fraction.fract()),
         _ => Value::Error(ErrorValue::Value),
     }
 }
