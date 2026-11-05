@@ -200,3 +200,110 @@ test("the row header's Insert puts the new rows above, as many as are selected",
   await page.locator("#sheet-ctx > button", { hasText: /^Insert$/ }).click();
   await expect.poll(() => ed(page, () => window.opencalcEditor.wasmApi().session_cell_input(0, 4, 0))).toBe("moved");
 });
+
+// With nothing copied in the workbook, Excel greys out Paste Special… and the
+// Paste Options icons that need a copied range. Ours left them live, and each
+// did nothing but write "clipboard is empty" to the status bar — a dead
+// control on three menus. Paste stays live: it reads the OS clipboard, which
+// may hold text from another application.
+for (const which of ["cell", "row", "col"]) {
+  test(`with nothing copied, the ${which} menu greys Paste Special… and the copy-only Paste Options`, async ({ page }) => {
+    await boot(page);
+    await ed(page, (w) => {
+      const e = window.opencalcEditor;
+      if (w === "cell") { e.selectForTest(1, 1); e.cellMenu(200, 120); }
+      else if (w === "row") { e.selectRow(3, false); e.headerMenu("row", 200, 120); }
+      else { e.selectColumn(3, false); e.headerMenu("col", 200, 120); }
+    }, which);
+    const state = () => page.evaluate(() => ({
+      special: document.querySelector("#sheet-ctx > button.ctx-paste-special")?.disabled ?? null,
+      icons: [...document.querySelectorAll("#sheet-ctx .ctx-paste-row button")].map((b) => [b.getAttribute("aria-label"), b.disabled]),
+    }));
+    expect(await state()).toEqual({
+      special: true,
+      icons: [["Paste", false], ["Values", true], ["Formulas", true], ["Transpose", true], ["Formatting", true]],
+    });
+    // Greyed is a colour a person can see, not only an attribute.
+    const colours = await page.evaluate(() => {
+      const on = document.querySelector("#sheet-ctx > button");
+      const off = document.querySelector("#sheet-ctx > button.ctx-paste-special");
+      return [getComputedStyle(on).color, getComputedStyle(off).color];
+    });
+    expect(colours[1]).not.toBe(colours[0]);
+  });
+}
+
+test("once something is copied, Paste Special… and every Paste Options icon are live", async ({ page }) => {
+  await boot(page);
+  await ed(page, () => {
+    window.opencalcEditor.wasmApi().session_set_cell(0, 0, 0, "7");
+    window.opencalcEditor.selectForTest(0, 0);
+  });
+  await page.locator("#grid").focus();
+  await page.keyboard.press("Control+c");
+  await openCellMenu(page, 0, 2);
+  expect(await page.evaluate(() => [
+    document.querySelector("#sheet-ctx > button.ctx-paste-special").disabled,
+    ...[...document.querySelectorAll("#sheet-ctx .ctx-paste-row button")].map((b) => b.disabled),
+  ])).toEqual([false, false, false, false, false, false]);
+});
+
+// Table › Totals Row is a toggle. Excel draws a check beside it while the
+// table has a totals row; the label alone no longer says which state it is in
+// (it used to read "Hide totals row" / "Show totals row"), so the mark is the
+// only thing that tells a sighted user. Its state is aria-pressed on the
+// button: these menus are buttons in a div, and role=menuitemcheckbox there
+// broke ARIA's rule that one must sit inside a role=menu.
+test("Table › Totals Row shows a check mark while the table has a totals row", async ({ page }) => {
+  await boot(page);
+  await ed(page, () => {
+    const a = window.opencalcEditor.wasmApi();
+    a.session_set_cell(0, 0, 0, "Name");
+    a.session_set_cell(0, 1, 0, "x");
+    a.session_create_table(0, 0, 0, 1, 0, "Table1", true);
+  });
+  const mark = async () => {
+    await openCellMenu(page, 1, 0);
+    await page.locator("#sheet-ctx > button.has-sub", { hasText: /^Table$/ }).hover();
+    const b = page.locator("#sheet-ctx .ctx-submenu:not([hidden]) button", { hasText: /^Totals Row$/ });
+    await expect(b).toBeVisible();
+    return b.evaluate((n) => ({
+      checked: n.getAttribute("aria-pressed"),
+      // A menuitemcheckbox needs a role=menu parent these menus do not have.
+      role: n.getAttribute("role"),
+      mark: getComputedStyle(n, "::before").content,
+      markVisible: getComputedStyle(n, "::before").visibility,
+    }));
+  };
+  const off = await mark();
+  expect(off.checked).toBe("false");
+  expect(off.role).toBeNull();
+  expect(["none", "\"\"", "normal"]).toContain(off.mark);
+  await page.locator("#sheet-ctx .ctx-submenu:not([hidden]) button", { hasText: /^Totals Row$/ }).click();
+  const on = await mark();
+  expect(on.checked).toBe("true");
+  expect(on.mark).toBe("\"✓\"");
+  expect(on.markVisible).toBe("visible");
+});
+
+// Left and Right move along the Paste Options row. A greyed icon cannot take
+// focus, so stepping onto one left focus where it was and Right went dead
+// after Paste; the arrows step over greyed icons, as Excel's do.
+test("Left and Right in Paste Options step over the greyed icons", async ({ page }) => {
+  await boot(page);
+  await ed(page, () => {
+    window.opencalcEditor.wasmApi().session_set_cell(0, 0, 0, "7");
+    window.opencalcEditor.selectForTest(0, 0);
+  });
+  await page.locator("#grid").focus();
+  await page.keyboard.press("Control+c");
+  await openCellMenu(page, 0, 2);
+  // Grey Formulas the way an empty clipboard would, keeping the others live.
+  await page.evaluate(() => { document.querySelector('#sheet-ctx .ctx-paste-row button[aria-label="Formulas"]').disabled = true; });
+  await page.locator('#sheet-ctx .ctx-paste-row button[aria-label="Values"]').focus();
+  await page.keyboard.press("ArrowRight");
+  const focused = () => page.evaluate(() => document.activeElement?.getAttribute("aria-label"));
+  expect(await focused()).toBe("Transpose");
+  await page.keyboard.press("ArrowLeft");
+  expect(await focused()).toBe("Values");
+});

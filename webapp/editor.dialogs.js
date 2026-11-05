@@ -3083,9 +3083,11 @@ export function menuKeyboard(menu, focusFirst) {
     const row = cur?.parentElement?.classList.contains("ctx-paste-row") ? cur.parentElement : null;
     const i = row ? list.indexOf(row.firstElementChild) : list.indexOf(cur);
     const go = (j) => { const n = list[(j + list.length) % list.length]; if (n) n.focus(); };
+    // A greyed icon cannot take focus; stepping onto one would leave focus
+    // where it was and the arrow dead, so the row is its live icons only.
     const along = (d) => {
-      const icons = [...row.children];
-      icons[(icons.indexOf(cur) + d + icons.length) % icons.length].focus();
+      const icons = [...row.children].filter((n) => !n.disabled);
+      icons[(icons.indexOf(cur) + d + icons.length) % icons.length]?.focus();
     };
     switch (e.key) {
       case "ArrowDown": go(i + 1); break;
@@ -3126,8 +3128,11 @@ export function menuKeyboard(menu, focusFirst) {
 function ctxMenuBuilder(menu) {
   const hideSubs = () => menu.querySelectorAll(".ctx-submenu").forEach((s) => (s.hidden = true));
   const run = (fn) => { closeSheetMenu(); canvas.focus(); fn(); };
-  const item = (label, fn, { danger = false } = {}) => {
-    const b = el("button", danger ? "danger" : null, label);
+  // `disabled` greys a row out, as Excel does Paste Special… with nothing
+  // copied; menuKeyboard already steps over a disabled row.
+  const item = (label, fn, { danger = false, disabled = false, cls = null } = {}) => {
+    const b = el("button", [danger ? "danger" : null, cls].filter(Boolean).join(" ") || null, label);
+    b.disabled = disabled;
     b.addEventListener("mouseenter", hideSubs);
     b.addEventListener("click", () => run(fn));
     menu.appendChild(b);
@@ -3136,7 +3141,11 @@ function ctxMenuBuilder(menu) {
   const sep = () => menu.appendChild(el("div", "menu-sep"));
   // A submenu row (label + ›); its child popmenu is nested so it is removed
   // with the parent, and fixed-positioned to the parent row's right edge.
-  // `entries` are `[label, fn, {checked}]`.
+  // `entries` are `[label, fn, {checked}]`. A `checked` entry is a toggle:
+  // Excel draws a check beside it while it is on (editor.css). Its state is
+  // `aria-pressed`, not `role=menuitemcheckbox` — these menus are buttons in
+  // a div, and a menuitemcheckbox outside a role=menu breaks ARIA's
+  // required-parent rule.
   const submenu = (label, entries) => {
     const b = el("button", "has-sub", label);
     b.setAttribute("aria-haspopup", "true");
@@ -3145,8 +3154,8 @@ function ctxMenuBuilder(menu) {
     for (const [lbl, fn, opts = {}] of entries) {
       const c = el("button", null, lbl);
       if (opts.checked !== undefined) {
-        c.setAttribute("role", "menuitemcheckbox");
-        c.setAttribute("aria-checked", opts.checked ? "true" : "false");
+        c.classList.add("ctx-toggle");
+        c.setAttribute("aria-pressed", opts.checked ? "true" : "false");
       }
       c.addEventListener("click", (e) => { e.stopPropagation(); run(fn); });
       sub.appendChild(c);
@@ -3182,14 +3191,19 @@ function ctxMenuBuilder(menu) {
     row.setAttribute("aria-label", "Paste Options");
     const root = ocOverlayHost.getRootNode ? ocOverlayHost.getRootNode() : document;
     const sprite = !!root.getElementById?.("oc-fluent-icons");
-    for (const [label, key, icon, fn] of [
-      ["Paste", "P", "clipboard_paste", () => doPaste()],
-      ["Values", "V", "number_symbol", () => doPasteMode("values")],
-      ["Formulas", "F", "math_formula", () => doPasteMode("formulas")],
-      ["Transpose", "T", "arrow_clockwise", () => doPasteMode("transpose")],
-      ["Formatting", "R", "paint_brush", () => doPasteMode("formats")],
+    // Values, Formulas, Transpose and Formatting paste a range copied in this
+    // workbook; with none, Excel greys them out. Paste stays live — it reads
+    // the OS clipboard, which may hold another application's text.
+    const copied = hasCopiedRange();
+    for (const [label, key, icon, fn, needsCopy] of [
+      ["Paste", "P", "clipboard_paste", () => doPaste(), false],
+      ["Values", "V", "number_symbol", () => doPasteMode("values"), true],
+      ["Formulas", "F", "math_formula", () => doPasteMode("formulas"), true],
+      ["Transpose", "T", "arrow_clockwise", () => doPasteMode("transpose"), true],
+      ["Formatting", "R", "paint_brush", () => doPasteMode("formats"), true],
     ]) {
       const b = el("button", "ctx-paste-btn");
+      b.disabled = needsCopy && !copied;
       b.setAttribute("aria-label", label);
       b.title = `${label} (${key})`;
       if (sprite) {
@@ -3212,7 +3226,14 @@ function ctxMenuBuilder(menu) {
     }
     menu.appendChild(row);
   };
-  return { item, sep, submenu, pasteOptions };
+  // Paste Special… needs a range copied here, as the icons above do.
+  const pasteSpecial = () => item("Paste Special…", () => pasteSpecialDialog(),
+    { disabled: !hasCopiedRange(), cls: "ctx-paste-special" });
+  return { item, sep, submenu, pasteOptions, pasteSpecial };
+}
+
+function hasCopiedRange() {
+  try { return !!wasm.session_clip_has(); } catch { return false; }
 }
 
 /// Excel's cell context menu (XL-UX-034): Cut, Copy, Paste Options:, Paste
@@ -3229,13 +3250,13 @@ export function cellMenu(x, y, fromKeyboard = false) {
   const menu = document.createElement("div");
   menu.className = "popmenu ctx-menu";
   menu.id = "sheet-ctx";
-  const { item, sep, submenu, pasteOptions } = ctxMenuBuilder(menu);
+  const { item, sep, submenu, pasteOptions, pasteSpecial } = ctxMenuBuilder(menu);
   const { row, col } = state.sel;
 
   item("Cut", () => doCut());
   item("Copy", () => doCopy());
   pasteOptions();
-  item("Paste Special…", () => pasteSpecialDialog());
+  pasteSpecial();
   sep();
   // Excel's Insert… and Delete… are the dialog Ctrl++ and Ctrl+- open, with
   // its four choices — not two submenus each for cells and for lines.
@@ -3557,7 +3578,7 @@ export function headerMenu(axis, x, y, fromKeyboard = false) {
   const isCol = axis === "col";
   const menu = el("div", "popmenu ctx-menu");
   menu.id = "sheet-ctx";
-  const { item, sep, pasteOptions } = ctxMenuBuilder(menu);
+  const { item, sep, pasteOptions, pasteSpecial } = ctxMenuBuilder(menu);
   const span = () => {
     const r = effectiveRange();
     return { r, n: isCol ? r.c1 - r.c0 + 1 : r.r1 - r.r0 + 1 };
@@ -3566,7 +3587,7 @@ export function headerMenu(axis, x, y, fromKeyboard = false) {
   item("Cut", () => doCut());
   item("Copy", () => doCopy());
   pasteOptions();
-  item("Paste Special…", () => pasteSpecialDialog());
+  pasteSpecial();
   sep();
   item("Insert", () => {
     const { r, n } = span();
