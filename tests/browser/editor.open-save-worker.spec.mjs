@@ -167,9 +167,11 @@ test("a large save keeps the editor drawing frames", async ({ page }) => {
   test.setTimeout(120_000);
   await boot(page);
   await fillLarge(page);
-  const pageMs = await pageThreadMs(page, "save");
-  const limit = gapLimit("save", pageMs);
 
+  // Measured first, calibrated after (`CI-041`). The calibration is a
+  // deliberate ~400 ms save on the page thread; run first, its garbage could be
+  // collected inside the measured window, and CI saw a 183–247 ms "task" there
+  // in a run whose own save left the thread idle.
   await startFrames(page);
   const downloaded = page.waitForEvent("download", { timeout: 60_000 });
   await page.evaluate(async () => {
@@ -180,6 +182,8 @@ test("a large save keeps the editor drawing frames", async ({ page }) => {
   const download = await downloaded;
   await page.evaluate(() => window.__saving);
   const m = await stopFrames(page);
+  const pageMs = await pageThreadMs(page, "save");
+  const limit = gapLimit("save", pageMs);
   console.log(`save of ${ROWS * 5} cells: ${JSON.stringify(m)}; page-thread save ${pageMs} ms; limit ${limit} ms`);
 
   expect(fs.statSync(await download.path()).size).toBeGreaterThan(100_000);

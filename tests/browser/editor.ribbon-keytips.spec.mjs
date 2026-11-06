@@ -156,6 +156,9 @@ test("KeyTips on every tab are unique and none is the start of another", async (
       const keys = [];
       const walk = (it) => {
         if (it.kind === "rows") { it.rows.forEach((r) => r.forEach(walk)); return; }
+        // A caption beside a control ("Width:", "Gridlines") is not a control
+        // and takes no KeyTip, as in Excel (XL-UX-040).
+        if (it.kind === "heading") return;
         keys.push({ key: it.tip, ref: it.id });
       };
       for (const g of tab.groups) {

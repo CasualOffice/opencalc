@@ -64,7 +64,8 @@ test("the cell menu has Excel's items, in Excel's order and wording", async ({ p
     "—",
     "Filter", "Sort",
     "—",
-    "New Comment",
+    // Excel's pair since notes and comments split (XL-UX-039).
+    "New Comment", "New Note",
     "—",
     "Format Cells…", "Pick From Drop-down List…", "Define Name…", "Link",
   ]);

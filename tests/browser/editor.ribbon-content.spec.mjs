@@ -209,12 +209,15 @@ test("Review ▸ Comments: Next, Previous and Delete walk and remove the threads
   await boot(page);
   await page.evaluate(() => {
     const a = window.opencalcEditor.wasmApi();
-    a.session_set_comment(0, 1, 1, "first", "", "");
-    a.session_set_comment(0, 5, 0, "second", "", "");
+    // Threads carry a timestamp; a note does not (XL-UX-039). The note at D3
+    // sits between the two threads, and the Comments verbs must step over it.
+    a.session_set_comment(0, 1, 1, "first", "Ann", "2026-11-06T10:00:00Z");
+    a.session_set_comment(0, 3, 3, "a note, not a comment", "Ann", "");
+    a.session_set_comment(0, 5, 0, "second", "Ann", "2026-11-06T10:01:00Z");
   });
   await tab(page, "Review");
   const caps = await page.locator(".rb-panel:not([hidden]) .rb-cap-text").allTextContents();
-  expect(caps, "Comments, not a Notes group that opened a comment").toEqual(["Comments", "Protect"]);
+  expect(caps, "Excel's two groups: Comments for threads, Notes for notes").toEqual(["Comments", "Notes", "Protect"]);
   await ribbonButton(page, "review.next-comment").click();
   expect(await page.evaluate(() => window.opencalcEditor.selectionRectForTest())).toMatchObject({ r0: 1, c0: 1 });
   await ribbonButton(page, "review.next-comment").click();
@@ -222,7 +225,7 @@ test("Review ▸ Comments: Next, Previous and Delete walk and remove the threads
   await ribbonButton(page, "review.previous-comment").click();
   expect(await page.evaluate(() => window.opencalcEditor.selectionRectForTest())).toMatchObject({ r0: 1, c0: 1 });
   await ribbonButton(page, "review.delete-comment").click();
-  expect((await json(page, "session_comments", 0, 0, 0, 100, 100)).map((c) => [c.r, c.c])).toEqual([[5, 0]]);
+  expect((await json(page, "session_comments", 0, 0, 0, 100, 100)).map((c) => [c.r, c.c]), "the thread went; the note stayed").toEqual([[3, 3], [5, 0]]);
 });
 
 test("View ▸ Show, Zoom and Freeze Panes are Excel's controls", async ({ page }) => {

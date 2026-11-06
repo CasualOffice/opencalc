@@ -508,7 +508,8 @@ function createShell({ root, host, editor }) {
     const drop = h("button", `rb-btn rb-split-drop`);
     drop.type = "button";
     drop.dataset.splitOf = spec.id;
-    drop.title = `${shortLabel(spec.label)} options`;
+    // A ScreenTip, not a native title: two tips must never show (XL-UX-008).
+    describe(drop, `${shortLabel(spec.label)} options`, descriptionOf(spec.id));
     drop.setAttribute("aria-label", `${shortLabel(spec.label)} options`);
     drop.setAttribute("aria-haspopup", "true");
     drop.setAttribute("aria-expanded", "false");
@@ -674,7 +675,7 @@ function createShell({ root, host, editor }) {
     b.dataset.ocProxy = spec.id;
     b.setAttribute("role", "checkbox");
     b.setAttribute("aria-checked", "false");
-    b.title = spec.title || spec.label;
+    describe(b, spec.title || spec.label, descriptionOf(spec.id));
     b.append(h("span", "rb-check-box"), h("span", "rb-check-label", spec.label));
     b.addEventListener("click", (e) => { e.stopPropagation(); closePop(); run(spec.id); queueSync(); });
     if (!command(spec.id)) b.hidden = true;

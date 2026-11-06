@@ -256,7 +256,8 @@ test("right-clicking a banked column header keeps every column, and Delete remov
   await page.waitForTimeout(250);
   expect(await page.evaluate(() => window.opencalcEditor.allRanges().map((g) => [g.c0, g.c1])),
     "both bands survived the right-click").toEqual(before);
-  const del = page.locator("#sheet-ctx button", { hasText: "Delete 2 columns" });
+  // Excel's word (XL-UX-034): "Delete", whatever the count — every band goes.
+  const del = page.locator("#sheet-ctx button", { hasText: /^Delete$/ });
   await expect(del).toBeVisible();
   await del.click();
   await page.waitForTimeout(200);
@@ -281,5 +282,5 @@ test("right-clicking a banked row header keeps every row", async ({ page }) => {
   await page.mouse.click(box.x + r.x, box.y + r.y, { button: "right" });
   await page.waitForTimeout(250);
   expect(await page.evaluate(() => window.opencalcEditor.allRanges().map((g) => [g.r0, g.r1]))).toEqual(before);
-  await expect(page.locator("#sheet-ctx button", { hasText: "Delete 2 rows" })).toBeVisible();
+  await expect(page.locator("#sheet-ctx button", { hasText: /^Delete$/ })).toBeVisible();
 });
