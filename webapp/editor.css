@@ -783,8 +783,8 @@ input.tb-size::placeholder, input.tb-font::placeholder { color: var(--oc-faint-t
 /* The applied value keeps a check so the list is readable at a glance even
    when the row rendered in its own face looks nothing like the others. */
 .combo-menu .combo-item.checked::before {
-  content: "✓"; position: absolute; left: 9px; top: 50%; transform: translateY(-50%);
-  font-size: 11px; color: var(--oc-accent-color); font-family: system-ui, sans-serif;
+  content: "✓"; position: absolute; left: 0.5625rem; top: 50%; transform: translateY(-50%);
+  font-size: 0.6875rem; color: var(--oc-accent-color); font-family: system-ui, sans-serif;
 }
 /* Grow/shrink font glyphs ("A▲" / "A▼") — small triangle so the A stays legible. */
 #tb-size-up, #tb-size-down { font-size: 12px; letter-spacing: -1px; }
@@ -988,21 +988,21 @@ input.tb-size::placeholder, input.tb-font::placeholder { color: var(--oc-faint-t
 .ctx-submenu { min-width: 168px; }
 /* A toggle row (Table › Totals Row): Excel's check in the left gutter while
    it is on. The label no longer names the state, so the mark is what does. */
-.popmenu button.ctx-toggle { position: relative; padding-left: 26px; }
+.popmenu button.ctx-toggle { position: relative; padding-left: 1.625rem; }
 .popmenu button.ctx-toggle[aria-pressed="true"]::before {
-  content: "✓"; position: absolute; left: 9px; top: 50%; transform: translateY(-50%);
-  color: var(--oc-text-color); font-size: 13px; line-height: 1;
+  content: "✓"; position: absolute; left: 0.5625rem; top: 50%; transform: translateY(-50%);
+  color: var(--oc-text-color); font-size: 0.8125rem; line-height: 1;
 }
 /* Excel's "Paste Options:" (XL-UX-034): a bold heading over a row of square
    icon buttons, not a list of rows. */
-.ctx-heading { font-size: 12px; font-weight: 600; color: var(--oc-text-color); padding: 4px 10px 2px; }
-.ctx-paste-row { display: flex; gap: 2px; padding: 0 8px 4px; }
+.ctx-heading { font-size: 0.75rem; font-weight: 600; color: var(--oc-text-color); padding: 0.25rem 0.625rem 0.125rem; }
+.ctx-paste-row { display: flex; gap: 0.125rem; padding: 0 0.5rem 0.25rem; }
 .popmenu .ctx-paste-row button.ctx-paste-btn {
-  width: 30px; height: 28px; padding: 0; flex: 0 0 auto;
+  width: 1.875rem; height: 1.75rem; padding: 0; flex: 0 0 auto;
   display: inline-flex; align-items: center; justify-content: center; text-align: center;
 }
 @media (pointer: coarse) {
-  .popmenu .ctx-paste-row button.ctx-paste-btn { width: 44px; height: 44px; }
+  .popmenu .ctx-paste-row button.ctx-paste-btn { width: 2.75rem; height: 2.75rem; }
 }
 
 /* Enhanced color popover (shared by font & fill): palette + custom hex + recent. */
@@ -1177,7 +1177,7 @@ input.tb-size::placeholder, input.tb-font::placeholder { color: var(--oc-faint-t
 .formula-bar textarea#formula-input:focus { outline: none; }
 
 .bottom-bar {
-  display: flex; align-items: center; gap: 8px; height: 26px; padding: 0 8px; flex: 0 0 auto;
+  display: flex; align-items: center; gap: 0.5rem; height: 1.625rem; padding: 0 0.5rem; flex: 0 0 auto;
   border-top: 1px solid var(--oc-border-color); background: var(--oc-background-color);
 }
 /* **The sheet-tab row** (`XL-UX-033`, `XL-UX-052`): navigation, tabs, the
@@ -1186,12 +1186,12 @@ input.tb-size::placeholder, input.tb-font::placeholder { color: var(--oc-faint-t
    Excel's tab area is the splitter's position, not the tabs' — so adding a
    sheet does not move the scrollbar under the pointer. */
 .sheet-bar {
-  display: flex; align-items: center; gap: 2px; height: 32px; padding: 0 0 0 8px; flex: 0 0 auto;
+  display: flex; align-items: center; gap: 0.125rem; height: 2rem; padding: 0 0 0 0.5rem; flex: 0 0 auto;
   border-top: 1px solid var(--oc-border-color); background: var(--oc-surface-color);
 }
 .sheet-bar .sheet-tabs { flex: 0 1 var(--oc-tab-split, 55%); }
 .sheet-bar-split {
-  flex: 0 0 auto; width: 6px; align-self: stretch; margin: 4px 2px; cursor: col-resize;
+  flex: 0 0 auto; width: 0.375rem; align-self: stretch; margin: 0.25rem 0.125rem; cursor: col-resize;
   border-left: 1px solid var(--oc-border-color); border-right: 1px solid var(--oc-border-color);
 }
 .sheet-bar-split:hover, .sheet-bar-split.drag { background: var(--oc-border-color); }
@@ -1199,10 +1199,10 @@ input.tb-size::placeholder, input.tb-font::placeholder { color: var(--oc-faint-t
 /* In the row, not over the grid: in flow, and always drawn, as Excel's is. */
 .sheet-bar .scrollbar.hscroll {
   position: relative; left: auto; right: auto; bottom: auto;
-  flex: 1 1 0; min-width: 48px; height: 14px; margin-right: 14px;
+  flex: 1 1 0; min-width: 3rem; height: 0.875rem; margin-right: 0.875rem;
 }
 /* Lock-key indicators (`XL-UX-030`): plain status-bar text, like the mode. */
-.sb-indicator { font-size: 12px; color: var(--oc-muted-text-color); white-space: nowrap; flex: 0 0 auto; }
+.sb-indicator { font-size: 0.75rem; color: var(--oc-muted-text-color); white-space: nowrap; flex: 0 0 auto; }
 .sb-indicator[hidden] { display: none; }
 /* Customize Status Bar unticks: the controls go, the bar keeps its layout. */
 .sb-off-cell-mode .cell-mode,
@@ -1211,12 +1211,12 @@ input.tb-size::placeholder, input.tb-font::placeholder { color: var(--oc-faint-t
 .sb-off-zoom .zoom-level { display: none; }
 /* The Customize Status Bar menu: a check column, the name, then the value the
    bar would show, right-aligned — Excel's three columns. */
-.sb-menu { min-width: 260px; }
-.sb-menu .sb-menu-title { font-weight: 600; font-size: 12.5px; color: var(--oc-text-color); padding: 4px 10px 4px 28px; }
-.sb-menu button { display: flex; align-items: center; gap: 12px; position: relative; padding-left: 28px; }
+.sb-menu { min-width: 16.25rem; }
+.sb-menu .sb-menu-title { font-weight: 600; font-size: 0.7812rem; color: var(--oc-text-color); padding: 0.25rem 0.625rem 0.25rem 1.75rem; }
+.sb-menu button { display: flex; align-items: center; gap: 0.75rem; position: relative; padding-left: 1.75rem; }
 .sb-menu button[aria-checked="true"]::before {
-  content: "✓"; position: absolute; left: 10px; top: 50%; transform: translateY(-50%);
-  font-size: 11px; color: var(--oc-accent-color); font-family: system-ui, sans-serif;
+  content: "✓"; position: absolute; left: 0.625rem; top: 50%; transform: translateY(-50%);
+  font-size: 0.6875rem; color: var(--oc-accent-color); font-family: system-ui, sans-serif;
 }
 .sb-menu .sb-item-label { flex: 1 1 auto; }
 .sb-menu .sb-item-value { color: var(--oc-muted-text-color); font-variant-numeric: tabular-nums; }
@@ -1431,11 +1431,11 @@ input.tb-size::placeholder, input.tb-font::placeholder { color: var(--oc-faint-t
    shown the same way on hover. Square and flat, with the writer's name in bold
    at the top, as Excel draws it — not the rounded tooltip above. */
 .oc-note-editor {
-  position: absolute; z-index: 46; width: 180px; height: 96px;
-  display: flex; flex-direction: column; box-sizing: border-box; padding: 3px 5px;
+  position: absolute; z-index: 46; width: 11.25rem; height: 6rem;
+  display: flex; flex-direction: column; box-sizing: border-box; padding: 0.1875rem 0.3125rem;
   background: var(--oc-note-fill-color); color: var(--oc-note-text-color);
   border: 1px solid var(--oc-note-border-color); box-shadow: var(--oc-elevation-raised);
-  font: 12px/1.35 var(--oc-font-family, inherit);
+  font: 0.75rem/1.35 var(--oc-font-family, inherit);
 }
 .oc-note-editor .oc-note-text {
   flex: 1; min-height: 0; margin: 0; padding: 0; border: 0; outline: none; resize: none;
@@ -1443,7 +1443,7 @@ input.tb-size::placeholder, input.tb-font::placeholder { color: var(--oc-faint-t
 }
 .oc-note-author { font-weight: 700; }
 .comment-tip.oc-note-tip {
-  border-radius: 0; max-width: 180px; padding: 3px 5px; font-size: 12px; line-height: 1.35;
+  border-radius: 0; max-width: 11.25rem; padding: 0.1875rem 0.3125rem; font-size: 0.75rem; line-height: 1.35;
   background: var(--oc-note-fill-color); color: var(--oc-note-text-color); border-color: var(--oc-note-border-color);
 }
 .cmt-set { min-width: 240px; padding: 8px; }
@@ -1556,7 +1556,7 @@ textarea.panel-field { resize: vertical; min-height: 68px; font-family: inherit;
 /* Custom scrollbars — identical on every OS (no native scrollbar UI). */
 .scrollbar { position: absolute; z-index: 6; }
 /* To the bottom of the grid: the horizontal bar is in the tab row below it now. */
-.scrollbar.vscroll { top: 24px; right: 0; bottom: 0; width: 14px; }
+.scrollbar.vscroll { top: 1.5rem; right: 0; bottom: 0; width: 0.875rem; }
 .scrollbar.hscroll { left: 46px; bottom: 0; right: 14px; height: 14px; }
 .scrollbar .thumb { position: absolute; background: var(--oc-muted-text-color); opacity: 0.35; border-radius: 7px; transition: opacity 0.12s; }
 .scrollbar .thumb:hover, .scrollbar .thumb.drag { opacity: 0.62; }
@@ -1673,8 +1673,8 @@ textarea.panel-field { resize: vertical; min-height: 68px; font-family: inherit;
    affordance the font/size comboboxes use for their current value. */
 #numfmt-menu button { position: relative; padding-left: 26px; }
 #numfmt-menu button.checked::before {
-  content: "✓"; position: absolute; left: 9px; top: 50%; transform: translateY(-50%);
-  font-size: 11px; color: var(--oc-accent-color); font-family: system-ui, sans-serif;
+  content: "✓"; position: absolute; left: 0.5625rem; top: 50%; transform: translateY(-50%);
+  font-size: 0.6875rem; color: var(--oc-accent-color); font-family: system-ui, sans-serif;
 }
 
 /* One place for the whole reduced-motion contract, rather than a media query per
@@ -2882,14 +2882,14 @@ html, .editor-body { overscroll-behavior: none; }
 .oc-gs-form { display: grid; grid-template-columns: auto 1fr; gap: 8px 12px; align-items: center; margin: 0 0 6px; }
 /* Conditional Formatting's quick-rule dialogs (Greater Than…, Top 10 Items…,
    XL-UX-037): the sentence, then the operand, "with" and the preset on a row. */
-.oc-cfq { display: flex; flex-direction: column; gap: 8px; margin: 0 0 6px; }
-.oc-cfq-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-.oc-cfq-row .oc-cfq-value { flex: 1 1 100px; min-width: 0; width: auto; }
+.oc-cfq { display: flex; flex-direction: column; gap: 0.5rem; margin: 0 0 0.375rem; }
+.oc-cfq-row { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; }
+.oc-cfq-row .oc-cfq-value { flex: 1 1 6.25rem; min-width: 0; width: auto; }
 .oc-cfq-row .oc-cfq-preset { flex: 0 1 auto; width: auto; }
 .oc-cfq-with { white-space: nowrap; }
 /* Excel's Zoom dialog: one column of magnifications. */
-.oc-zoom { display: flex; flex-direction: column; gap: 6px; margin: 0 0 6px; }
-.oc-zoom-custom { width: 64px; margin-left: 6px; }
+.oc-zoom { display: flex; flex-direction: column; gap: 0.375rem; margin: 0 0 0.375rem; }
+.oc-zoom-custom { width: 4rem; margin-left: 0.375rem; }
 .oc-gs-head { margin: 0 0 10px; }
 .oc-gs-status { display: grid; grid-template-columns: auto 1fr; gap: 4px 12px; }
 .oc-gs-num { font-family: var(--oc-mono-font-family); }
