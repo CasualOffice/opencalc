@@ -361,7 +361,12 @@ fn write_call(
         Expr::Function { name, args: inner }
             if name == crate::parse::ANCHORARRAY && spill_anchor(inner) =>
         {
-            write!(f, "{}({})(", crate::parse::ANCHORARRAY, At(&inner[0], origin))?;
+            write!(
+                f,
+                "{}({})(",
+                crate::parse::ANCHORARRAY,
+                At(&inner[0], origin)
+            )?;
         }
         _ => write!(f, "{}(", At(callee, origin))?,
     }

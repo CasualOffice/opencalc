@@ -3364,9 +3364,23 @@ fn delimited_loss(workbook: &Workbook, sheet_index: usize) -> CompatibilityRepor
         "outline groups",
         sheet.row_outline_levels.len() + sheet.col_outline_levels.len(),
     );
+    // A freeze by name, and the rest of the view by its own name: which sheet
+    // is active (`tab_selected`) is not a loss, and comparing the whole view
+    // made every open sheet "lose frozen panes" once the active tab was
+    // saved (`CI-040`).
     gone(
         "frozen panes",
-        usize::from(sheet.view != Default::default()),
+        usize::from(sheet.view.frozen_rows > 0 || sheet.view.frozen_cols > 0),
+    );
+    let view_settings = casual_calc_model::SheetView {
+        frozen_rows: 0,
+        frozen_cols: 0,
+        tab_selected: false,
+        ..sheet.view
+    };
+    gone(
+        "sheet view settings",
+        usize::from(view_settings != Default::default()),
     );
     gone("tab colour", usize::from(sheet.tab_color.is_some()));
     gone("data validation", sheet.validations.len());

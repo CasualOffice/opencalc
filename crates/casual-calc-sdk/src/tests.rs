@@ -1748,6 +1748,33 @@ mod delimited_sessions {
         );
     }
 
+    /// Which sheet is active is not a loss, and other view settings are not
+    /// "frozen panes" (`CI-040`). Since the open sheet is saved as the active
+    /// tab (`PIPE-05`), `tab_selected` sits in the sheet's view — and the check
+    /// compared the whole view, so every CSV the editor had open warned that
+    /// it could not carry "frozen panes", and Ctrl+S stopped on that question.
+    #[test]
+    fn the_active_tab_is_not_a_frozen_pane_lost() {
+        let mut session = WorkbookSession::open_delimited(CSV.to_vec(), COMMA).expect("opens");
+        session.workbook_mut().sheets[0].view.tab_selected = true;
+        assert!(
+            session.format_loss().is_empty(),
+            "the active tab was reported as lost: {:?}",
+            session.format_loss().entries()
+        );
+        // A real freeze is still named, under its own name, and zoom under its.
+        session.workbook_mut().sheets[0].view.frozen_rows = 1;
+        session.workbook_mut().sheets[0].view.zoom = 150;
+        let named: std::collections::BTreeMap<_, _> = session
+            .format_loss()
+            .entries()
+            .iter()
+            .map(|e| (e.feature.clone(), e.count))
+            .collect();
+        assert_eq!(named.get("frozen panes"), Some(&1), "{named:?}");
+        assert_eq!(named.get("sheet view settings"), Some(&1), "{named:?}");
+    }
+
     /// The extension a host must put on the file it writes.
     #[test]
     fn a_format_names_its_own_extension_and_type() {

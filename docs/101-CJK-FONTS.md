@@ -5,6 +5,15 @@ faces ship as separate files loaded on demand, never inside the WebAssembly
 binary; size is not a hurdle, and the desktop build and the site ship them as
 static assets.
 
+**Revised 2026-11-06 for the desktop (`TAURI-021`, owner delegated).** Shipping
+the slices inside the installer made every desktop download ~58 MB larger (the
+`.dmg` went from 10 MB to 69 MB). The desktop bundle now leaves `fonts/cjk/` out
+(staged by `desktop/build.rs`): on screen the webview draws CJK with the OS's own
+East Asian fonts, which every desktop OS ships; for PDF embedding the desktop
+fetches the slices from the public site when online, and offline an export
+names what it could not draw, as it does wherever the slices are absent. The
+site still ships them, unchanged.
+
 ## What Excel does
 
 A cell names one font. Excel's East Asian fonts — Yu Gothic, MS Gothic/Mincho,
