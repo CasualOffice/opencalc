@@ -15,7 +15,7 @@
 // is clicked, and the popup it opens is re-anchored under the ribbon button.
 
 import { command, run, all as allCommands } from "./commands.js";
-import { TABS, FILE_RAIL, OPTIONS_COMMANDS, DESCRIPTIONS, QAT_KEYTIPS, TOP_KEYTIPS } from "./ribbon.model.js";
+import { TABS, FILE_RAIL, OPTIONS_COMMANDS, DESCRIPTIONS, QAT_KEYTIPS, TOP_KEYTIPS, menuIds } from "./ribbon.model.js";
 
 const LAYOUT_KEY = "oc.ribbon.layout";
 // Excel's Ribbon Display Options (XL-UX-093): "always" shows the band, "tabs"
@@ -218,20 +218,148 @@ function createShell({ root, host, editor }) {
 
   /// A dropdown listing commands by id, each run through the registry. Absent
   /// ids are skipped; a disabled one is shown disabled in place.
-  function commandMenu(owner, ids) {
-    popover(owner, (el) => {
-      for (const id of ids) {
-        const c = command(id);
-        if (!c || (c.hidden && c.hidden())) continue;   // a rule took it away
-        const b = h("button", "rb-pop-item", c.label || id);
-        b.type = "button";
-        b.dataset.cmd = id;
-        b.setAttribute("role", "menuitem");
-        if (c.shortcut) b.appendChild(h("span", "rb-pop-key", c.shortcut));
-        if (c.enabled && !c.enabled()) b.disabled = true;
-        if (c.checked && c.checked()) b.setAttribute("aria-checked", "true");
-        b.addEventListener("click", (e) => { e.stopPropagation(); closePop(); run(id); refocusGrid(); });
-        el.appendChild(b);
+  ///
+  /// An entry is one of (`ribbon.model.js` documents the shapes):
+  ///  - a command id;
+  ///  - `"-"`, a separator — dropped where it would lead, trail or double up,
+  ///    because the items around it may be absent;
+  ///  - `{ label, menu }`, a cascading submenu, as Excel's Highlight Cells
+  ///    Rules › or More Functions › (XL-UX-037/041);
+  ///  - `{ of: id }`, the entries a registered command lists (`entries()`),
+  ///    for a menu whose contents are data — the functions of a category.
+  function commandMenu(owner, items) {
+    const el = popover(owner, (list) => { fillMenu(list, items, () => { if (openPop?.el === el) place(el, owner); }); });
+  }
+
+  /// Whether a menu entry would draw anything: an empty submenu is worse than
+  /// none, as an empty dropdown is (`applyCommandRules()`).
+  function present(it) {
+    if (it === "-") return false;
+    if (typeof it === "string") { const c = command(it); return !!c && !(c.hidden && c.hidden()); }
+    if (it.of) { const c = command(it.of); return !!c && !(c.hidden && c.hidden()); }
+    if (it.menu) return it.menu.some(present);
+    return false;
+  }
+
+  /// The row a menu draws for one runnable thing.
+  function menuItem(label, { shortcut, disabled, checked, title, onRun }) {
+    const b = h("button", "rb-pop-item", label);
+    b.type = "button";
+    b.setAttribute("role", "menuitem");
+    if (title) b.title = title;
+    if (shortcut) b.appendChild(h("span", "rb-pop-key", shortcut));
+    if (disabled) b.disabled = true;
+    if (checked) b.setAttribute("aria-checked", "true");
+    b.addEventListener("click", (e) => { e.stopPropagation(); closePop(); onRun(); refocusGrid(); });
+    return b;
+  }
+
+  /// Draw `items` into `list`. A submenu is appended *inside* the list that
+  /// opened it (it is `position: fixed`, so where it sits in the tree does not
+  /// move it): one click outside, one Escape or one `closePop` then takes the
+  /// whole cascade down with the popover, and the outside-click test
+  /// (`contains`) counts a click in a submenu as inside.
+  ///
+  /// `refit` re-places the list once a `{ of }` list has arrived: it was
+  /// placed while still empty, so a list of 80 functions opened low on a
+  /// phone ran 400px off the bottom of the screen.
+  function fillMenu(list, items, refit = () => {}) {
+    closeSiblingSubs(list);
+    let pendingSep = false;
+    const sep = () => { if (pendingSep && list.lastElementChild) list.appendChild(h("div", "rb-pop-sep")); pendingSep = false; };
+    for (const it of items) {
+      if (it === "-") { pendingSep = true; continue; }
+      if (!present(it)) continue;
+      sep();
+      if (typeof it === "string") {
+        const c = command(it);
+        const b = menuItem(c.label || it, {
+          shortcut: c.shortcut,
+          disabled: c.enabled && !c.enabled(),
+          checked: c.checked && c.checked(),
+          onRun: () => run(it),
+        });
+        b.dataset.cmd = it;
+        list.appendChild(b);
+      } else if (it.of) {
+        const c = command(it.of);
+        const host = h("div", "rb-pop-entries");
+        host.style.display = "contents";
+        list.appendChild(host);
+        // `entries()` may be a promise: a function category reads the
+        // catalogue, which is loaded on first use.
+        Promise.resolve(c.entries ? c.entries() : []).then((entries) => {
+          for (const e of entries || []) {
+            if (e === "-") { host.appendChild(h("div", "rb-pop-sep")); continue; }
+            const b = menuItem(e.label, { title: e.title, onRun: e.run });
+            b.dataset.entry = e.label;
+            host.appendChild(b);
+          }
+          if (!host.childElementCount) host.appendChild(h("div", "rb-pop-empty", "None"));
+          if (list.isConnected) refit();
+        });
+      } else {
+        list.appendChild(subMenuItem(list, it));
+      }
+    }
+  }
+
+  /// A row that opens a cascading submenu to its side: on hover, as in Excel's
+  /// menus, and on click or →, for a touch screen and the keyboard.
+  function subMenuItem(list, spec) {
+    const b = h("button", "rb-pop-item rb-pop-subitem", spec.label);
+    b.type = "button";
+    b.setAttribute("role", "menuitem");
+    b.setAttribute("aria-haspopup", "true");
+    b.setAttribute("aria-expanded", "false");
+    b.dataset.sub = spec.label;
+    b.appendChild(icon("chevron_right", 10));
+    const open = () => {
+      if (b._sub?.isConnected) return;
+      // One submenu open per level: a sibling's goes, with its own children.
+      for (const s of list.querySelectorAll(":scope > .rb-pop-subitem")) {
+        if (s !== b && s._sub) { s._sub.remove(); s._sub = null; s.setAttribute("aria-expanded", "false"); }
+      }
+      const sub = h("div", "popmenu rb-pop rb-pop-sub");
+      sub.setAttribute("role", "menu");
+      sub.setAttribute("aria-label", spec.label);
+      // Beside the row, flipped to the left when there is no room on the
+      // right, and clamped to the window like the editor's own submenus.
+      const position = () => {
+        const r = b.getBoundingClientRect();
+        sub.style.left = "0px"; sub.style.top = "0px";
+        const w = sub.offsetWidth, ht = sub.offsetHeight;
+        let left = r.right + 2;
+        if (left + w > window.innerWidth - 4) left = Math.max(4, r.left - 2 - w);
+        let topPx = r.top - 4;
+        if (topPx + ht > window.innerHeight - 4) topPx = Math.max(4, window.innerHeight - 4 - ht);
+        sub.style.left = `${left}px`;
+        sub.style.top = `${topPx}px`;
+      };
+      fillMenu(sub, spec.menu, position);
+      list.appendChild(sub);
+      b._sub = sub;
+      b.setAttribute("aria-expanded", "true");
+      position();
+    };
+    b.addEventListener("mouseenter", open);
+    b.addEventListener("click", (e) => { e.stopPropagation(); open(); b._sub?.querySelector("button")?.focus({ preventScroll: true }); });
+    b.addEventListener("keydown", (e) => {
+      if (e.key === "ArrowRight") { e.preventDefault(); e.stopPropagation(); open(); b._sub?.querySelector("button")?.focus({ preventScroll: true }); }
+    });
+    return b;
+  }
+
+  /// Hovering another row of a list closes the submenu a sibling opened. A row
+  /// belongs to the nearest `.rb-pop` around it: submenus are appended to the
+  /// top popover, so a row inside one is never mistaken for the parent's.
+  function closeSiblingSubs(list) {
+    list.addEventListener("mouseover", (e) => {
+      const row = e.target.closest?.(".rb-pop-item");
+      if (!row || row.closest(".rb-pop") !== list) return;
+      for (const s of list.querySelectorAll(".rb-pop-subitem")) {
+        if (s === row || s.closest(".rb-pop") !== list || !s._sub) continue;
+        s._sub.remove(); s._sub = null; s.setAttribute("aria-expanded", "false");
       }
     });
   }
@@ -248,7 +376,15 @@ function createShell({ root, host, editor }) {
     if (menu) place(menu, owner);
   }
 
+  /// Hand the keyboard back to the grid after a ribbon command — unless the
+  /// command opened a dialog. Greater Than…, Zoom… and the rest focus their own
+  /// field as Excel does; taking it back put typed digits into a cell edit
+  /// under the modal and arrow keys onto the selection (XL-UX-037/043).
   function refocusGrid() {
+    const active = root.activeElement || document.activeElement;
+    if (active?.closest?.('[aria-modal="true"]')) return;
+    const modal = byId("oc-modal");
+    if (modal && !modal.hidden) return;
     byId("grid")?.focus({ preventScroll: true });
   }
 
@@ -361,7 +497,36 @@ function createShell({ root, host, editor }) {
 
   const sync = new Set();   // functions that refresh a control's state
 
+  /// Excel's split button (AutoSum): the face runs the command in one click,
+  /// the arrow beside it — under it, on a large button, with the label — drops
+  /// the menu. The face is an ordinary button for the command, so it is what
+  /// `[data-oc-proxy]` finds and it keeps the command's hidden/enabled rules;
+  /// the arrow follows it (XL-UX-041).
+  function splitButton(spec, size) {
+    const wrap = h("div", `rb-split rb-split-${size}`);
+    const face = button({ ...spec, menu: undefined, split: false }, size);
+    const drop = h("button", `rb-btn rb-split-drop`);
+    drop.type = "button";
+    drop.dataset.splitOf = spec.id;
+    drop.title = `${shortLabel(spec.label)} options`;
+    drop.setAttribute("aria-label", `${shortLabel(spec.label)} options`);
+    drop.setAttribute("aria-haspopup", "true");
+    drop.setAttribute("aria-expanded", "false");
+    const label = face.querySelector(".rb-label");
+    if (label) drop.appendChild(label);
+    drop.appendChild(caret());
+    drop.addEventListener("click", (e) => { e.stopPropagation(); commandMenu(drop, spec.menu); });
+    wrap.append(face, drop);
+    sync.add(() => {
+      const hide = face.hidden || !spec.menu.some(present);
+      if (wrap.hidden !== hide) wrap.hidden = hide;
+      if (drop.disabled !== face.disabled) drop.disabled = face.disabled;
+    });
+    return wrap;
+  }
+
   function button(spec, size) {
+    if (spec.split && spec.menu) return splitButton(spec, size);
     const b = h("button", `rb-btn rb-${size}`);
     b.type = "button";
     b.dataset.cmd = spec.id;
@@ -399,7 +564,7 @@ function createShell({ root, host, editor }) {
       // absent or hidden by the rules, the button goes too (an empty menu is
       // worse than none, as `applyCommandRules()` says of the menu bar).
       if (spec.menu) {
-        b.hidden = !spec.menu.some((id) => { const m = command(id); return m && !(m.hidden && m.hidden()); });
+        b.hidden = !spec.menu.some(present);
       }
       const cc = command(spec.id);
       if (!cc) return;
@@ -475,6 +640,10 @@ function createShell({ root, host, editor }) {
       else if (e.key === "ArrowDown") { e.preventDefault(); list(""); }
     });
     sync.add(() => {
+      // A combo the command says is off now (Scale while Width or Height fits
+      // the page) is greyed, as Excel greys it.
+      const off = c.enabled ? !c.enabled() : false;
+      if (input.disabled !== off) { input.disabled = off; btn.disabled = off; }
       if (root.activeElement === input) return;
       input.value = c.current ? c.current() : "";
     });
@@ -486,10 +655,39 @@ function createShell({ root, host, editor }) {
     col.dataset.rows = String(spec.rows.length);
     for (const r of spec.rows) {
       const row = h("div", "rb-row");
-      for (const it of r) row.appendChild(it.kind === "combo" ? combo(it) : button(it, "s"));
+      for (const it of r) {
+        row.appendChild(it.kind === "combo" ? combo(it) : it.kind === "check" ? check(it)
+          : it.kind === "heading" ? h("div", "rb-heading", it.label) : button(it, "s"));
+      }
       col.appendChild(row);
     }
     return col;
+  }
+
+  /// Excel's ribbon check box (Page Layout ▸ Sheet Options' View and Print,
+  /// View ▸ Show). A labelled toggle, because a bare icon cannot say which of
+  /// two "Gridlines" it is. The state is the command's own `checked()`.
+  function check(spec) {
+    const b = h("button", "rb-check");
+    b.type = "button";
+    b.dataset.cmd = spec.id;
+    b.dataset.ocProxy = spec.id;
+    b.setAttribute("role", "checkbox");
+    b.setAttribute("aria-checked", "false");
+    b.title = spec.title || spec.label;
+    b.append(h("span", "rb-check-box"), h("span", "rb-check-label", spec.label));
+    b.addEventListener("click", (e) => { e.stopPropagation(); closePop(); run(spec.id); queueSync(); });
+    if (!command(spec.id)) b.hidden = true;
+    sync.add(() => {
+      const cc = command(spec.id);
+      if (!cc) { b.hidden = true; return; }
+      b.hidden = cc.hidden ? cc.hidden() : false;
+      const off = cc.enabled ? !cc.enabled() : false;
+      if (b.disabled !== off) b.disabled = off;
+      const on = cc.checked && cc.checked() ? "true" : "false";
+      if (b.getAttribute("aria-checked") !== on) b.setAttribute("aria-checked", on);
+    });
+    return b;
   }
 
   function group(spec) {
@@ -896,7 +1094,10 @@ function createShell({ root, host, editor }) {
     const out = [];
     const walk = (it) => {
       if (it.kind === "rows") { it.rows.forEach((r) => r.forEach(walk)); return; }
-      if (it.kind === "combo") return;
+      if (it.kind === "combo" || it.kind === "heading") return;
+      // A check box is a toggle with no icon of its own; the bar draws it as
+      // one and names it in full ("View Gridlines", not "View").
+      if (it.kind === "check") { out.push({ ...it, icon: it.icon || "checkbox_checked", label: it.title || it.label }); return; }
       out.push(it);
     };
     for (const g of tab.groups) g.items.forEach(walk);
@@ -938,8 +1139,7 @@ function createShell({ root, host, editor }) {
       list.textContent = "";
       for (const it of flatten(tab)) {
         const c = command(it.id);
-        const live = it.menu ? it.menu.some((id) => { const m = command(id); return m && !(m.hidden && m.hidden()); })
-          : c && !(c.hidden && c.hidden());
+        const live = it.menu ? it.menu.some(present) : c && !(c.hidden && c.hidden());
         if (!live) continue;
         const b = h("button", "rb-mbtn");
         b.type = "button";
@@ -1474,8 +1674,9 @@ export function missingCommandsForTest() {
   const out = [];
   const walk = (it) => {
     if (it.kind === "rows") { it.rows.forEach((r) => r.forEach(walk)); return; }
+    if (it.kind === "heading") return;
     if (!it.menu && !command(it.id)) out.push(it.id);
-    for (const m of it.menu || []) if (!command(m)) out.push(m);
+    menuIds(it.menu || [], (m) => { if (!command(m)) out.push(m); });
   };
   for (const t of TABS) for (const g of t.groups) { g.items.forEach(walk); if (g.launcher && !command(g.launcher)) out.push(g.launcher); }
   for (const r of FILE_RAIL) for (const sec of r.sections || []) for (const it of sec.items) if (!command(it.id)) out.push(it.id);

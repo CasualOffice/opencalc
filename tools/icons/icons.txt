@@ -118,3 +118,24 @@ shield
 # Message box icons (XL-UX-168): Excel's warning and error; info is above.
 warning
 error_circle
+# Ribbon content parity (XL-UX-037/040-043): Function Library, Page Setup,
+# Comments, Zoom and Window.
+money
+checkbox_checked
+text_t
+calendar_clock
+table_search
+math_symbols
+more_circle
+clock
+comment_dismiss
+comment_arrow_left
+comment_arrow_right
+comment_multiple
+document_margins
+document_landscape
+page_fit
+zoom_fit
+eye_off
+document_header
+document_print

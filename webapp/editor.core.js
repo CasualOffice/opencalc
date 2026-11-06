@@ -30,6 +30,7 @@ export const BUILD =
 // what it was.
 import { register as registerCommand, run as runRegisteredCommand, setRoot as setCommandRoot } from "./commands.js";
 import { paintList } from "./editor.paintlist.js";
+import { registerRibbonCommands } from "./editor.ribbon-commands.js";
 import {
   applyChart,
   chartAt,
@@ -5397,6 +5398,9 @@ const READ_ONLY_SAFE = [
   // Zoom is the editor's own state, not the workbook's — a viewer must be able
   // to zoom.
   /^view\.zoom/,
+  // So is whether the formula bar is shown (View ▸ Show ▸ Formula Bar): the
+  // page's own chrome, never written to the file.
+  /^view\.show\.formula-bar$/,
   // Recalculating is not an edit: it produces the values the formulas already
   // imply, and a viewer that cannot compute is showing stale numbers.
   /^tools\.calculation/,
@@ -7523,6 +7527,10 @@ function registerShellCommands() {
   R("developer.visual-basic", { label: "Visual Basic", shortcut: "Alt+F11", run: () => openVbaViewer() });
   // MACRO-13: Excel's File ▸ Options ▸ Trust Center ▸ Trust Center Settings….
   R("file.trust-center", { label: "Trust Center Settings…", run: () => openTrustCenter() });
+  // The ribbon's content-parity commands (XL-UX-037/040-043): Conditional
+  // Formatting's quick rules, the Function Library, Page Layout, Review and
+  // View. Their own module, because they are many and each is a few lines.
+  registerRibbonCommands(R);
 }
 
 // ---- Insert Function / Function Arguments (Shift+F3, XL-UX-026/027) ---------
@@ -7568,6 +7576,32 @@ async function loadFnInfo() {
 function implementedFns() {
   const builtin = (fnCatalog || []).map((f) => f.n).filter((n) => fnInfo[n]);
   return [...builtin, ...customFns.map((f) => f.name).filter((n) => !builtin.includes(n))].sort();
+}
+
+/// The Formulas ▸ Function Library menus (XL-UX-041): the implemented functions
+/// of one of Excel's categories, by the same catalogue and the same rule the
+/// Insert Function dialog lists them by, each with Excel's tooltip — its syntax
+/// line and description. `"Most Recently Used"` is Recently Used ›.
+export async function functionLibrary(category) {
+  await loadFnInfo();
+  const all = implementedFns();
+  const names = category === "Most Recently Used"
+    ? fnRecent.filter((n) => fnInfo[n] && all.includes(n))
+    : all.filter((n) => fnInfo[n][0] === category);
+  return names.map((name) => ({ name, title: `${fnSyntax(name)}\n${fnInfo[name][1]}` }));
+}
+
+/// Choosing a function from a Function Library menu: Excel's Function
+/// Arguments step for it, and the function goes to the top of Recently Used,
+/// as it does from Insert Function.
+export async function chooseFunction(name) {
+  await loadFnInfo();
+  if (!fnInfo[name]) return;
+  const at = fnRecent.indexOf(name);
+  if (at >= 0) fnRecent.splice(at, 1);
+  fnRecent.unshift(name);
+  fnRecent.length = Math.min(fnRecent.length, 10);
+  functionArgumentsDialog(name);
 }
 
 /// Excel's syntax line: `VLOOKUP(lookup_value,table_array,col_index_num,range_lookup)`.

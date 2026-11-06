@@ -1752,7 +1752,7 @@ export function goToLinkLocation(text) {
   return true;
 }
 
-export function autoSum() {
+export function autoSum(fn = "SUM") {
   const r = effectiveRange();
   // A multi-cell selection means "total each of these columns below itself",
   // which is Excel's behaviour and the reason it is worth selecting a block.
@@ -1760,7 +1760,7 @@ export function autoSum() {
     tryEdit(() => {
       for (let c = r.c0; c <= r.c1; c++) {
         wasm.session_set_cell(state.sheet, r.r1 + 1, c,
-          `=SUM(${A1(r.r0, c)}:${A1(r.r1, c)})`);
+          `=${fn}(${A1(r.r0, c)}:${A1(r.r1, c)})`);
       }
     });
     select(r.r1 + 1, r.c0);
@@ -1795,13 +1795,13 @@ export function autoSum() {
   const up = runUp();
   if (up) {
     tryEdit(() => wasm.session_set_cell(state.sheet, row, col,
-      `=SUM(${A1(up[0], col)}:${A1(up[1], col)})`));
+      `=${fn}(${A1(up[0], col)}:${A1(up[1], col)})`));
     return;
   }
   const left = runLeft();
   if (left) {
     tryEdit(() => wasm.session_set_cell(state.sheet, row, col,
-      `=SUM(${A1(row, left[0])}:${A1(row, left[1])})`));
+      `=${fn}(${A1(row, left[0])}:${A1(row, left[1])})`));
     return;
   }
   // Nothing to total: leave the cell alone and say so, rather than writing

@@ -12,9 +12,16 @@
 /// Shapes:
 ///   L(id, icon, label, {menu?, launcher?})  a large button: 24px icon, 72px column
 ///   S(id, icon, label, {menu?})             a small button: 16px icon, 24px row
+/// `split: true` with a `menu` is Excel's split button (AutoSum): the face
+/// runs the command, the arrow drops the menu.
 ///   C(id, width, label)                     a combo (font, size, number format)
 ///   R([[S…], [S…], …])                      a column of up to three rows
-/// `menu` is a list of command ids the button drops. A toolbar control that
+///   X(id, label, title)                     a check box (Sheet Options, Show)
+///   T(label)                                a small heading over check boxes
+/// `menu` is a list the button drops. An entry is a command id; `"-"`, a
+/// separator; `{ label, menu }`, a cascading submenu (Highlight Cells Rules ›);
+/// or `{ of: id }`, the entries a registered command lists — the functions of
+/// a Function Library category, which are data. A toolbar control that
 /// already owns a popup (borders, colours, merge) is marked `popup: true` and
 /// opens that popup under the ribbon button instead.
 /// `fold` on a group is its collapse rank — lowest folds first (Excel folds
@@ -24,8 +31,48 @@ const L = (id, icon, label, o = {}) => ({ kind: "large", id, icon, label, ...o }
 const S = (id, icon, label, o = {}) => ({ kind: "small", id, icon, label, ...o });
 const C = (id, width, label) => ({ kind: "combo", id, width, label });
 const R = (rows) => ({ kind: "rows", rows });
+const X = (id, label, title) => ({ kind: "check", id, label, title });
+const T = (label) => ({ kind: "heading", label });
+const SUB = (label, menu) => ({ label, menu });
 
-const PASTE = ["edit.paste", "edit.paste-values", "edit.paste-formulas", "edit.paste-formats", "edit.paste-transpose", "edit.paste-special"];
+/// Home ▸ Conditional Formatting, in Excel's order (XL-UX-037). Icon Sets ›
+/// and A Date Occurring… are left out until the engine draws icon sets and
+/// holds a time-period rule (XL-FEAT-151).
+const CF_MENU = [
+  SUB("Highlight Cells Rules", [
+    "format.cf.greater-than", "format.cf.less-than", "format.cf.between", "format.cf.equal-to",
+    "format.cf.text-contains", "format.cf.duplicate-values", "-", "format.cf.more-rules",
+  ]),
+  SUB("Top/Bottom Rules", [
+    "format.cf.top-10-items", "format.cf.top-10-percent", "format.cf.bottom-10-items", "format.cf.bottom-10-percent",
+    "format.cf.above-average", "format.cf.below-average", "-", "format.cf.more-rules",
+  ]),
+  SUB("Data Bars", [
+    "format.cf.data-bar.blue", "format.cf.data-bar.green", "format.cf.data-bar.red",
+    "format.cf.data-bar.orange", "format.cf.data-bar.light-blue", "format.cf.data-bar.purple", "-", "format.cf.more-rules",
+  ]),
+  SUB("Color Scales", [
+    "format.cf.color-scale.green-yellow-red", "format.cf.color-scale.red-yellow-green",
+    "format.cf.color-scale.green-white-red", "format.cf.color-scale.red-white-green",
+    "format.cf.color-scale.blue-white-red", "format.cf.color-scale.red-white-blue",
+    "format.cf.color-scale.white-red", "format.cf.color-scale.red-white",
+    "format.cf.color-scale.green-white", "format.cf.color-scale.white-green",
+    "format.cf.color-scale.green-yellow", "format.cf.color-scale.yellow-green", "-", "format.cf.more-rules",
+  ]),
+  "-",
+  "format.cf.new-rule",
+  SUB("Clear Rules", ["format.cf.clear-selected", "format.cf.clear-sheet"]),
+  "format.cf.manage-rules",
+];
+
+/// AutoSum ›, Excel's list (Home ▸ Editing and Formulas ▸ Function Library).
+const AUTOSUM = ["formulas.autosum.sum", "formulas.autosum.average", "formulas.autosum.count-numbers",
+  "formulas.autosum.max", "formulas.autosum.min", "-", "formulas.autosum.more-functions"];
+
+/// A Function Library category: the functions it lists, by name (XL-UX-041).
+const FN = (key, icon, label) => L(`formulas.library.${key}`, icon, label, { menu: [{ of: `formulas.library.${key}` }] });
+
+const PASTE =["edit.paste", "edit.paste-values", "edit.paste-formulas", "edit.paste-formats", "edit.paste-transpose", "edit.paste-special"];
 
 export const TABS = [
   { id: "home", label: "Home", key: "H", groups: [
@@ -56,7 +103,7 @@ export const TABS = [
       ]),
     ] },
     { label: "Styles", fold: 1, icon: "style_guide", items: [
-      L("format.conditional-formatting", "data_bar_horizontal", "Conditional Formatting", { menu: ["format.conditional-formatting", "format.conditional-formatting-rules"] }),
+      L("format.conditional-formatting", "data_bar_horizontal", "Conditional Formatting", { menu: CF_MENU }),
       L("insert.table", "table", "Format as Table (Ctrl+T)"),
       L("format.cell-styles", "style_guide", "Cell Styles"),
     ] },
@@ -67,7 +114,7 @@ export const TABS = [
     ] },
     { label: "Editing", fold: 3, icon: "search", items: [
       R([
-        [S("formulas.autosum", "autosum", "AutoSum (Alt+=)", { menu: ["formulas.autosum", "formulas.insert-function"] })],
+        [S("formulas.autosum", "autosum", "AutoSum (Alt+=)", { menu: AUTOSUM, split: true })],
         [S("edit.fill", "arrow_down", "Fill", { menu: ["edit.fill.fill-down", "edit.fill.fill-right", "edit.fill.fill-series", "edit.fill.growth-series", "edit.fill.copy-cells", "edit.fill.formatting-only", "edit.fill.without-formatting"] })],
         [S("edit.clear", "eraser", "Clear", { menu: ["edit.clear.all", "edit.clear.formatting", "edit.clear.values"] })],
       ]),
@@ -91,20 +138,48 @@ export const TABS = [
     // under Review ▸ Notes (XL-UX-039).
     { label: "Comments", fold: 2, icon: "comment_add", items: [L("insert.comment", "comment_add", "Comment")] },
   ] },
+  // Excel's Page Layout tab (XL-UX-040). Themes, Background and Arrange are
+  // left out: there are no workbook themes, sheet backgrounds or drawing
+  // objects to arrange. Page Setup, Scale to Fit and Sheet Options open the
+  // Page Setup panel from their launchers, as Excel opens its dialog.
   { id: "pagelayout", label: "Page Layout", key: "P", groups: [
-    { label: "Page Setup", fold: 4, icon: "document_one_page", items: [
-      L("file.page-setup", "document_one_page", "Page Setup"),
-      L("file.page-break-here", "document_page_break", "Insert Page Break"),
-      L("file.print", "print", "Print (Ctrl+P)"),
+    { label: "Page Setup", fold: 4, launcher: "file.page-setup", icon: "document_one_page", items: [
+      L("page.margins", "document_margins", "Margins", { menu: ["page.margins.normal", "page.margins.wide", "page.margins.narrow", "-", "page.margins.custom"] }),
+      L("page.orientation", "document_landscape", "Orientation", { menu: ["page.orientation.portrait", "page.orientation.landscape"] }),
+      L("page.size", "document_one_page", "Size", { menu: ["page.size.letter", "page.size.legal", "page.size.a3", "page.size.a4", "page.size.a5", "-", "page.size.more"] }),
+      L("page.print-area", "document_print", "Print Area", { menu: ["page.print-area.set", "page.print-area.clear"] }),
+      L("page.breaks", "document_page_break", "Breaks", { menu: ["page.breaks.insert", "page.breaks.remove", "page.breaks.reset"] }),
+      L("page.print-titles", "document_header", "Print Titles"),
     ] },
-    { label: "Sheet Options", fold: 3, icon: "grid", items: [
-      R([[S("view.gridlines", "grid", "Gridlines")], [S("view.cell-markings", "table", "Headings")]]),
+    { label: "Scale to Fit", fold: 3, launcher: "file.page-setup", icon: "page_fit", items: [
+      R([[T("Width:"), C("page.fit.width", 96, "Width")], [T("Height:"), C("page.fit.height", 96, "Height")], [T("Scale:"), C("page.fit.scale", 96, "Scale")]]),
+    ] },
+    { label: "Sheet Options", fold: 2, launcher: "file.page-setup", icon: "grid", items: [
+      R([[T("Gridlines")], [X("sheet.gridlines.view", "View", "View Gridlines")], [X("sheet.gridlines.print", "Print", "Print Gridlines")]]),
+      R([[T("Headings")], [X("sheet.headings.view", "View", "View Headings")], [X("sheet.headings.print", "Print", "Print Headings")]]),
     ] },
   ] },
   { id: "formulas", label: "Formulas", key: "M", groups: [
+    // Excel's Function Library (XL-UX-041): each category drops the functions
+    // in it, and choosing one opens Function Arguments. More Functions › has
+    // no Cube: the engine implements none of the cube functions.
     { label: "Function Library", fold: 5, icon: "math_formula", items: [
       L("formulas.insert-function", "math_formula", "Insert Function (Shift+F3)"),
-      L("formulas.autosum", "autosum", "AutoSum (Alt+=)"),
+      L("formulas.autosum", "autosum", "AutoSum (Alt+=)", { menu: AUTOSUM, split: true }),
+      FN("recently-used", "clock", "Recently Used"),
+      FN("financial", "money", "Financial"),
+      FN("logical", "checkbox_checked", "Logical"),
+      FN("text", "text_t", "Text"),
+      FN("date-time", "calendar_clock", "Date & Time"),
+      FN("lookup-reference", "table_search", "Lookup & Reference"),
+      FN("math-trig", "math_symbols", "Math & Trig"),
+      L("formulas.more-functions", "more_circle", "More Functions", { menu: [
+        SUB("Statistical", [{ of: "formulas.library.statistical" }]),
+        SUB("Engineering", [{ of: "formulas.library.engineering" }]),
+        SUB("Information", [{ of: "formulas.library.information" }]),
+        SUB("Compatibility", [{ of: "formulas.library.compatibility" }]),
+        SUB("Web", [{ of: "formulas.library.web" }]),
+      ] }),
     ] },
     { label: "Defined Names", fold: 4, icon: "table_settings", items: [
       L("tools.name-manager", "table_settings", "Name Manager (Ctrl+F3)"),
@@ -151,11 +226,17 @@ export const TABS = [
     { label: "Analysis", fold: 3, icon: "data_bar_vertical", items: [L("data.column-stats", "data_bar_vertical", "Column Statistics")] },
   ] },
   { id: "review", label: "Review", key: "R", groups: [
-    // Two groups, as in Excel: a comment is a thread in the Comments pane, a
-    // note is the sticky box typed into beside its cell (XL-UX-039). Delete,
-    // Previous/Next and Show Comments, and the Notes menu's Show/Hide and
-    // Convert to Comments, are not built and are left out, not drawn dead.
-    { label: "Comments", fold: 2, icon: "comment_add", items: [L("insert.comment", "comment_add", "New Comment")] },
+    // Excel's two annotations, each its own group (XL-UX-039, XL-UX-042): a
+    // comment is a thread in the Comments pane, with Delete / Previous / Next;
+    // a note is the sticky box typed beside its cell. Show Comments (the
+    // all-threads pane, XL-FEAT-046) and the Notes menu's Show/Hide and Convert
+    // to Comments are not built and are left out, not drawn dead.
+    { label: "Comments", fold: 3, icon: "comment_add", items: [
+      L("insert.comment", "comment_add", "New Comment"),
+      L("review.delete-comment", "comment_dismiss", "Delete"),
+      L("review.previous-comment", "comment_arrow_left", "Previous"),
+      L("review.next-comment", "comment_arrow_right", "Next"),
+    ] },
     { label: "Notes", fold: 3, icon: "comment", items: [L("insert.note", "comment", "New Note")] },
     { label: "Protect", fold: 4, icon: "lock_closed", items: [
       L("format.protection.protect-this-sheet", "lock_closed", "Protect Sheet"),
@@ -164,15 +245,22 @@ export const TABS = [
   ] },
   { id: "view", label: "View", key: "W", groups: [
     { label: "Sheet View", fold: 2, icon: "eye", items: [L("data.clear-my-view", "eye", "Exit Sheet View")] },
+    // Excel's Show group, as its check boxes (XL-UX-043). Ruler belongs to Page
+    // Layout view, which is not built. Zero Values is an Excel Option, not a
+    // ribbon control, and stays reachable through command search.
     { label: "Show", fold: 3, icon: "grid", items: [
-      R([[S("view.gridlines", "grid", "Gridlines")], [S("view.cell-markings", "table", "Headings")], [S("view.zero-values", "number_symbol", "Zero Values")]]),
+      R([[X("sheet.gridlines.view", "Gridlines", "Gridlines")], [X("view.show.formula-bar", "Formula Bar", "Formula Bar")], [X("sheet.headings.view", "Headings", "Headings")]]),
     ] },
     { label: "Zoom", fold: 5, icon: "zoom_in", items: [
-      L("view.zoom", "zoom_in", "Zoom", { menu: ["view.zoom.50", "view.zoom.75", "view.zoom.100", "view.zoom.150", "view.zoom.200"] }),
+      L("view.zoom.dialog", "zoom_in", "Zoom"),
       L("view.zoom.100", "search", "100%"),
+      L("view.zoom.selection", "zoom_fit", "Zoom to Selection"),
     ] },
+    // Window: Freeze Panes only. New Window, Arrange All, Split, Hide/Unhide
+    // (of the workbook window) and View Side by Side need windows this
+    // single-document page does not have.
     { label: "Window", fold: 6, icon: "table_freeze_column_and_row", items: [
-      L("view.freeze", "table_freeze_column_and_row", "Freeze Panes", { menu: ["view.freeze.up-to-selection", "view.freeze.top-row", "view.freeze.first-column", "view.freeze.unfreeze"] }),
+      L("view.freeze", "table_freeze_column_and_row", "Freeze Panes", { menu: ["view.freeze.panes", "view.freeze.top-row-excel", "view.freeze.first-column-excel"] }),
     ] },
     { label: "Collaboration", fold: 4, icon: "history", items: [L("file.version-history", "history", "Version History")] },
     // ONLYOFFICE keeps Macros on its View tab (docs/99 §3), and so do we.
@@ -460,13 +548,25 @@ export const FILE_RAIL = [
 /// Commands the Options page uses (for the completeness gate).
 export const OPTIONS_COMMANDS = ["view.theme.auto", "view.theme.light", "view.theme.dark", "file.trust-center", "tools.settings"];
 
+/// Every command id a menu names, through its submenus: `visit(id)` for each
+/// command entry and each `{ of }` list.
+export function menuIds(menu, visit) {
+  for (const m of menu) {
+    if (m === "-") continue;
+    if (typeof m === "string") visit(m);
+    else if (m.of) visit(m.of);
+    else if (m.menu) menuIds(m.menu, visit);
+  }
+}
+
 /// Every command id the model names, for the registry-completeness gate.
 export function modelCommandIds() {
   const ids = new Set();
   const walk = (it) => {
     if (it.kind === "rows") { for (const row of it.rows) row.forEach(walk); return; }
+    if (it.kind === "heading") return;
     ids.add(it.id);
-    for (const m of it.menu || []) ids.add(m);
+    menuIds(it.menu || [], (m) => ids.add(m));
   };
   for (const tab of TABS) for (const g of tab.groups) {
     g.items.forEach(walk);
@@ -477,6 +577,7 @@ export function modelCommandIds() {
   ids.add("file.new");
   // Group-level wrappers that are not commands themselves: the button only
   // drops its menu.
-  for (const id of ["cells.insert", "cells.delete", "cells.format", "data.ungroup"]) ids.delete(id);
+  for (const id of ["cells.insert", "cells.delete", "cells.format", "data.ungroup",
+    "page.margins", "page.orientation", "page.size", "page.print-area", "page.breaks", "formulas.more-functions"]) ids.delete(id);
   return [...ids];
 }
