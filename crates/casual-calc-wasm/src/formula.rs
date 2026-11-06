@@ -109,10 +109,11 @@ pub fn session_cf_rules(sheet: usize) -> String {
             .map(|&i| {
                 let cf = &sh.conditional_formats[i];
                 format!(
-                    "{{\"i\":{i},\"range\":{},\"desc\":{},\"fill\":{},\"priority\":{},\"stop\":{}}}",
+                    "{{\"i\":{i},\"range\":{},\"desc\":{},\"fill\":{},\"font\":{},\"priority\":{},\"stop\":{}}}",
                     json_string(&range_a1(&cf.range)),
                     json_string(&describe_cf_rule(&cf.rule)),
                     json_string(&cf.fill),
+                    json_string(cf.font_color.as_deref().unwrap_or("")),
                     cf.priority,
                     u8::from(cf.stop_if_true),
                 )
@@ -175,4 +176,36 @@ pub fn session_cell_input(sheet: usize, row: u32, col: u32) -> String {
         value_text(wb, &cell.value)
     })
     .unwrap_or_default()
+}
+
+/// What kind of value a cell holds: `"text"`, `"number"`, `"bool"`, `"error"`,
+/// or `""` for an empty or missing cell. A formula cell answers for its result.
+///
+/// The input text cannot say this. A date or a time edits as its typed form
+/// (`1/5/2026`, `9:30`, see [`session_cell_input`]) and a boolean as `TRUE`, so
+/// a host that guessed the type from that string would read all three as text.
+/// AutoComplete and the column pick list (`XL-UX-017`) offer only text entries,
+/// and offering a date there turned a typed `1` into the date it completed to.
+#[wasm_bindgen]
+#[must_use]
+pub fn session_cell_value_kind(sheet: usize, row: u32, col: u32) -> String {
+    with_session(|s| {
+        let wb = s.workbook();
+        let Some(cell) = wb
+            .sheets
+            .get(sheet)
+            .and_then(|sh| sh.cells.get(CellRef::new(row, col)))
+        else {
+            return "";
+        };
+        match cell.value {
+            CellValue::Empty => "",
+            CellValue::Number(_) => "number",
+            CellValue::Bool(_) => "bool",
+            CellValue::Error(_) => "error",
+            CellValue::SharedString(_) | CellValue::InlineString(_) => "text",
+        }
+    })
+    .unwrap_or_default()
+    .to_owned()
 }

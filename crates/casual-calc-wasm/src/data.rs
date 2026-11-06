@@ -570,8 +570,36 @@ pub fn session_add_cf(
     text: &str,
     fill: &str,
 ) -> Result<(), JsError> {
+    session_add_cf_styled(sheet, r0, c0, r1, c1, kind, a, b, text, fill, "")
+}
+
+/// [`session_add_cf`] with a font colour as well as a fill. Excel's quick-rule
+/// presets are mostly a pair — "Light Red Fill with Dark Red Text" is fill
+/// `FFC7CE` and text `9C0006` — and the model, the renderer and the writer all
+/// carry `font_color` already; only this door to it was missing. An empty or
+/// malformed `font_color` leaves the text alone.
+#[wasm_bindgen]
+#[allow(clippy::too_many_arguments)]
+pub fn session_add_cf_styled(
+    sheet: usize,
+    r0: u32,
+    c0: u32,
+    r1: u32,
+    c1: u32,
+    kind: &str,
+    a: f64,
+    b: f64,
+    text: &str,
+    fill: &str,
+    font_color: &str,
+) -> Result<(), JsError> {
     let rule = cf_rule_from_kind(kind, a, b, text).map_err(|e| JsError::new(&e))?;
     let fill = fill.trim().trim_start_matches('#').to_ascii_uppercase();
+    let font = font_color
+        .trim()
+        .trim_start_matches('#')
+        .to_ascii_uppercase();
+    let font = (font.len() == 6 && font.chars().all(|c| c.is_ascii_hexdigit())).then_some(font);
     edit_sheet_metadata(sheet, move |_, data| {
         let (rr0, cc0, rr1, cc1) = (r0.min(r1), c0.min(c1), r0.max(r1), c0.max(c1));
         // New rules go last in priority, so they do not silently outrank the
@@ -589,6 +617,7 @@ pub fn session_add_cf(
             fill,
         );
         cf.priority = next;
+        cf.font_color = font;
         data.conditional_formats.push(cf);
     })
 }
@@ -2856,6 +2885,51 @@ mod formula_cf_tests {
             cf_rule_from_kind("formula", 0.0, 0.0, " =$D2>100 "),
             Ok(casual_calc_model::CfRule::Expression("$D2>100".to_owned())),
             "a good one loses its `=` and its whitespace and keeps the rest"
+        );
+    }
+
+    /// The field `session_cells` reports for one cell, or `""`.
+    fn field_at(row: u32, col: u32, key: &str) -> String {
+        let cells: serde_json::Value =
+            serde_json::from_str(&session_cells(0, 0, 0, 20, 20)).expect("json");
+        cells
+            .as_array()
+            .expect("an array")
+            .iter()
+            .find(|c| c["r"] == row && c["c"] == col)
+            .and_then(|c| c[key].as_str())
+            .unwrap_or_default()
+            .to_owned()
+    }
+
+    /// **"Light Red Fill with Dark Red Text" is two colours, not one.**
+    ///
+    /// Excel's quick-rule dialogs (Greater Than…, Duplicate Values…) default to
+    /// that preset (XL-UX-037). The binding took a fill only, so the text half
+    /// of every preset would have been dropped without a word. The rule must
+    /// paint both, and say so through `session_cf_rules`.
+    #[test]
+    fn a_styled_rule_paints_its_text_colour_as_well_as_its_fill() {
+        use super::session_add_cf_styled;
+        session_new();
+        session_set_cell(0, 0, 0, "150").unwrap();
+        session_set_cell(0, 1, 0, "20").unwrap();
+        session_add_cf_styled(0, 0, 0, 1, 0, "gt", 100.0, 0.0, "", "FFC7CE", "9C0006").unwrap();
+        assert_eq!(
+            field_at(0, 0, "bg"),
+            "FFC7CE",
+            "the matching cell takes the fill"
+        );
+        assert_eq!(field_at(0, 0, "fc"), "9C0006", "and the text colour");
+        assert_eq!(
+            field_at(1, 0, "fc"),
+            "",
+            "the cell that does not match keeps its own text"
+        );
+        let rules: serde_json::Value = serde_json::from_str(&session_cf_rules(0)).expect("json");
+        assert_eq!(
+            rules[0]["font"], "9C0006",
+            "the rules list reports the text colour"
         );
     }
 }

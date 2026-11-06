@@ -29,6 +29,7 @@ mod store;
 mod strings;
 mod style;
 pub mod transfer;
+pub mod units;
 mod value;
 mod workbook;
 

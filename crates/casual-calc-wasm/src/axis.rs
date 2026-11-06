@@ -452,6 +452,81 @@ pub fn session_set_row_height_range(
     })
 }
 
+/// A column's width as Excel's Column Width dialog states it: characters of the
+/// default font's maximum digit width, to two decimals (`XL-UX-035`). The
+/// default 64 px column reads 8.43.
+///
+/// Through `casual_calc_model::units`, the reader's and writer's own
+/// conversion, so the dialog and a saved `.xlsx` cannot disagree about a width.
+#[wasm_bindgen]
+#[must_use]
+pub fn session_col_width_chars(sheet: usize, col: u32) -> f64 {
+    with_session(|s| {
+        casual_calc_model::units::col_chars_for_display(geometry_of(s, sheet).columns.size(col))
+    })
+    .unwrap_or(0.0)
+}
+
+/// A row's height in points, as Excel's Row Height dialog states it. The
+/// default 20 px row reads 15.
+#[wasm_bindgen]
+#[must_use]
+pub fn session_row_height_points(sheet: usize, row: u32) -> f64 {
+    with_session(|s| {
+        casual_calc_model::units::row_points_for_display(geometry_of(s, sheet).rows.size(row))
+    })
+    .unwrap_or(0.0)
+}
+
+/// Set columns `c0..=c1` to `chars` characters wide (one undo step) — Excel's
+/// Column Width dialog. `chars` must be in Excel's `(0, 255]`; zero is the
+/// caller's to treat as Hide, which is what Excel does with it.
+#[wasm_bindgen]
+pub fn session_set_col_width_chars_range(
+    sheet: usize,
+    c0: u32,
+    c1: u32,
+    chars: f64,
+) -> Result<(), JsError> {
+    use casual_calc_model::units::{MAX_COL_CHARS, col_width_to_twips};
+    if !(chars.is_finite() && chars > 0.0 && chars <= MAX_COL_CHARS) {
+        return Err(JsError::new("column width must be between 0 and 255"));
+    }
+    let width = Some(col_width_to_twips(chars).max(resize_px_to_twips(0)));
+    SESSION.with(|cell| {
+        let mut guard = cell.borrow_mut();
+        let session = guard.as_mut().ok_or_else(|| JsError::new("no session"))?;
+        let ops = (c0..=c1)
+            .map(|col| EditOperation::SetColumnWidth { sheet, col, width })
+            .collect();
+        session.edit(EditOperation::Batch(ops)).map_err(js)
+    })
+}
+
+/// Set rows `r0..=r1` to `points` tall (one undo step) — Excel's Row Height
+/// dialog. `points` must be in Excel's `(0, 409.5]`.
+#[wasm_bindgen]
+pub fn session_set_row_height_points_range(
+    sheet: usize,
+    r0: u32,
+    r1: u32,
+    points: f64,
+) -> Result<(), JsError> {
+    use casual_calc_model::units::{MAX_ROW_POINTS, row_height_to_twips};
+    if !(points.is_finite() && points > 0.0 && points <= MAX_ROW_POINTS) {
+        return Err(JsError::new("row height must be between 0 and 409.5"));
+    }
+    let height = Some(row_height_to_twips(points).max(resize_px_to_twips(0)));
+    SESSION.with(|cell| {
+        let mut guard = cell.borrow_mut();
+        let session = guard.as_mut().ok_or_else(|| JsError::new("no session"))?;
+        let ops = (r0..=r1)
+            .map(|row| EditOperation::SetRowHeight { sheet, row, height })
+            .collect();
+        session.edit(EditOperation::Batch(ops)).map_err(js)
+    })
+}
+
 /// Convert device pixels (96 dpi) to twips, floored at a sensible minimum so a
 /// column/row can never be dragged to zero and vanish.
 pub(crate) fn resize_px_to_twips(px: u32) -> i64 {

@@ -50,10 +50,14 @@ test("ctrl/cmd+A selects the region without clicking the grid first", async ({ p
   expect(after.c1).toBeGreaterThan(0);
 });
 
-/// And cut, the other key that was reported. Asserted through the status line
-/// rather than the OS clipboard, which a headless browser will not hand over.
+/// And cut, the other key that was reported. Asserted through the engine's
+/// armed clipboard — the marching ants' state — rather than the OS clipboard,
+/// which a headless browser will not hand over, or a status echo, which Excel
+/// does not print (`XL-UX-032`).
 test("ctrl/cmd+X cuts without clicking the grid first", async ({ page }) => {
   await boot(page);
   await page.keyboard.press("ControlOrMeta+x");
-  await expect(page.locator("#tb-status")).toHaveText(/^cut/);
+  await expect
+    .poll(() => page.evaluate(() => window.opencalcEditor.wasmApi().session_clip_has()))
+    .toBe(true);
 });

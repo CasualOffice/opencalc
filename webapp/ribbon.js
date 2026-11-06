@@ -15,7 +15,7 @@
 // is clicked, and the popup it opens is re-anchored under the ribbon button.
 
 import { command, run, all as allCommands } from "./commands.js";
-import { TABS, FILE_RAIL, OPTIONS_COMMANDS } from "./ribbon.model.js";
+import { TABS, FILE_RAIL, OPTIONS_COMMANDS, DESCRIPTIONS, QAT_KEYTIPS, TOP_KEYTIPS, menuIds } from "./ribbon.model.js";
 
 const LAYOUT_KEY = "oc.ribbon.layout";
 // Excel's Ribbon Display Options (XL-UX-093): "always" shows the band, "tabs"
@@ -126,6 +126,7 @@ const shortLabel = (s) => s.replace(/\s*\(.*\)\s*$/, "");
  * belongs to (`owns`), which one module can and several could not. */
 
 const shells = new Map();   // root -> shell
+let screenTipSeq = 0;       // a ScreenTip id per shell, unique on the page
 
 /// The host of the embedded shell the pointer last went down in, or `null` for
 /// anywhere else. A keystroke whose target is `<body>` came from nowhere in
@@ -202,8 +203,10 @@ function createShell({ root, host, editor }) {
 
   function popover(owner, build, onClose) {
     closePop();
+    hideScreenTip();
     const el = h("div", "popmenu rb-pop");
     el.setAttribute("role", "menu");
+    screenTipZone(el);   // a folded group's controls keep their tips in here
     build(el);
     layer().appendChild(el);
     place(el, owner);
@@ -215,20 +218,148 @@ function createShell({ root, host, editor }) {
 
   /// A dropdown listing commands by id, each run through the registry. Absent
   /// ids are skipped; a disabled one is shown disabled in place.
-  function commandMenu(owner, ids) {
-    popover(owner, (el) => {
-      for (const id of ids) {
-        const c = command(id);
-        if (!c || (c.hidden && c.hidden())) continue;   // a rule took it away
-        const b = h("button", "rb-pop-item", c.label || id);
-        b.type = "button";
-        b.dataset.cmd = id;
-        b.setAttribute("role", "menuitem");
-        if (c.shortcut) b.appendChild(h("span", "rb-pop-key", c.shortcut));
-        if (c.enabled && !c.enabled()) b.disabled = true;
-        if (c.checked && c.checked()) b.setAttribute("aria-checked", "true");
-        b.addEventListener("click", (e) => { e.stopPropagation(); closePop(); run(id); refocusGrid(); });
-        el.appendChild(b);
+  ///
+  /// An entry is one of (`ribbon.model.js` documents the shapes):
+  ///  - a command id;
+  ///  - `"-"`, a separator — dropped where it would lead, trail or double up,
+  ///    because the items around it may be absent;
+  ///  - `{ label, menu }`, a cascading submenu, as Excel's Highlight Cells
+  ///    Rules › or More Functions › (XL-UX-037/041);
+  ///  - `{ of: id }`, the entries a registered command lists (`entries()`),
+  ///    for a menu whose contents are data — the functions of a category.
+  function commandMenu(owner, items) {
+    const el = popover(owner, (list) => { fillMenu(list, items, () => { if (openPop?.el === el) place(el, owner); }); });
+  }
+
+  /// Whether a menu entry would draw anything: an empty submenu is worse than
+  /// none, as an empty dropdown is (`applyCommandRules()`).
+  function present(it) {
+    if (it === "-") return false;
+    if (typeof it === "string") { const c = command(it); return !!c && !(c.hidden && c.hidden()); }
+    if (it.of) { const c = command(it.of); return !!c && !(c.hidden && c.hidden()); }
+    if (it.menu) return it.menu.some(present);
+    return false;
+  }
+
+  /// The row a menu draws for one runnable thing.
+  function menuItem(label, { shortcut, disabled, checked, title, onRun }) {
+    const b = h("button", "rb-pop-item", label);
+    b.type = "button";
+    b.setAttribute("role", "menuitem");
+    if (title) b.title = title;
+    if (shortcut) b.appendChild(h("span", "rb-pop-key", shortcut));
+    if (disabled) b.disabled = true;
+    if (checked) b.setAttribute("aria-checked", "true");
+    b.addEventListener("click", (e) => { e.stopPropagation(); closePop(); onRun(); refocusGrid(); });
+    return b;
+  }
+
+  /// Draw `items` into `list`. A submenu is appended *inside* the list that
+  /// opened it (it is `position: fixed`, so where it sits in the tree does not
+  /// move it): one click outside, one Escape or one `closePop` then takes the
+  /// whole cascade down with the popover, and the outside-click test
+  /// (`contains`) counts a click in a submenu as inside.
+  ///
+  /// `refit` re-places the list once a `{ of }` list has arrived: it was
+  /// placed while still empty, so a list of 80 functions opened low on a
+  /// phone ran 400px off the bottom of the screen.
+  function fillMenu(list, items, refit = () => {}) {
+    closeSiblingSubs(list);
+    let pendingSep = false;
+    const sep = () => { if (pendingSep && list.lastElementChild) list.appendChild(h("div", "rb-pop-sep")); pendingSep = false; };
+    for (const it of items) {
+      if (it === "-") { pendingSep = true; continue; }
+      if (!present(it)) continue;
+      sep();
+      if (typeof it === "string") {
+        const c = command(it);
+        const b = menuItem(c.label || it, {
+          shortcut: c.shortcut,
+          disabled: c.enabled && !c.enabled(),
+          checked: c.checked && c.checked(),
+          onRun: () => run(it),
+        });
+        b.dataset.cmd = it;
+        list.appendChild(b);
+      } else if (it.of) {
+        const c = command(it.of);
+        const host = h("div", "rb-pop-entries");
+        host.style.display = "contents";
+        list.appendChild(host);
+        // `entries()` may be a promise: a function category reads the
+        // catalogue, which is loaded on first use.
+        Promise.resolve(c.entries ? c.entries() : []).then((entries) => {
+          for (const e of entries || []) {
+            if (e === "-") { host.appendChild(h("div", "rb-pop-sep")); continue; }
+            const b = menuItem(e.label, { title: e.title, onRun: e.run });
+            b.dataset.entry = e.label;
+            host.appendChild(b);
+          }
+          if (!host.childElementCount) host.appendChild(h("div", "rb-pop-empty", "None"));
+          if (list.isConnected) refit();
+        });
+      } else {
+        list.appendChild(subMenuItem(list, it));
+      }
+    }
+  }
+
+  /// A row that opens a cascading submenu to its side: on hover, as in Excel's
+  /// menus, and on click or →, for a touch screen and the keyboard.
+  function subMenuItem(list, spec) {
+    const b = h("button", "rb-pop-item rb-pop-subitem", spec.label);
+    b.type = "button";
+    b.setAttribute("role", "menuitem");
+    b.setAttribute("aria-haspopup", "true");
+    b.setAttribute("aria-expanded", "false");
+    b.dataset.sub = spec.label;
+    b.appendChild(icon("chevron_right", 10));
+    const open = () => {
+      if (b._sub?.isConnected) return;
+      // One submenu open per level: a sibling's goes, with its own children.
+      for (const s of list.querySelectorAll(":scope > .rb-pop-subitem")) {
+        if (s !== b && s._sub) { s._sub.remove(); s._sub = null; s.setAttribute("aria-expanded", "false"); }
+      }
+      const sub = h("div", "popmenu rb-pop rb-pop-sub");
+      sub.setAttribute("role", "menu");
+      sub.setAttribute("aria-label", spec.label);
+      // Beside the row, flipped to the left when there is no room on the
+      // right, and clamped to the window like the editor's own submenus.
+      const position = () => {
+        const r = b.getBoundingClientRect();
+        sub.style.left = "0px"; sub.style.top = "0px";
+        const w = sub.offsetWidth, ht = sub.offsetHeight;
+        let left = r.right + 2;
+        if (left + w > window.innerWidth - 4) left = Math.max(4, r.left - 2 - w);
+        let topPx = r.top - 4;
+        if (topPx + ht > window.innerHeight - 4) topPx = Math.max(4, window.innerHeight - 4 - ht);
+        sub.style.left = `${left}px`;
+        sub.style.top = `${topPx}px`;
+      };
+      fillMenu(sub, spec.menu, position);
+      list.appendChild(sub);
+      b._sub = sub;
+      b.setAttribute("aria-expanded", "true");
+      position();
+    };
+    b.addEventListener("mouseenter", open);
+    b.addEventListener("click", (e) => { e.stopPropagation(); open(); b._sub?.querySelector("button")?.focus({ preventScroll: true }); });
+    b.addEventListener("keydown", (e) => {
+      if (e.key === "ArrowRight") { e.preventDefault(); e.stopPropagation(); open(); b._sub?.querySelector("button")?.focus({ preventScroll: true }); }
+    });
+    return b;
+  }
+
+  /// Hovering another row of a list closes the submenu a sibling opened. A row
+  /// belongs to the nearest `.rb-pop` around it: submenus are appended to the
+  /// top popover, so a row inside one is never mistaken for the parent's.
+  function closeSiblingSubs(list) {
+    list.addEventListener("mouseover", (e) => {
+      const row = e.target.closest?.(".rb-pop-item");
+      if (!row || row.closest(".rb-pop") !== list) return;
+      for (const s of list.querySelectorAll(".rb-pop-subitem")) {
+        if (s === row || s.closest(".rb-pop") !== list || !s._sub) continue;
+        s._sub.remove(); s._sub = null; s.setAttribute("aria-expanded", "false");
       }
     });
   }
@@ -245,20 +376,164 @@ function createShell({ root, host, editor }) {
     if (menu) place(menu, owner);
   }
 
+  /// Hand the keyboard back to the grid after a ribbon command — unless the
+  /// command opened a dialog. Greater Than…, Zoom… and the rest focus their own
+  /// field as Excel does; taking it back put typed digits into a cell edit
+  /// under the modal and arrow keys onto the selection (XL-UX-037/043).
   function refocusGrid() {
+    const active = root.activeElement || document.activeElement;
+    if (active?.closest?.('[aria-modal="true"]')) return;
+    const modal = byId("oc-modal");
+    if (modal && !modal.hidden) return;
     byId("grid")?.focus({ preventScroll: true });
+  }
+
+  /* ── ScreenTips (XL-UX-008) ───────────────────────────────────────────────
+   *
+   * Excel's, not the browser's: rest on a control for half a second and a card
+   * opens under it with the command's name and shortcut in bold and one line
+   * saying what it does. It opens at once when the control is reached from
+   * the keyboard, and at once when the pointer moves on from a control whose
+   * tip is already showing (Excel does not make you wait again while you scan
+   * along a row). Mouse-out, Escape and a click put it away.
+   *
+   * One card per shell, described by `data-tip-title` / `data-tip-desc` on
+   * the control, and no `title` anywhere on the ribbon: the native bubble
+   * would open a second tip on top of this one. While it shows, the control's
+   * `aria-describedby` names it, so a screen reader hears the same line. */
+
+  const SCREENTIP_DELAY = 500;   // Excel's hover delay, in ms
+  const SCREENTIP_WARM = 400;    // how long after one closes the next opens at once
+  const screenTipId = `rb-screentip-${++screenTipSeq}`;
+  let screenTip = null;          // the card, built on first use
+  let screenFor = null;          // the control it describes
+  let screenTimer = 0;
+  let screenWarm = 0;            // until when a new tip skips the delay
+  let screenMuted = null;        // the control just clicked: no tip until the pointer leaves it
+
+  /// Give a control its ScreenTip. `title` is Excel's bold line ("Bold
+  /// (Ctrl+B)"); `desc` the sentence under it.
+  function describe(node, title, desc) {
+    node.removeAttribute("title");
+    node.dataset.tipTitle = title;
+    if (desc) node.dataset.tipDesc = desc;
+  }
+  /// The description a command shows: its own, then the model's table.
+  const descriptionOf = (id) => command(id)?.description || DESCRIPTIONS[id] || "";
+
+  function showScreenTip(node) {
+    clearTimeout(screenTimer);
+    if (!node.isConnected || !node.dataset.tipTitle || node.getClientRects().length === 0) return;
+    // A control whose own menu is open has nothing to explain.
+    // The owner can be the control's frame rather than the control: a combo's
+    // list belongs to its wrap, while focus — and so the tip — lands on the
+    // box inside it, and comes back to the box after every key typed.
+    if (node.closest('[aria-expanded="true"]') || openPop?.owner.contains(node)) return;
+    if (!screenTip) {
+      screenTip = h("div", "rb-screentip");
+      screenTip.id = screenTipId;
+      screenTip.setAttribute("role", "tooltip");
+    }
+    if (screenTip.parentNode !== layer()) layer().appendChild(screenTip);
+    screenTip.textContent = "";
+    screenTip.appendChild(h("div", "rb-screentip-title", node.dataset.tipTitle));
+    if (node.dataset.tipDesc) screenTip.appendChild(h("div", "rb-screentip-desc", node.dataset.tipDesc));
+    screenTip.hidden = false;
+    if (screenFor && screenFor !== node) screenFor.removeAttribute("aria-describedby");
+    screenFor = node;
+    node.setAttribute("aria-describedby", screenTipId);
+    // Under the control, its left edges aligned, kept inside the window.
+    const r = node.getBoundingClientRect();
+    screenTip.style.left = "0px";
+    screenTip.style.top = "0px";
+    const w = screenTip.offsetWidth, ht = screenTip.offsetHeight;
+    const left = Math.max(4, Math.min(r.left, window.innerWidth - 4 - w));
+    const top = r.bottom + 6 + ht <= window.innerHeight - 4 ? r.bottom + 6 : Math.max(4, r.top - 6 - ht);
+    screenTip.style.left = `${left}px`;
+    screenTip.style.top = `${top}px`;
+  }
+
+  function hideScreenTip() {
+    clearTimeout(screenTimer);
+    if (screenTip && !screenTip.hidden) {
+      screenTip.hidden = true;
+      screenWarm = Date.now() + SCREENTIP_WARM;
+    }
+    screenFor?.removeAttribute("aria-describedby");
+    screenFor = null;
+  }
+
+  /// Wire a container's controls to the card. Delegated, so a control moved
+  /// into a folded group's popover keeps its tip.
+  function screenTipZone(zone) {
+    const tipped = (e) => origin(e).closest?.("[data-tip-title]");
+    zone.addEventListener("pointerover", (e) => {
+      const node = tipped(e);
+      if (!node || node === screenFor || node === screenMuted || e.pointerType === "touch") return;
+      clearTimeout(screenTimer);
+      const shown = screenTip && !screenTip.hidden;
+      if (shown || Date.now() < screenWarm) showScreenTip(node);
+      else screenTimer = setTimeout(() => showScreenTip(node), SCREENTIP_DELAY);
+    });
+    zone.addEventListener("pointerout", (e) => {
+      const node = tipped(e);
+      if (!node || (e.relatedTarget && node.contains(e.relatedTarget))) return;
+      if (node === screenMuted) screenMuted = null;
+      hideScreenTip();
+    });
+    zone.addEventListener("pointerdown", (e) => { screenMuted = tipped(e) || null; hideScreenTip(); });
+    zone.addEventListener("focusin", (e) => {
+      const node = tipped(e);
+      // From the keyboard only: a click focuses the button too, and the card
+      // it would open is the one the click just put away.
+      // A text box matches `:focus-visible` on a click as well, so the
+      // control just pressed is excluded by name.
+      if (node && node !== screenMuted && node.matches(":focus-visible")) showScreenTip(node);
+    });
+    zone.addEventListener("focusout", (e) => { if (tipped(e) === screenFor) hideScreenTip(); });
   }
 
   /* ── Controls ───────────────────────────────────────────────────────────── */
 
   const sync = new Set();   // functions that refresh a control's state
 
+  /// Excel's split button (AutoSum): the face runs the command in one click,
+  /// the arrow beside it — under it, on a large button, with the label — drops
+  /// the menu. The face is an ordinary button for the command, so it is what
+  /// `[data-oc-proxy]` finds and it keeps the command's hidden/enabled rules;
+  /// the arrow follows it (XL-UX-041).
+  function splitButton(spec, size) {
+    const wrap = h("div", `rb-split rb-split-${size}`);
+    const face = button({ ...spec, menu: undefined, split: false }, size);
+    const drop = h("button", `rb-btn rb-split-drop`);
+    drop.type = "button";
+    drop.dataset.splitOf = spec.id;
+    // A ScreenTip, not a native title: two tips must never show (XL-UX-008).
+    describe(drop, `${shortLabel(spec.label)} options`, descriptionOf(spec.id));
+    drop.setAttribute("aria-label", `${shortLabel(spec.label)} options`);
+    drop.setAttribute("aria-haspopup", "true");
+    drop.setAttribute("aria-expanded", "false");
+    const label = face.querySelector(".rb-label");
+    if (label) drop.appendChild(label);
+    drop.appendChild(caret());
+    drop.addEventListener("click", (e) => { e.stopPropagation(); commandMenu(drop, spec.menu); });
+    wrap.append(face, drop);
+    sync.add(() => {
+      const hide = face.hidden || !spec.menu.some(present);
+      if (wrap.hidden !== hide) wrap.hidden = hide;
+      if (drop.disabled !== face.disabled) drop.disabled = face.disabled;
+    });
+    return wrap;
+  }
+
   function button(spec, size) {
+    if (spec.split && spec.menu) return splitButton(spec, size);
     const b = h("button", `rb-btn rb-${size}`);
     b.type = "button";
     b.dataset.cmd = spec.id;
     b.dataset.ocProxy = spec.id;   // forwards to this command; never owns it
-    b.title = spec.label;
+    describe(b, spec.label, descriptionOf(spec.id));
+    if (spec.tip) b.dataset.keytip = spec.tip;
     b.setAttribute("aria-label", shortLabel(spec.label));
     b.appendChild(icon(spec.icon, size === "l" ? 24 : 16));
     if (size === "l") b.appendChild(h("span", "rb-label", shortLabel(spec.label)));
@@ -290,7 +565,7 @@ function createShell({ root, host, editor }) {
       // absent or hidden by the rules, the button goes too (an empty menu is
       // worse than none, as `applyCommandRules()` says of the menu bar).
       if (spec.menu) {
-        b.hidden = !spec.menu.some((id) => { const m = command(id); return m && !(m.hidden && m.hidden()); });
+        b.hidden = !spec.menu.some(present);
       }
       const cc = command(spec.id);
       if (!cc) return;
@@ -316,7 +591,10 @@ function createShell({ root, host, editor }) {
     input.type = "text";
     input.spellcheck = false;
     input.setAttribute("aria-label", spec.label);
-    input.title = spec.label;
+    // On the box and on the frame round it, so the caret has the tip too.
+    describe(input, spec.label, descriptionOf(spec.id));
+    describe(wrap, spec.label, descriptionOf(spec.id));
+    if (spec.tip) input.dataset.keytip = spec.tip;
     input.dataset.cmd = spec.id;
     input.dataset.ocProxy = spec.id;
     if (c?.readOnly) input.readOnly = true;
@@ -363,6 +641,10 @@ function createShell({ root, host, editor }) {
       else if (e.key === "ArrowDown") { e.preventDefault(); list(""); }
     });
     sync.add(() => {
+      // A combo the command says is off now (Scale while Width or Height fits
+      // the page) is greyed, as Excel greys it.
+      const off = c.enabled ? !c.enabled() : false;
+      if (input.disabled !== off) { input.disabled = off; btn.disabled = off; }
       if (root.activeElement === input) return;
       input.value = c.current ? c.current() : "";
     });
@@ -374,10 +656,39 @@ function createShell({ root, host, editor }) {
     col.dataset.rows = String(spec.rows.length);
     for (const r of spec.rows) {
       const row = h("div", "rb-row");
-      for (const it of r) row.appendChild(it.kind === "combo" ? combo(it) : button(it, "s"));
+      for (const it of r) {
+        row.appendChild(it.kind === "combo" ? combo(it) : it.kind === "check" ? check(it)
+          : it.kind === "heading" ? h("div", "rb-heading", it.label) : button(it, "s"));
+      }
       col.appendChild(row);
     }
     return col;
+  }
+
+  /// Excel's ribbon check box (Page Layout ▸ Sheet Options' View and Print,
+  /// View ▸ Show). A labelled toggle, because a bare icon cannot say which of
+  /// two "Gridlines" it is. The state is the command's own `checked()`.
+  function check(spec) {
+    const b = h("button", "rb-check");
+    b.type = "button";
+    b.dataset.cmd = spec.id;
+    b.dataset.ocProxy = spec.id;
+    b.setAttribute("role", "checkbox");
+    b.setAttribute("aria-checked", "false");
+    describe(b, spec.title || spec.label, descriptionOf(spec.id));
+    b.append(h("span", "rb-check-box"), h("span", "rb-check-label", spec.label));
+    b.addEventListener("click", (e) => { e.stopPropagation(); closePop(); run(spec.id); queueSync(); });
+    if (!command(spec.id)) b.hidden = true;
+    sync.add(() => {
+      const cc = command(spec.id);
+      if (!cc) { b.hidden = true; return; }
+      b.hidden = cc.hidden ? cc.hidden() : false;
+      const off = cc.enabled ? !cc.enabled() : false;
+      if (b.disabled !== off) b.disabled = off;
+      const on = cc.checked && cc.checked() ? "true" : "false";
+      if (b.getAttribute("aria-checked") !== on) b.setAttribute("aria-checked", on);
+    });
+    return b;
   }
 
   function group(spec) {
@@ -393,8 +704,10 @@ function createShell({ root, host, editor }) {
     if (spec.launcher && command(spec.launcher)) {
       const l = h("button", "rb-launch");
       l.type = "button";
-      l.title = `${spec.label} settings`;
-      l.setAttribute("aria-label", `${spec.label} settings`);
+      // Excel's launcher ScreenTip names the group's settings, Title Case.
+      l.setAttribute("aria-label", `${spec.label} Settings`);
+      describe(l, `${spec.label} Settings`, `Open ${command(spec.launcher).label || "the dialog"} for more ${spec.label.toLowerCase()} options.`);
+      if (spec.launcherTip) { l.dataset.keytip = spec.launcherTip; l.dataset.keytipRef = `launcher:${spec.label}`; }
       l.appendChild(icon("arrow_down", 10));
       l.addEventListener("click", (e) => { e.stopPropagation(); closePop(); run(spec.launcher); });
       g.appendChild(l);
@@ -402,7 +715,8 @@ function createShell({ root, host, editor }) {
     // The folded form: one large button that drops the group's own contents.
     const folded = h("button", "rb-btn rb-l rb-folded");
     folded.type = "button";
-    folded.title = spec.label;
+    describe(folded, spec.label, `Show the commands in the ${spec.label} group.`);
+    if (spec.tip) { folded.dataset.keytip = spec.tip; folded.dataset.keytipRef = `group:${spec.label}`; }
     folded.setAttribute("aria-label", spec.label);
     folded.setAttribute("aria-haspopup", "true");
     folded.setAttribute("aria-expanded", "false");
@@ -421,6 +735,16 @@ function createShell({ root, host, editor }) {
   /* ── Build ──────────────────────────────────────────────────────────────── */
 
   let el = null;          // the ribbon
+  // KeyTips (XL-UX-009): which level is badged, and the letters typed into a
+  // multi-letter KeyTip so far. `null` when none are up.
+  let keyTipLevel = null; // { level: "top" | "tab" | "pop", typed: "" }
+  let keyTipLayer = null; // the badges, drawn over everything
+  function closeKeyTips() {
+    if (!keyTipLevel) return;
+    keyTipLevel = null;
+    el?.classList.remove("rb-keytips");
+    keyTipLayer?.replaceChildren();
+  }
   let backstage = null;
   let titleBits = [];     // nodes added to the header, removed by stop()
   let cleanups = [];
@@ -465,16 +789,18 @@ function createShell({ root, host, editor }) {
     const saveRoute = () => SAVE_ROUTES.find((id) => { const c = command(id); return c && !(c.hidden && c.hidden()); });
     const save = h("button", "rb-btn rb-s");
     save.type = "button";
-    save.title = "Save (Ctrl+S)";
+    describe(save, "Save (Ctrl+S)", descriptionOf("file.save"));
+    save.dataset.keytip = QAT_KEYTIPS[0];
     save.setAttribute("aria-label", "Save");
     save.dataset.ocProxy = "file.save";
     save.appendChild(icon("save", 16));
     save.addEventListener("click", (e) => { e.stopPropagation(); const id = saveRoute(); if (id) run(id); refocusGrid(); });
     sync.add(() => { save.hidden = !saveRoute(); });
     qat.appendChild(save);
-    for (const [id, ic, label] of [["edit.undo", "arrow_undo", "Undo (Ctrl+Z)"], ["edit.redo", "arrow_redo", "Redo (Ctrl+Y)"]]) {
-      qat.appendChild(button({ id, icon: ic, label }, "s"));
+    for (const [i, [id, ic, label]] of [["edit.undo", "arrow_undo", "Undo (Ctrl+Z)"], ["edit.redo", "arrow_redo", "Redo (Ctrl+Y)"]].entries()) {
+      qat.appendChild(button({ id, icon: ic, label, tip: QAT_KEYTIPS[i + 1] }, "s"));
     }
+    screenTipZone(qat);
     (logo ? logo.after(qat) : header.prepend(qat));
     titleBits.push(qat);
 
@@ -484,6 +810,8 @@ function createShell({ root, host, editor }) {
     input.type = "search";
     input.placeholder = "Search (Alt+Q)";
     input.setAttribute("aria-label", "Search commands");
+    input.dataset.keytip = TOP_KEYTIPS.search;
+    input.dataset.keytipRef = "search";
     search.append(icon("search", 16), input);
     const results = (q) => {
       const f = q.trim().toLowerCase();
@@ -521,7 +849,7 @@ function createShell({ root, host, editor }) {
       // Stopped here: on a Mac Alt+Q is "œ", which the grid would otherwise
       // take as the first character of a cell edit and steal focus back.
       if (!owns(e)) return;
-      if (e.altKey && (e.key === "q" || e.key === "Q" || e.code === "KeyQ")) { e.preventDefault(); e.stopPropagation(); input.focus(); }
+      if (e.altKey && (e.key === "q" || e.key === "Q" || e.code === "KeyQ")) { e.preventDefault(); e.stopPropagation(); closeKeyTips(); input.focus(); }
     };
     document.addEventListener("keydown", altQ, true);
     cleanups.push(() => document.removeEventListener("keydown", altQ, true));
@@ -533,6 +861,8 @@ function createShell({ root, host, editor }) {
       const share = h("button", "rb-share");
       share.type = "button";
       share.dataset.ocProxy = "file.share";
+      share.dataset.keytip = TOP_KEYTIPS.share;
+      share.dataset.keytipRef = "share";
       share.append(icon("share", 16), h("span", null, "Share"));
       share.addEventListener("click", () => run("file.share"));
       right.prepend(share);
@@ -765,7 +1095,10 @@ function createShell({ root, host, editor }) {
     const out = [];
     const walk = (it) => {
       if (it.kind === "rows") { it.rows.forEach((r) => r.forEach(walk)); return; }
-      if (it.kind === "combo") return;
+      if (it.kind === "combo" || it.kind === "heading") return;
+      // A check box is a toggle with no icon of its own; the bar draws it as
+      // one and names it in full ("View Gridlines", not "View").
+      if (it.kind === "check") { out.push({ ...it, icon: it.icon || "checkbox_checked", label: it.title || it.label }); return; }
       out.push(it);
     };
     for (const g of tab.groups) g.items.forEach(walk);
@@ -807,8 +1140,7 @@ function createShell({ root, host, editor }) {
       list.textContent = "";
       for (const it of flatten(tab)) {
         const c = command(it.id);
-        const live = it.menu ? it.menu.some((id) => { const m = command(id); return m && !(m.hidden && m.hidden()); })
-          : c && !(c.hidden && c.hidden());
+        const live = it.menu ? it.menu.some(present) : c && !(c.hidden && c.hidden());
         if (!live) continue;
         const b = h("button", "rb-mbtn");
         b.type = "button";
@@ -866,11 +1198,14 @@ function createShell({ root, host, editor }) {
     sync.clear();
 
     el = h("div", "oc-ribbon");
+    screenTipZone(el);
     const strip = h("div", "rb-tabs");
     const file = h("button", "rb-file", "File");
     file.type = "button";
     file.setAttribute("aria-haspopup", "dialog");
     file.addEventListener("click", () => openBackstage());
+    file.dataset.keytip = "F";
+    file.dataset.keytipRef = "file";
     const tablist = h("div", "rb-tablist");
     tablist.setAttribute("role", "tablist");
     tablist.setAttribute("aria-label", "Ribbon");
@@ -885,6 +1220,8 @@ function createShell({ root, host, editor }) {
       t.setAttribute("role", "tab");
       t.setAttribute("aria-controls", `rb-panel-${tab.id}`);
       t.dataset.key = tab.key;
+      t.dataset.keytip = tab.key;
+      t.dataset.keytipRef = `tab:${tab.id}`;
       t.addEventListener("click", () => select(tab.id));
       tablist.appendChild(t);
       const panel = h("div", "rb-panel");
@@ -932,7 +1269,7 @@ function createShell({ root, host, editor }) {
     // ── Ribbon Display Options (XL-UX-093) ──
     // The chevron is Excel's: it collapses the ribbon, it does not change its
     // layout. Its menu carries both, as Excel's does.
-    layout.title = "Ribbon Display Options (Ctrl+F1 to show or hide the ribbon)";
+    describe(layout, "Ribbon Display Options", "Choose how the ribbon is displayed. Ctrl+F1 shows or hides it.");
     layout.setAttribute("aria-label", "Ribbon Display Options");
     layout.setAttribute("aria-haspopup", "true");
     const tabsOnly = () => el.classList.contains("rb-tabs-only");
@@ -1015,21 +1352,166 @@ function createShell({ root, host, editor }) {
       next.click();
     });
 
-    // KeyTips: Alt shows a letter on File and every tab; the letter opens it.
-    let tips = false;
-    const showTips = (on) => {
-      tips = on;
-      el.classList.toggle("rb-keytips", on);
-      for (const t of [file, ...tablist.querySelectorAll(".rb-tab")]) {
-        let tip = t.querySelector(".rb-tip");
-        if (on && !tip) { tip = h("span", "rb-tip", t === file ? "F" : t.dataset.key); t.appendChild(tip); }
-        else if (!on && tip) tip.remove();
+    // ── KeyTips, every level (XL-UX-009) ──
+    //
+    // Excel's path: Alt badges File, the tabs, Search and the Quick Access
+    // Toolbar's digits; a tab's letter switches to it and badges every control
+    // on it; the control's letters run it (Alt H B: Borders, Alt H F C: Font
+    // Color). A KeyTip of two letters keeps only the badges that start with
+    // the first, and waits. Escape steps back one level: the typed letters,
+    // then the tab's level, then the KeyTips themselves. A folded group's
+    // KeyTip opens it and badges what is inside.
+    //
+    // While they are up every key is theirs, taken in the capture phase: a
+    // letter that reached the grid would start a cell edit with it, which is
+    // what the first level used to do with every tab letter it was given.
+    let altAlone = false;   // a lone Alt is down: its release raises the KeyTips
+    keyTipLayer = h("div", "rb-keytip-layer");
+    el.appendChild(keyTipLayer);
+    const rendered = (n) => n.getClientRects().length > 0 && !n.closest("[hidden]");
+    /// The controls the current level badges, as `[node, KeyTip]`.
+    const keyTipTargets = () => {
+      if (!keyTipLevel) return [];
+      let nodes;
+      if (keyTipLevel.level === "top") {
+        const header = $(".app-header");
+        nodes = [file, ...tablist.querySelectorAll(".rb-tab"), ...(header ? header.querySelectorAll(".rb-qat [data-keytip], .rb-search [data-keytip], .rb-share[data-keytip]") : [])];
+      } else if (keyTipLevel.level === "pop") {
+        nodes = openPop ? openPop.el.querySelectorAll("[data-keytip]") : [];
+      } else {
+        nodes = el.querySelector(".rb-panel:not([hidden])")?.querySelectorAll("[data-keytip]") || [];
+      }
+      return [...nodes].filter(rendered).map((n) => [n, n.dataset.keytip]);
+    };
+    const drawKeyTips = () => {
+      keyTipLayer.replaceChildren();
+      if (!keyTipLevel) return;
+      const typed = keyTipLevel.typed;
+      for (const [n, key] of keyTipTargets()) {
+        if (!key.startsWith(typed)) continue;
+        // On the layer, not inside the control: a badge inside a button is
+        // clipped by the band's overflow and becomes part of its text.
+        const r = n.getBoundingClientRect();
+        const badge = h("span", "rb-tip", key);
+        badge.dataset.target = n.dataset.keytipRef || n.dataset.cmd || n.dataset.ocProxy || "";
+        if (n.disabled) badge.classList.add("is-off");
+        badge.style.left = `${Math.round(r.left + r.width / 2)}px`;
+        badge.style.top = `${Math.round(r.bottom - 8)}px`;
+        keyTipLayer.appendChild(badge);
       }
     };
+    const showKeyTips = (level) => {
+      hideScreenTip();
+      keyTipLevel = { level, typed: "" };
+      el.classList.add("rb-keytips");
+      drawKeyTips();
+    };
+    const enterTab = (id) => {
+      el._select(id);
+      if (tabsOnly()) peek(true);
+      showKeyTips("tab");
+    };
+    /// Run what a KeyTip names. A folded group opens and its contents are the
+    /// next level; anything else ends the KeyTips, as in Excel.
+    const activateKeyTip = (n) => {
+      const ref = n.dataset.keytipRef || "";
+      if (n.disabled) return;   // shown, as Excel shows it, but it does nothing
+      if (ref === "file") { closeKeyTips(); openBackstage(); return; }
+      if (ref.startsWith("tab:")) { enterTab(ref.slice(4)); return; }
+      if (ref.startsWith("group:")) { n.click(); showKeyTips("pop"); return; }
+      closeKeyTips();
+      if (n.tagName === "INPUT") {
+        // A box (Font, Font Size, Number Format, Search) takes the focus; one
+        // that is a list and nothing else drops it, as Alt H N does in Excel.
+        n.focus();
+        if (n.readOnly) n.click();
+        return;
+      }
+      n.click();
+    };
+    /// The KeyTip letter a key types: its character, or with Alt held on a
+    /// layout where Alt changes the character, the physical key's.
+    const keyTipChar = (e) => {
+      if (e.key && e.key.length === 1 && /[a-z0-9]/i.test(e.key)) return e.key.toUpperCase();
+      const m = /^(?:Key([A-Z])|Digit([0-9]))$/.exec(e.code || "");
+      return m ? (m[1] || m[2]) : null;
+    };
+    const keyTipBack = () => {
+      if (!keyTipLevel) return;
+      if (keyTipLevel.typed) { keyTipLevel.typed = ""; drawKeyTips(); return; }
+      if (keyTipLevel.level === "pop") { closePop(); showKeyTips("tab"); return; }
+      if (keyTipLevel.level === "tab") { peek(false); showKeyTips("top"); return; }
+      closeKeyTips();
+    };
+    // macOS Option+letter types a character; there the chord stays the text's.
+    const macLike = /Mac|iPhone|iPad/.test(navigator.platform || "");
+    // A dialog's keys are the dialog's: Alt+letter there is its own business.
+    const inDialog = (e) => [...$$('[aria-modal="true"]')].some(rendered) || !!origin(e).closest?.('[role="dialog"], [aria-modal]');
+    const onKeyTipKey = (e) => {
+      // Any key with Alt down makes it a modifier, not a lone Alt. Here, in the
+      // capture phase, because a handler further on may stop the key: Alt+Q's
+      // does, and its Alt's release then raised the KeyTips over the search
+      // box, which took the query's letters.
+      if (e.key !== "Alt") altAlone = false;
+      if (!owns(e)) return;
+      // Any key puts a ScreenTip away, as in Excel; one reached by Tab opens
+      // again on the control the key moves to.
+      hideScreenTip();
+      if (!keyTipLevel) {
+        // Alt held with a tab's letter is the same path in one stroke (Alt+H).
+        if (!e.altKey || e.ctrlKey || e.metaKey || e.shiftKey || macLike || inDialog(e)) return;
+        const k = keyTipChar(e);
+        const tab = k && TABS.find((t) => t.key === k);
+        if (k === "F") { e.preventDefault(); e.stopPropagation(); altAlone = false; openBackstage(); return; }
+        if (!tab || host.classList.contains("oc-phone")) return;
+        e.preventDefault();
+        e.stopPropagation();
+        altAlone = false;
+        enterTab(tab.id);
+        return;
+      }
+      if (e.key === "Alt" || e.key === "Shift") return;   // a lone Alt's release closes them (onKeyUp)
+      altAlone = false;
+      if (e.ctrlKey || e.metaKey) { closeKeyTips(); return; }
+      if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); keyTipBack(); return; }
+      const k = keyTipChar(e);
+      // Any other key (an arrow, Tab, Enter) leaves the KeyTips and does its
+      // own work.
+      if (!k) { closeKeyTips(); return; }
+      e.preventDefault();
+      e.stopPropagation();
+      const typed = keyTipLevel.typed + k;
+      const hits = keyTipTargets().filter(([, key]) => key.startsWith(typed));
+      if (!hits.length) return;   // a letter that names nothing is ignored, as in Excel
+      const exact = hits.find(([, key]) => key === typed);
+      if (exact) { activateKeyTip(exact[0]); return; }
+      keyTipLevel.typed = typed;
+      drawKeyTips();
+    };
+    document.addEventListener("keydown", onKeyTipKey, true);
+    cleanups.push(() => document.removeEventListener("keydown", onKeyTipKey, true));
+    // A click anywhere, a resize, or the window losing focus ends them.
+    const endKeyTips = () => closeKeyTips();
+    document.addEventListener("pointerdown", endKeyTips, true);
+    window.addEventListener("resize", endKeyTips);
+    window.addEventListener("blur", endKeyTips);
+    cleanups.push(() => {
+      document.removeEventListener("pointerdown", endKeyTips, true);
+      window.removeEventListener("resize", endKeyTips);
+      window.removeEventListener("blur", endKeyTips);
+    });
     // Shown on the *release* of a lone Alt, as Excel does, so Alt as a modifier
-    // (Alt+=, Alt+Enter, Alt+Q) never raises them or loses its keystroke.
-    let altAlone = false;
-    const onKeyUp = (e) => { if (e.key === "Alt" && altAlone && owns(e)) { altAlone = false; showTips(!tips); } };
+    // (Alt+=, Alt+Enter, Alt+Q) never raises them or loses its keystroke. A
+    // second lone Alt puts them away.
+    const onKeyUp = (e) => {
+      if (e.key === "Alt" && altAlone && owns(e)) {
+        altAlone = false;
+        // A dialog's Alt is the dialog's: the ribbon's letters over it would
+        // take every key its fields are typed with.
+        if (!keyTipLevel && inDialog(e)) return;
+        if (keyTipLevel) closeKeyTips(); else showKeyTips("top");
+      }
+    };
     document.addEventListener("keyup", onKeyUp);
     cleanups.push(() => document.removeEventListener("keyup", onKeyUp));
     const onKey = (e) => {
@@ -1045,7 +1527,6 @@ function createShell({ root, host, editor }) {
         return;
       }
       if (e.key === "Escape") {
-        if (tips) { showTips(false); return; }
         if (openPop) { e.preventDefault(); closePop(); refocusGrid(); return; }
         if (el?.classList.contains("rb-peek")) { e.preventDefault(); el.classList.remove("rb-peek"); refocusGrid(); return; }
         // The editor's own context, sheet-tab and Name Manager menus open as
@@ -1059,14 +1540,6 @@ function createShell({ root, host, editor }) {
         closeBackstage();
         return;
       }
-      if (!tips) return;
-      if (e.ctrlKey || e.metaKey || e.altKey) { showTips(false); return; }
-      const k = e.key.toUpperCase();
-      e.preventDefault();
-      showTips(false);
-      if (k === "F") { openBackstage(); return; }
-      const tab = TABS.find((t) => t.key === k);
-      if (tab) { select(tab.id); el.querySelector(`#rb-tab-${tab.id}`)?.focus(); }
     };
     document.addEventListener("keydown", onKey);
     cleanups.push(() => document.removeEventListener("keydown", onKey));
@@ -1154,6 +1627,11 @@ function createShell({ root, host, editor }) {
 
   function stop() {
     closePop();
+    closeKeyTips();
+    keyTipLayer = null;
+    hideScreenTip();
+    screenTip?.remove();
+    screenTip = null;
     for (const f of cleanups.splice(0)) { try { f(); } catch { /* best effort */ } }
     for (const n of titleBits.splice(0)) n.remove();
     mobile?.remove();
@@ -1197,8 +1675,9 @@ export function missingCommandsForTest() {
   const out = [];
   const walk = (it) => {
     if (it.kind === "rows") { it.rows.forEach((r) => r.forEach(walk)); return; }
+    if (it.kind === "heading") return;
     if (!it.menu && !command(it.id)) out.push(it.id);
-    for (const m of it.menu || []) if (!command(m)) out.push(m);
+    menuIds(it.menu || [], (m) => { if (!command(m)) out.push(m); });
   };
   for (const t of TABS) for (const g of t.groups) { g.items.forEach(walk); if (g.launcher && !command(g.launcher)) out.push(g.launcher); }
   for (const r of FILE_RAIL) for (const sec of r.sections || []) for (const it of sec.items) if (!command(it.id)) out.push(it.id);

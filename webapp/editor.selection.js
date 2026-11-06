@@ -31,6 +31,8 @@ import {
   colName,
   colWAt,
   colXAt,
+  completeCellValue,
+  completedValue,
   commandRules,
   confirmModal,
   messageBox,
@@ -104,20 +106,31 @@ import {
   releaseBlock,
   caretAnchor,
 } from "./editor.core.js";
+import { statusPref } from "./editor.statusbar.js";
 
-export function updateStats() {
-  if (!wasm) return;
+/// The selection's statistics, or `null` for a single cell — which Excel's bar
+/// says nothing about. Shared by the bar and the values column of Customize
+/// Status Bar (`XL-UX-030`), so the two cannot disagree.
+export function selectionSummary() {
+  if (!wasm) return null;
   const rs = allRanges();
-  const single = rs.length === 1;
   const s = rs[0];
-  if (single && s.r0 === s.r1 && s.c0 === s.c1) { selStats.textContent = ""; return; }
+  if (rs.length === 1 && s.r0 === s.r1 && s.c0 === s.c1) return null;
   // Fold the per-range stats together (disjoint Ctrl+click ranges; overlaps,
   // which Excel also double-counts, are rare).
-  let sum = 0, numeric = 0, count = 0;
+  let sum = 0, numeric = 0, count = 0, min = Infinity, max = -Infinity;
   for (const r of rs) {
     const st = JSON.parse(wasm.session_range_stats(state.sheet, r.r0, r.c0, r.r1, r.c1));
     sum += st.sum || 0; numeric += st.numeric || 0; count += st.count || 0;
+    if (st.numeric) { min = Math.min(min, st.min); max = Math.max(max, st.max); }
   }
+  return { sum, numeric, count, min, max };
+}
+
+export function updateStats() {
+  const st = selectionSummary();
+  if (!st) { if (selStats) selStats.textContent = ""; return; }
+  const { sum, numeric, count, min, max } = st;
   // **Excel's default three, in Excel's order and Excel's wording**
   // (`UX-CHR-04`, `docs/88` §5).
   //
@@ -130,14 +143,22 @@ export function updateStats() {
   // adds the rest by right-clicking the bar, which is the follow-on `docs/88`
   // §5 names and `UX-MOB-07`'s narrow-bar question will meet.
   //
-  // Min and Max were folded here and are not any more: `session_range_stats`
-  // returns them in the same call, so the right-click menu `docs/88` §5 names
-  // can read them when it is built, and a fold whose result nothing draws is
-  // dead arithmetic in a function that runs on every drag-select frame.
+  // Min and Max come back in the same `session_range_stats` call, so folding
+  // them costs nothing extra now that the right-click menu `docs/88` §5 named
+  // exists and can ask for them.
+  //
+  // Which of them, since `XL-UX-030`, is the person's: Customize Status Bar
+  // ticks any of Excel's six, and they are drawn in the bar's order whatever
+  // order they were ticked in. "Min" and "Max" are the bar's own abbreviations
+  // of the menu's Minimum and Maximum [unverified: from Excel's bar, not the
+  // support page].
   const parts = [];
-  if (numeric > 0) parts.push(`Average: <b>${fmtNum(sum / numeric)}</b>`);
-  parts.push(`Count: <b>${count}</b>`);
-  if (numeric > 0) parts.push(`Sum: <b>${fmtNum(sum)}</b>`);
+  if (numeric > 0 && statusPref("average")) parts.push(`Average: <b>${fmtNum(sum / numeric)}</b>`);
+  if (statusPref("count")) parts.push(`Count: <b>${count}</b>`);
+  if (statusPref("numericalCount")) parts.push(`Numerical Count: <b>${numeric}</b>`);
+  if (numeric > 0 && statusPref("minimum")) parts.push(`Min: <b>${fmtNum(min)}</b>`);
+  if (numeric > 0 && statusPref("maximum")) parts.push(`Max: <b>${fmtNum(max)}</b>`);
+  if (numeric > 0 && statusPref("sum")) parts.push(`Sum: <b>${fmtNum(sum)}</b>`);
   // oc-safe-html: every part is a number this function computed, joined
   // with non-breaking spaces. No workbook text reaches here.
   // oc-safe-html: see the note above.
@@ -572,6 +593,9 @@ export function addRowRange(r) {
 // It routes through `commit` first so the entry meets the same validation rule
 // and formula guard as any other typed value. A refused entry fills nothing.
 export function commitToSelection(value, validated = false) {
+  // Before `commit` sees it: every cell of the fill takes the AutoComplete
+  // entry's own case, not only the active one (XL-UX-017).
+  value = completedValue(value);
   const r = effectiveRange();
   // Captured before committing, because commit moves the selection and the
   // block being filled is the one that was selected when the user pressed.
@@ -648,6 +672,9 @@ export function commit(value, advance, source = "user", opts = {}) {
   // A message box is asking about this entry: the blur its button causes in
   // the formula bar must not commit (or ask) a second time.
   if (messageBoxUp()) return false;
+  // An AutoComplete entry is stored as the column spells it (XL-UX-017).
+  // Typed entry only: a host's or a script's write is never re-cased.
+  if (source === "user") value = completedValue(value);
   value = closeFormula(value);
   // Cancellable before it is written, and told who is writing. A host without
   // either cannot enforce its own permissions, and cannot tell its own
@@ -736,7 +763,9 @@ export function commit(value, advance, source = "user", opts = {}) {
     // A number or date too wide for a default-width column widens it, in the
     // same undo step (`XL-UX-036`).
     widenForEntry(mark, [{ r0: state.sel.row, c0: state.sel.col, r1: state.sel.row, c1: state.sel.col }]);
-    status.textContent = "ok";
+    // Nothing is written on success (`XL-UX-032`). This said "ok" after every
+    // commit, which is a debug echo: Excel's bar goes back to "Ready", and the
+    // value in the cell is the confirmation.
   } catch (e) {
     // A refused edit keeps the editor open on its own cell. Advancing would
     // move the cursor away from the thing that just failed and leave the
@@ -1723,7 +1752,7 @@ export function goToLinkLocation(text) {
   return true;
 }
 
-export function autoSum() {
+export function autoSum(fn = "SUM") {
   const r = effectiveRange();
   // A multi-cell selection means "total each of these columns below itself",
   // which is Excel's behaviour and the reason it is worth selecting a block.
@@ -1731,7 +1760,7 @@ export function autoSum() {
     tryEdit(() => {
       for (let c = r.c0; c <= r.c1; c++) {
         wasm.session_set_cell(state.sheet, r.r1 + 1, c,
-          `=SUM(${A1(r.r0, c)}:${A1(r.r1, c)})`);
+          `=${fn}(${A1(r.r0, c)}:${A1(r.r1, c)})`);
       }
     });
     select(r.r1 + 1, r.c0);
@@ -1766,13 +1795,13 @@ export function autoSum() {
   const up = runUp();
   if (up) {
     tryEdit(() => wasm.session_set_cell(state.sheet, row, col,
-      `=SUM(${A1(up[0], col)}:${A1(up[1], col)})`));
+      `=${fn}(${A1(up[0], col)}:${A1(up[1], col)})`));
     return;
   }
   const left = runLeft();
   if (left) {
     tryEdit(() => wasm.session_set_cell(state.sheet, row, col,
-      `=SUM(${A1(row, left[0])}:${A1(row, left[1])})`));
+      `=${fn}(${A1(row, left[0])}:${A1(row, left[1])})`));
     return;
   }
   // Nothing to total: leave the cell alone and say so, rather than writing
@@ -1884,6 +1913,10 @@ export function positionInline() {
 
 export function startInline(initial, caretAtEnd = false) {
   beginEdit(inline, initial, caretAtEnd);
+  // The opening keystroke is written by the grid, not typed into the editor,
+  // so no `input` event runs AutoComplete for it — and one letter is often
+  // enough to pick out an entry (XL-UX-017).
+  if (initial !== undefined && initial !== "") completeCellValue(inline);
 }
 
 export function endInline() {

@@ -216,7 +216,11 @@ test("Alt shows KeyTips, and a letter opens its tab or the File page", async ({ 
   // release Alt, then the letter. The old menu-bar mnemonics opened menus in
   // a bar that is parked off-screen, which only moved focus out of sight.
   await boot(page);
-  const tap = async (k) => { await page.keyboard.down("Alt"); await page.keyboard.up("Alt"); await page.keyboard.press(k); };
+  // A tab's letter leaves that tab's own KeyTips up (XL-UX-009), and a lone
+  // Alt then would put them away rather than start again, as in Excel: so
+  // each tap first steps out with Escape, one level at a time.
+  const leave = async () => { for (let i = 0; i < 3 && (await page.locator(".oc-ribbon .rb-tip").count()); i++) await page.keyboard.press("Escape"); };
+  const tap = async (k) => { await leave(); await page.keyboard.down("Alt"); await page.keyboard.up("Alt"); await page.keyboard.press(k); };
 
   await page.keyboard.down("Alt");
   await page.keyboard.up("Alt");

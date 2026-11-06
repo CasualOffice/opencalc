@@ -683,6 +683,11 @@ fn content_types(
     s
 }
 
+/// The run properties Excel gives a note's text: Tahoma 9 in the comment-text
+/// colour (system index 81).
+const NOTE_RPR: &str =
+    "<sz val=\"9\"/><color indexed=\"81\"/><rFont val=\"Tahoma\"/><family val=\"2\"/>";
+
 /// The `xl/comments{n}.xml` part: authors + one `<comment>` per note.
 fn comments_xml(sheet: &Sheet) -> String {
     let mut authors: Vec<String> = Vec::new();
@@ -709,10 +714,29 @@ fn comments_xml(sheet: &Sheet) -> String {
             .clone()
             .unwrap_or_else(|| DEFAULT_AUTHOR.to_owned());
         let aid = authors.iter().position(|x| *x == a).unwrap_or(0);
+        // A note opens with its author in bold on a line of its own, because
+        // that is where Excel looks for the name: it shows the note's text,
+        // and draws no heading of its own from `authorId`. Without the line a
+        // note made here opens nameless in Excel. The run properties are the
+        // ones Excel writes (Tahoma 9, the comment-text colour), and the import
+        // lifts the line back out, so the model's text stays the body
+        // (XL-UX-039). A threaded comment's legacy copy is Excel's placeholder,
+        // not a note, and an anonymous note has no name to put there.
+        let body = if !c.is_threaded() && !a.is_empty() {
+            format!(
+                "<r><rPr><b/>{NOTE_RPR}</rPr><t>{}:</t></r><r><rPr>{NOTE_RPR}</rPr><t xml:space=\"preserve\">\n{}</t></r>",
+                escape_text(&a),
+                escape_text(&c.text)
+            )
+        } else {
+            format!(
+                "<r><t xml:space=\"preserve\">{}</t></r>",
+                escape_text(&c.text)
+            )
+        };
         s.push_str(&format!(
-            "<comment ref=\"{}\" authorId=\"{aid}\"><text><r><t xml:space=\"preserve\">{}</t></r></text></comment>",
+            "<comment ref=\"{}\" authorId=\"{aid}\"><text>{body}</text></comment>",
             cell_a1(c.at.row, c.at.col),
-            escape_text(&c.text)
         ));
     }
     s.push_str("</commentList></comments>");
@@ -2468,17 +2492,6 @@ pub(crate) fn range_a1(range: &CellRange) -> String {
     )
 }
 
-/// Reverse of the importer's column-width conversion: twips → Excel character
-/// width. Chosen so `read(write(x)) == x` for import-derived widths.
-fn twips_to_col_chars(twips: i64) -> f64 {
-    ((twips as f64 / 15.0) - 5.0) / 7.0
-}
-
-/// Reverse of the importer's row-height conversion: twips → points.
-fn twips_to_row_points(twips: i64) -> f64 {
-    twips as f64 / 20.0
-}
-
 /// Format a float for an XML attribute using the shortest round-trippable form.
 fn fmt_f64(value: f64) -> String {
     format!("{value}")
@@ -2616,13 +2629,13 @@ fn worksheet_xml(
         if let Some(w) = sheet.columns.default {
             s.push_str(&format!(
                 " defaultColWidth=\"{}\"",
-                fmt_f64(twips_to_col_chars(w))
+                fmt_f64(casual_calc_model::units::twips_to_col_chars(w))
             ));
         }
         if let Some(h) = sheet.rows.default {
             s.push_str(&format!(
                 " defaultRowHeight=\"{}\"",
-                fmt_f64(twips_to_row_points(h))
+                fmt_f64(casual_calc_model::units::twips_to_row_points(h))
             ));
         }
         // The rest travel verbatim; the two defaults above were interpreted out
@@ -2669,7 +2682,7 @@ fn worksheet_xml(
                 .map(|w| {
                     format!(
                         " width=\"{}\" customWidth=\"1\"",
-                        fmt_f64(twips_to_col_chars(w))
+                        fmt_f64(casual_calc_model::units::twips_to_col_chars(w))
                     )
                 })
                 .unwrap_or_default();
@@ -2715,7 +2728,7 @@ fn worksheet_xml(
             .map(|&t| {
                 format!(
                     " ht=\"{}\" customHeight=\"1\"",
-                    fmt_f64(twips_to_row_points(t))
+                    fmt_f64(casual_calc_model::units::twips_to_row_points(t))
                 )
             })
             .unwrap_or_default();

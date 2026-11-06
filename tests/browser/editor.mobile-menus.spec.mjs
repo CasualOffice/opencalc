@@ -85,6 +85,10 @@ async function tapRow(page, cdp, id) {
 }
 
 test("every phone submenu opens inside the screen", async ({ page }) => {
+  // One tap, one measure and one Escape per submenu, and the ribbon has 37 of
+  // them since Excel's Function Library, Page Setup and Comments arrived
+  // (XL-UX-040–042): the default minute is no longer enough to visit them all.
+  test.setTimeout(240_000);
   await boot(page);
   const cdp = await page.context().newCDPSession(page);
   const tabs = await page.locator(".rb-mchip[data-tab]").allTextContents();

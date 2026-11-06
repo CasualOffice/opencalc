@@ -12,6 +12,7 @@ use quick_xml::events::{BytesStart, Event};
 
 use crate::error::ImportError;
 use crate::theme::{ThemePalette, indexed_color};
+use casual_calc_model::units::{col_width_to_twips, row_height_to_twips};
 
 const MAX_XML_ELEMENTS: usize = 50_000_000;
 const MAX_XML_DEPTH: usize = 256;
@@ -307,6 +308,10 @@ pub fn parse_comments(xml: &[u8]) -> Result<Vec<RawComment>, ImportError> {
     let mut in_comment = false;
     let mut cur_text = String::new();
     let mut in_t = false;
+    // The comment's rich-text runs, `(bold, text)`, kept only to recognise
+    // Excel's author line (see `strip_author_line`).
+    let mut runs: Vec<(bool, String)> = Vec::new();
+    let mut in_run = false;
 
     loop {
         match reader.read_event_into(&mut buf).map_err(xml_err)? {
@@ -324,23 +329,40 @@ pub fn parse_comments(xml: &[u8]) -> Result<Vec<RawComment>, ImportError> {
                             .and_then(|s| s.parse().ok())
                             .unwrap_or(0);
                         cur_text.clear();
+                        runs.clear();
                     }
+                    b"r" if in_comment => {
+                        in_run = true;
+                        runs.push((false, String::new()));
+                    }
+                    b"b" if in_run => mark_run_bold(&e, &mut runs)?,
                     b"t" if in_comment => in_t = true,
                     _ => {}
                 }
+            }
+            Event::Empty(e) if in_run && e.local_name().as_ref() == b"b" => {
+                mark_run_bold(&e, &mut runs)?;
             }
             Event::Text(e) => {
                 if in_author {
                     cur_author.push_str(&text_of(&e)?);
                 } else if in_t {
-                    cur_text.push_str(&text_of(&e)?);
+                    let t = text_of(&e)?;
+                    if in_run && let Some(run) = runs.last_mut() {
+                        run.1.push_str(&t);
+                    }
+                    cur_text.push_str(&t);
                 }
             }
             Event::GeneralRef(e) => {
                 if in_author {
                     cur_author.push_str(&ref_of(&e)?);
                 } else if in_t {
-                    cur_text.push_str(&ref_of(&e)?);
+                    let t = ref_of(&e)?;
+                    if in_run && let Some(run) = runs.last_mut() {
+                        run.1.push_str(&t);
+                    }
+                    cur_text.push_str(&t);
                 }
             }
             Event::End(e) => {
@@ -351,13 +373,15 @@ pub fn parse_comments(xml: &[u8]) -> Result<Vec<RawComment>, ImportError> {
                         authors.push(cur_author.clone());
                     }
                     b"t" => in_t = false,
+                    b"r" => in_run = false,
                     b"comment" => {
                         in_comment = false;
                         // An empty author is the schema's way of saying
                         // "anonymous"; carrying it as `Some("")` would make an
                         // unsigned note look signed by nobody in particular.
                         let author = authors.get(cur_aid).filter(|a| !a.is_empty()).cloned();
-                        out.push((cur_ref.clone(), author, cur_text.clone()));
+                        let text = strip_author_line(&cur_text, &runs, author.as_deref());
+                        out.push((cur_ref.clone(), author, text));
                     }
                     _ => {}
                 }
@@ -368,6 +392,47 @@ pub fn parse_comments(xml: &[u8]) -> Result<Vec<RawComment>, ImportError> {
         buf.clear();
     }
     Ok(out)
+}
+
+/// Record a `<b>` inside a comment run's `<rPr>` on the run it belongs to.
+fn mark_run_bold(e: &BytesStart<'_>, runs: &mut [(bool, String)]) -> Result<(), ImportError> {
+    // `<b val="0"/>` is explicitly not bold, as in `read_rpr_child`.
+    let on = read_attr(e, b"val")?.is_none_or(|v| v == "1" || v.eq_ignore_ascii_case("true"));
+    if let Some(run) = runs.last_mut() {
+        run.0 = on;
+    }
+    Ok(())
+}
+
+/// A note's text without the author line Excel writes at its top (XL-UX-039).
+///
+/// Excel stores a note's heading *in its text*: a bold run `"Name:"`, then a
+/// run that starts on a new line with the body. The name is also the note's
+/// `authorId`, which is what the model keeps and the editor heads the note
+/// with — so carrying the line in the text as well showed the name twice.
+///
+/// Lifted out only when it is exactly Excel's line: bold, the note's own
+/// author followed by a colon, the whole first run, and the body starting on
+/// the next line. Anything else — a bold "Warning:", a heading edited to
+/// another name, a plain "Grace: …" — is the writer's text and stays. So does
+/// a note that is *only* the heading: an empty text would be read as no note.
+fn strip_author_line(text: &str, runs: &[(bool, String)], author: Option<&str>) -> String {
+    let (Some(author), Some((true, first))) = (author, runs.first()) else {
+        return text.to_owned();
+    };
+    if runs.len() < 2 || *first != format!("{author}:") {
+        return text.to_owned();
+    }
+    let Some(rest) = text.strip_prefix(first.as_str()) else {
+        return text.to_owned();
+    };
+    match rest
+        .strip_prefix("\r\n")
+        .or_else(|| rest.strip_prefix('\n'))
+    {
+        Some(body) if !body.is_empty() => body.to_owned(),
+        _ => text.to_owned(),
+    }
 }
 
 /// One `<threadedComment>` element, before threads are assembled.
@@ -669,57 +734,6 @@ pub struct RawCf {
 /// Ceiling on how many columns one `<col>` span may expand into per-line
 /// overrides; a wider custom span is treated as the sheet's default width.
 const MAX_COL_SPAN: u32 = 4096;
-
-/// Ceiling on an imported column width, in twips: Excel refuses a column wider
-/// than 255 characters, which is `255 * 7 + 5 = 1790` px, or 26_850 twips.
-const MAX_COL_TWIPS: i64 = 26_850;
-
-/// Ceiling on an imported row height, in twips: Excel refuses a row taller than
-/// 409.5 points, or 8_190 twips.
-const MAX_ROW_TWIPS: i64 = 8_190;
-
-/// Convert an Excel column width (character units) to twips, matching the
-/// pixel rounding Excel uses so the value survives a write→read round-trip.
-///
-/// `chars` is an arbitrary `xsd:double` off the wire — `<col width>` and
-/// `<sheetFormatPr defaultColWidth>` are attacker-controlled — and nothing used
-/// to bound it. `width="1e300"` saturated the float→int cast to `i64::MAX` and
-/// the `* 15` panicked with "attempt to multiply with overflow" under the dev
-/// profile, so a crafted `<cols>` aborted the host process instead of returning
-/// `Err`; the shipped release profile wrapped instead, and `width="-1e300"`
-/// handed layout a *negative* column width. Clamp before the multiply, not
-/// after — after is already too late.
-pub(crate) fn col_width_to_twips(chars: f64) -> i64 {
-    let px = (chars * 7.0 + 5.0).round();
-    // Two layers, and they answer different questions. `read_f64_attr` refuses
-    // a non-finite attribute at the boundary, so nothing from a file arrives
-    // here as `NaN`; this function takes a plain `f64` from anywhere in the
-    // crate, so it still declines to trust one. `NaN` is named rather than left
-    // to fall through a comparison it silently fails — it is neither `<` nor
-    // `>`, so relying on that would send it to the ceiling below.
-    if !px.is_finite() || px <= 0.0 {
-        return 0;
-    }
-    let max_px = (MAX_COL_TWIPS / 15) as f64;
-    if px > max_px {
-        return MAX_COL_TWIPS;
-    }
-    (px as i64) * 15
-}
-
-/// Convert an Excel row height (points) to twips. Bounded for the same reason
-/// as [`col_width_to_twips`]: `ht="1e308"` saturated the cast and yielded
-/// `i64::MAX` twips of row.
-fn row_height_to_twips(points: f64) -> i64 {
-    let twips = (points * 20.0).round();
-    if !twips.is_finite() || twips <= 0.0 {
-        return 0;
-    }
-    if twips > MAX_ROW_TWIPS as f64 {
-        return MAX_ROW_TWIPS;
-    }
-    twips as i64
-}
 
 /// Build a [`RawCf`] from a `<cfRule>` element. Shared by the Start and Empty
 /// dispatches: a rule with `<formula>` children opens an element, while
