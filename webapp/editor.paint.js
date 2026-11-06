@@ -260,6 +260,12 @@ export function cellFont(it) {
 
 const CJK_RE = /[ᄀ-ᇿ⺀-⿟⿰-〿぀-鿿ꥠ-꥿가-퟿豈-﫿︐-︟︰-﹏＀-￯]|[\u{1f200}-\u{1f2ff}\u{20000}-\u{3134f}]/u;
 const CJK_BASE = new URL("./fonts/cjk/", import.meta.url);
+/// Where the desktop app finds the slices it does not bundle (`TAURI-021`):
+/// the public site's copy, served with `Access-Control-Allow-Origin: *`. Asked
+/// only inside the desktop shell — a self-hosted web deployment that chose not
+/// to ship the fonts must never start calling our site.
+const CJK_REMOTE = "https://calc.casualoffice.org/fonts/cjk/";
+let cjkBase = CJK_BASE;
 let cjkManifest = null;
 let cjkReady = null;
 let cjkFacesAdded = false;
@@ -288,15 +294,25 @@ function cjkRegion(fn, text) {
 /// the slices — the editor then draws CJK with the viewer's own fonts, as it
 /// did before, and an export names what it could not draw.
 export function loadCjkManifest() {
-  cjkManifest ??= fetch(new URL("manifest.json", CJK_BASE))
+  const from = (base) => fetch(new URL("manifest.json", base))
     .then((r) => (r.ok ? r.json() : null))
     .catch(() => null);
+  const desktop = typeof window !== "undefined" && (window.__TAURI__ || window.__opencalcNative);
+  cjkManifest ??= from(CJK_BASE).then((m) => {
+    if (m || !desktop) return m;
+    // The desktop bundle leaves the slices out (59 MB); fetch them from the
+    // site when online. Offline, this is null and the OS's own CJK fonts draw.
+    return from(CJK_REMOTE).then((r) => {
+      if (r) cjkBase = new URL(CJK_REMOTE);
+      return r;
+    });
+  });
   return cjkManifest;
 }
 
 function sliceUrl(manifest, key, index) {
   const sha = manifest.variants[key]?.sha256_16?.[index] ?? "";
-  return new URL(`${key}/${String(index).padStart(3, "0")}.woff2${sha ? `?h=${sha}` : ""}`, CJK_BASE);
+  return new URL(`${key}/${String(index).padStart(3, "0")}.woff2${sha ? `?h=${sha}` : ""}`, cjkBase);
 }
 
 /// Register every slice as a `FontFace` (no downloads), once. Resolves when

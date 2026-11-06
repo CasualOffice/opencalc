@@ -61,3 +61,6 @@ node_modules/
 # Python bytecode from the repository tools and serve.py; committed by
 # accident twice (2026-11-05).
 __pycache__/
+
+# The desktop bundle's staged web assets (tools/stage-desktop-web.py).
+desktop/web-dist/
