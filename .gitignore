@@ -62,5 +62,5 @@ node_modules/
 # accident twice (2026-11-05).
 __pycache__/
 
-# The desktop bundle's staged web assets (tools/stage-desktop-web.py).
+# The desktop bundle's staged web assets (desktop/build.rs, TAURI-021).
 desktop/web-dist/

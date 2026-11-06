@@ -4,8 +4,7 @@
   "version": "0.0.3",
   "identifier": "org.casualoffice.opencalc",
   "build": {
-    "frontendDist": "web-dist",
-    "beforeBuildCommand": "python3 tools/stage-desktop-web.py"
+    "frontendDist": "web-dist"
   },
   "app": {
     "withGlobalTauri": true,

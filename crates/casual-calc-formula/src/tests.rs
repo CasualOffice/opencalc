@@ -961,7 +961,10 @@ fn a_spill_as_a_callee_round_trips() {
         let printed = expr.to_string();
         let again = crate::parse(&printed)
             .unwrap_or_else(|e| panic!("{text:?} printed {printed:?}, which does not parse: {e}"));
-        assert_eq!(again, expr, "{text:?} printed {printed:?}, which reads back differently");
+        assert_eq!(
+            again, expr,
+            "{text:?} printed {printed:?}, which reads back differently"
+        );
     }
     // Still the operator where it is not a callee.
     assert_eq!(crate::parse("SUM(A1#)").unwrap().to_string(), "SUM(A1#)");
