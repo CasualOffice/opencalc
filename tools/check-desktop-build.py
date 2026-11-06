@@ -251,7 +251,17 @@ def check_config(problems):
         # `beforeBuildCommand` copying an allowlist into it). What is not
         # legitimate is a path that exists only on the machine that made it, so
         # the exemption is exactly "the build produces it".
-        if not resolved.is_dir() and not config.get("build", {}).get("beforeBuildCommand"):
+        # `desktop/build.rs` counts as the build producing it: it runs before
+        # every compile — `cargo test` and `clippy` included, which a
+        # `beforeBuildCommand` does not (`TAURI-021`).
+        staged_by_build_script = (CONFIG.parent / "build.rs").is_file() and (
+            f'"{dist}"' in (CONFIG.parent / "build.rs").read_text(encoding="utf-8")
+        )
+        if (
+            not resolved.is_dir()
+            and not config.get("build", {}).get("beforeBuildCommand")
+            and not staged_by_build_script
+        ):
             problems.append(
                 f"{CONFIG}: `build.frontendDist` is `{dist}`, which is not a "
                 f"directory in a fresh checkout ({resolved}), and no "

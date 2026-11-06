@@ -1598,7 +1598,17 @@ pub struct History {
     pushes: u64,
     /// The value of `pushes` after the last undo, redo or clear.
     sealed: u64,
+    /// The most recent [`Self::undo_mark`], whose entries the bound does not
+    /// trim until [`Self::group_since`] folds them (`CI-039`). A gesture longer
+    /// than the bound — a macro writing 101 cells against a depth of 100 — had
+    /// its oldest entries dropped before it could be grouped, and then could
+    /// not be undone as one step. A `Cell` because taking a mark is a read.
+    held_from: std::cell::Cell<Option<u64>>,
 }
+
+/// The most entries a held mark keeps beyond the bound: the macro operation
+/// limit, so a mark nobody groups still cannot grow the stack without end.
+const HOLD_CEILING: usize = 100_000;
 
 impl History {
     /// A new, empty history with no bound on how far back undo reaches.
@@ -1629,6 +1639,21 @@ impl History {
         }
     }
 
+    /// Drop the oldest entries past the bound, sparing those pushed since a
+    /// held mark (up to [`HOLD_CEILING`]) so the gesture can still be grouped.
+    fn trim(&mut self) {
+        let Some(depth) = self.depth else { return };
+        let held = match self.held_from.get() {
+            Some(mark) if mark >= self.sealed => usize::try_from(self.pushes.saturating_sub(mark))
+                .unwrap_or(usize::MAX)
+                .min(HOLD_CEILING),
+            _ => 0,
+        };
+        let keep = depth.saturating_add(held);
+        let excess = self.undo.len().saturating_sub(keep);
+        self.undo.drain(..excess);
+    }
+
     /// Apply `op`, recording its inverse for undo and clearing the redo stack.
     ///
     /// An operation that **changed nothing** is applied and then forgotten: no
@@ -1654,10 +1679,7 @@ impl History {
         // Oldest first: the entry least likely to be wanted is the one furthest
         // back. A depth of zero means no undo at all, which is a legitimate
         // thing for a batch host to ask for.
-        if let Some(depth) = self.depth {
-            let excess = self.undo.len().saturating_sub(depth);
-            self.undo.drain(..excess);
-        }
+        self.trim();
         self.redo.clear();
         Ok(())
     }
@@ -1683,6 +1705,7 @@ impl History {
     /// gesture have been applied.
     #[must_use]
     pub fn undo_mark(&self) -> u64 {
+        self.held_from.set(Some(self.pushes));
         self.pushes
     }
 
@@ -1697,6 +1720,15 @@ impl History {
     /// one of the entries, because the top of the stack is then not the edits
     /// the caller means.
     pub fn group_since(&mut self, mark: u64) -> bool {
+        // Whatever the answer, the mark is spent: release what it held and
+        // bring the stack back to its bound.
+        let grouped = self.fold_since(mark);
+        self.held_from.set(None);
+        self.trim();
+        grouped
+    }
+
+    fn fold_since(&mut self, mark: u64) -> bool {
         if self.sealed > mark || mark > self.pushes {
             return false;
         }

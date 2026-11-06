@@ -1,7 +1,8 @@
 //! The build script, and the one thing it refuses to let through.
 //!
-//! `frontendDist` is `../webapp` and `tauri::generate_context!` embeds that
-//! directory into the binary. The webview's assets therefore travel with the
+//! `frontendDist` is `web-dist`, staged from `../webapp` below without the CJK
+//! font slices, and `tauri::generate_context!` embeds that directory into the
+//! binary. The webview's assets therefore travel with the
 //! app for free — except `webapp/pkg/`, which is `wasm-pack` output, is
 //! git-ignored, and is missing from every fresh checkout. Nothing errors when
 //! it is absent: the build is green, the bundle is produced, the window opens,
@@ -57,5 +58,57 @@ fn main() {
         );
     }
 
+    stage_web_dist(dist, Path::new(STAGED));
     tauri_build::build();
+}
+
+/// Where `frontendDist` points: `webapp/` without the CJK font slices.
+const STAGED: &str = "web-dist";
+
+/// Copied out of `webapp/`, never embedded (`TAURI-021`). The Noto CJK slices
+/// are 59 MB and made every installer ~58 MB larger; the webview draws CJK with
+/// the OS's own fonts, and the desktop fetches the slices from the site for PDF
+/// embedding when online (`webapp/editor.paint.js`, `loadCjkManifest`).
+const LEFT_OUT: &[&str] = &["fonts/cjk", "__pycache__"];
+
+/// Stage `webapp/` into `web-dist/` here, in the build script, because
+/// `tauri::generate_context!` reads `frontendDist` at **compile time** — for
+/// `cargo test` and `cargo clippy` as much as for `cargo tauri build`. A
+/// `beforeBuildCommand` runs only under `cargo tauri build`, which is how the
+/// first version of this passed a local bundle build and failed CI's desktop
+/// tests.
+fn stage_web_dist(src: &Path, dest: &Path) {
+    println!("cargo:rerun-if-changed=../webapp");
+    if dest.exists() {
+        std::fs::remove_dir_all(dest).expect("clear desktop/web-dist");
+    }
+    copy_tree(src, dest, Path::new(""));
+}
+
+fn copy_tree(src: &Path, dest: &Path, rel: &Path) {
+    let here = src.join(rel);
+    let Ok(entries) = std::fs::read_dir(&here) else {
+        return;
+    };
+    let mut entries: Vec<_> = entries.flatten().collect();
+    entries.sort_by_key(|e| e.file_name());
+    for entry in entries {
+        let rel = rel.join(entry.file_name());
+        let shown = rel.to_string_lossy().replace('\\', "/");
+        if LEFT_OUT.iter().any(|x| {
+            shown == *x || shown.starts_with(&format!("{x}/")) || shown.split('/').any(|p| p == *x)
+        }) {
+            continue;
+        }
+        let path = entry.path();
+        if path.is_dir() {
+            copy_tree(src, dest, &rel);
+        } else {
+            let target = dest.join(&rel);
+            if let Some(parent) = target.parent() {
+                std::fs::create_dir_all(parent).expect("create a web-dist directory");
+            }
+            std::fs::copy(&path, &target).expect("copy a web asset into web-dist");
+        }
+    }
 }
