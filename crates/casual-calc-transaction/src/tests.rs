@@ -5151,6 +5151,50 @@ fn group_since_folds_a_gesture_into_one_undo_step() {
     );
 }
 
+/// A gesture longer than the undo bound is still one step (`CI-039`). The
+/// editor keeps 100 entries (`PIPE-02`); a macro writing 101 cells pushed 101,
+/// the bound trimmed the oldest before the run could be grouped, and the run
+/// failed with "could not be made one undo step". Entries since a mark are held
+/// until the mark is grouped; the bound applies to what is left.
+#[test]
+fn a_gesture_longer_than_the_undo_bound_is_still_one_step() {
+    let mut wb = workbook();
+    let mut history = History::with_depth(Some(3));
+    let set = |row: u32, v: f64| Operation::SetValue {
+        sheet: 0,
+        at: CellRef::new(row, 0),
+        value: CellValue::Number(v),
+    };
+    history.apply(&mut wb, set(0, 1.0)).unwrap();
+    let mark = history.undo_mark();
+    for row in 1..=5 {
+        history.apply(&mut wb, set(row, 9.0)).unwrap();
+    }
+    assert!(
+        history.group_since(mark),
+        "five pushes past a bound of three"
+    );
+    history.undo(&mut wb).unwrap();
+    for row in 1..=5 {
+        assert_eq!(
+            value_at(&wb, CellRef::new(row, 0)),
+            CellValue::Empty,
+            "row {row}"
+        );
+    }
+    assert_eq!(value_at(&wb, CellRef::new(0, 0)), CellValue::Number(1.0));
+
+    // The bound is still the bound once nothing is held.
+    for row in 10..20 {
+        history.apply(&mut wb, set(row, 1.0)).unwrap();
+    }
+    let mut undone = 0;
+    while history.undo(&mut wb).unwrap().is_some() {
+        undone += 1;
+    }
+    assert_eq!(undone, 3);
+}
+
 // ---------------------------------------------------------------------------
 // Every formula naming a removed sheet (`PIPE-01`).
 // ---------------------------------------------------------------------------

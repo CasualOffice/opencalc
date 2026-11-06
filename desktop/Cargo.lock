@@ -321,7 +321,7 @@ dependencies = [
 
 [[package]]
 name = "casual-calc-desktop"
-version = "0.0.3"
+version = "0.0.4"
 dependencies = [
  "casual-calc-layout",
  "casual-calc-model",
@@ -339,6 +339,7 @@ name = "casual-calc-eval"
 version = "0.0.0"
 dependencies = [
  "casual-calc-formula",
+ "casual-calc-io",
  "casual-calc-layout",
  "casual-calc-model",
 ]

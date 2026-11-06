@@ -35,6 +35,17 @@ const GAP_LIMIT_MS = 50;
 /// the worker path leaves only bounded slices.
 const REFERENCE_MS = { open: 320, save: 277 };
 
+/// A gap over the limit counts against the editor only when the main thread
+/// was busy for it. CI saw a save with `maxGap` 83 ms against a 74 ms limit and
+/// `longestTask` **0** — no task of 50 ms or more ran on the page at all, so the
+/// frame clock stalled for the runner's reasons (GC, compositor, a neighbour),
+/// not the editor's (`CI-038`). The freeze this guards against is one long task
+/// (~300 ms on the old page-thread path), which the Long Tasks API reports, so
+/// requiring one keeps the test of the design and drops the test of the runner.
+function frozeTheEditor(m, limit) {
+  return m.maxGap >= limit && m.longestTask >= 50;
+}
+
 function gapLimit(kind, pageMs) {
   return Math.round(GAP_LIMIT_MS * Math.max(1, pageMs / REFERENCE_MS[kind]));
 }
@@ -149,7 +160,7 @@ test("a large open keeps the editor drawing frames", async ({ page }) => {
     const w = ed.wasmApi();
     return [w.session_cell_input(0, 0, 0), w.session_cell_input(0, rows - 1, 3), w.session_format()];
   }, ROWS)).toEqual(["0", `=A${ROWS}*2`, "xlsx"]);
-  expect(m.maxGap, `the editor drew no frame for ${m.maxGap} ms while the file opened`).toBeLessThan(limit);
+  expect(frozeTheEditor(m, limit), `the editor drew no frame for ${m.maxGap} ms while the file opened, with a ${m.longestTask} ms task on its thread`).toBe(false);
 });
 
 test("a large save keeps the editor drawing frames", async ({ page }) => {
@@ -172,7 +183,7 @@ test("a large save keeps the editor drawing frames", async ({ page }) => {
   console.log(`save of ${ROWS * 5} cells: ${JSON.stringify(m)}; page-thread save ${pageMs} ms; limit ${limit} ms`);
 
   expect(fs.statSync(await download.path()).size).toBeGreaterThan(100_000);
-  expect(m.maxGap, `the editor drew no frame for ${m.maxGap} ms while the file saved`).toBeLessThan(limit);
+  expect(frozeTheEditor(m, limit), `the editor drew no frame for ${m.maxGap} ms while the file saved, with a ${m.longestTask} ms task on its thread`).toBe(false);
 });
 
 test("Excel's progress: the status bar says what is opening, with a progress bar", async ({ page }) => {
